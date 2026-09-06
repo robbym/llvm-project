@@ -55,6 +55,8 @@
 ///
 //===----------------------------------------------------------------------===//
 #include "llvm/CodeGen/MachineOutliner.h"
+#include "llvm/CodeGen/MachineOutlinerPass.h"
+#include "llvm/CodeGen/MachineFunctionAnalysis.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/Statistic.h"
@@ -426,6 +428,22 @@ struct MachineOutliner : public ModulePass {
   MachineModuleInfo *MMI = nullptr;
   const TargetMachine *TM = nullptr;
 
+  /// New-PM: the FunctionAnalysisManager that owns the MachineFunctions when
+  /// this runs under CodeGenPassBuilder. Null under the legacy pass manager
+  /// (there the MFs live in MMI's map instead).
+  FunctionAnalysisManager *FAM = nullptr;
+
+  /// Return F's MachineFunction if one already exists, else null. Under the new
+  /// pass manager the MFs are cached in the FunctionAnalysisManager, not MMI.
+  MachineFunction *getExistingMF(const Function &F) const {
+    if (FAM) {
+      auto *R = FAM->getCachedResult<MachineFunctionAnalysis>(
+          const_cast<Function &>(F));
+      return R ? &R->getMF() : nullptr;
+    }
+    return MMI->getMachineFunction(F);
+  }
+
   /// Set to true if the outliner should consider functions with
   /// linkonceodr linkage.
   bool OutlineFromLinkOnceODRs = false;
@@ -578,6 +596,44 @@ ModulePass *llvm::createMachineOutlinerPass(RunOutliner RunOutlinerMode) {
   MachineOutliner *OL = new MachineOutliner();
   OL->RunOutlinerMode = RunOutlinerMode;
   return OL;
+}
+
+PreservedAnalyses MachineOutlinerPass::run(Module &M,
+                                           ModuleAnalysisManager &MAM) {
+  if (M.empty())
+    return PreservedAnalyses::all();
+
+  MachineModuleInfo &MMI = MAM.getResult<MachineModuleAnalysis>(M).getMMI();
+
+  MachineOutliner OL;
+  OL.RunOutlinerMode = Mode;
+  OL.MMI = &MMI;
+  OL.TM = &MMI.getTarget();
+  OL.FAM = &MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+  // OutlinerMode stays CGDataMode::None (no global/CGData outlining in new-PM
+  // codegen); initializeOutlinerMode() would query legacy analyses that a
+  // stack-constructed pass has no resolver for.
+
+  unsigned OutlinedFunctionNum = 0;
+  OL.OutlineRepeatedNum = 0;
+  if (!OL.doOutline(M, OutlinedFunctionNum))
+    return PreservedAnalyses::all();
+
+  for (unsigned I = 0; I < OutlinerReruns; ++I) {
+    OutlinedFunctionNum = 0;
+    OL.OutlineRepeatedNum++;
+    if (!OL.doOutline(M, OutlinedFunctionNum))
+      break;
+  }
+
+  if (OL.OutlinerMode == CGDataMode::Write)
+    OL.emitOutlinedHashTree(M);
+
+  // The MachineFunctions this modified (and the newly created outlined one) are
+  // themselves the MachineFunctionAnalysis results held in the FAM. The legacy
+  // pass declares setPreservesAll for the same reason: invalidating here would
+  // drop every MF and asm printing would recreate empty shells. Preserve all.
+  return PreservedAnalyses::all();
 }
 
 INITIALIZE_PASS(MachineOutliner, DEBUG_TYPE, "Machine Function Outliner", false,
@@ -928,8 +984,9 @@ MachineFunction *MachineOutliner::createOutlinedFunction(
   IRBuilder<> Builder(EntryBB);
   Builder.CreateRetVoid();
 
-  MachineModuleInfo &MMI = getAnalysis<MachineModuleInfoWrapperPass>().getMMI();
-  MachineFunction &MF = MMI.getOrCreateMachineFunction(*F);
+  MachineFunction &MF =
+      FAM ? FAM->getResult<MachineFunctionAnalysis>(*F).getMF()
+          : this->MMI->getOrCreateMachineFunction(*F);
   MF.setIsOutlined(true);
   MachineBasicBlock &MBB = *MF.CreateMachineBasicBlock();
 
@@ -1253,7 +1310,7 @@ void MachineOutliner::populateMapper(InstructionMapper &Mapper, Module &M) {
 
     // There's something in F. Check if it has a MachineFunction associated with
     // it.
-    MachineFunction *MF = MMI->getMachineFunction(F);
+    MachineFunction *MF = getExistingMF(F);
 
     // If it doesn't, then there's nothing to outline from. Move to the next
     // Function.
@@ -1325,7 +1382,7 @@ void MachineOutliner::initSizeRemarkInfo(
   // Collect instruction counts for every function. We'll use this to emit
   // per-function size remarks later.
   for (const Function &F : M) {
-    MachineFunction *MF = MMI->getMachineFunction(F);
+    MachineFunction *MF = getExistingMF(F);
 
     // We only care about MI counts here. If there's no MachineFunction at this
     // point, then there won't be after the outliner runs, so let's move on.
@@ -1341,7 +1398,7 @@ void MachineOutliner::emitInstrCountChangedRemark(
   // Note that we won't miss anything by doing this, because the outliner never
   // deletes functions.
   for (const Function &F : M) {
-    MachineFunction *MF = MMI->getMachineFunction(F);
+    MachineFunction *MF = getExistingMF(F);
 
     // The outliner never deletes functions. If we don't have a MF here, then we
     // didn't have one prior to outlining either.

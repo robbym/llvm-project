@@ -267,6 +267,10 @@ protected:
   /// to true.
   bool AlignmentIsInBytes = true;
 
+  /// True if the assembler has no `.p2align` and alignment must be emitted as
+  /// `.align N` with N in bytes (Microchip's pic30 binutils). Trellis dsPIC spike.
+  bool UseByteAlignDirective = false;
+
   /// If non-zero, this is used to fill the executable space created as the
   /// result of a alignment directive.  Defaults to 0
   unsigned TextAlignFillValue = 0;
@@ -547,6 +551,7 @@ public:
   }
 
   unsigned getMinInstAlignment() const { return MinInstAlignment; }
+  bool useByteAlignDirective() const { return UseByteAlignDirective; }
   bool getDollarIsPC() const { return DollarIsPC; }
   const char *getSeparatorString() const { return SeparatorString; }
 

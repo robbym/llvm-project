@@ -206,6 +206,16 @@ static void initializeLibCalls(TargetLibraryInfoImpl &TLI, const Triple &T,
     TLI.setAvailableWithName(LibFunc_fputs, "fputs$UNIX2003");
   }
 
+  // dsPIC (trellis L1f-f, session 87): there is no runtime -- no memset, memcpy or memmove
+  // to call. Without this LoopIdiomRecognize turned `*d++ = 0` into a memset that the
+  // backend then expanded as a BYTE loop, twice the iterations of the word loop written.
+  if (T.getArch() == Triple::dspic) {
+    TLI.setUnavailable(LibFunc_memset);
+    TLI.setUnavailable(LibFunc_memcpy);
+    TLI.setUnavailable(LibFunc_memmove);
+    TLI.setUnavailable(LibFunc_memset_pattern16);
+  }
+
   // iprintf and friends are only available on XCore, TCE, and Emscripten.
   if (T.getArch() != Triple::xcore && T.getArch() != Triple::tce &&
       T.getOS() != Triple::Emscripten) {

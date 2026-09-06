@@ -485,6 +485,7 @@ def TargetLoongArch : TargetArch<["loongarch32", "loongarch64"]>;
 def TargetMips32 : TargetArch<["mips", "mipsel"]>;
 def TargetAnyMips : TargetArch<["mips", "mipsel", "mips64", "mips64el"]>;
 def TargetMSP430 : TargetArch<["msp430"]>;
+def TargetDSPIC : TargetArch<["dspic"]>;
 def TargetM68k : TargetArch<["m68k"]>;
 def TargetRISCV : TargetArch<["riscv32", "riscv64", "riscv32be", "riscv64be"]>;
 def TargetX86 : TargetArch<["x86"]>;
@@ -2206,6 +2207,15 @@ def MSABI : DeclOrTypeAttr {
   let Documentation = [MSABIDocs];
 }
 
+// trellis L1f-b: the dsPIC `interrupt` attribute, carried to the backend as the fn
+// attribute "interrupt" (CodeGen/Targets/DSPIC.cpp); its lowering is L1d's.
+def DSPICInterrupt : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"interrupt">];
+  let Subjects = SubjectList<[Function]>;
+  let ParseKind = "Interrupt";
+  let Documentation = [Undocumented];
+}
+
 def MSP430Interrupt : InheritableAttr, TargetSpecificAttr<TargetMSP430> {
   // NOTE: If you add any additional spellings, ARMInterrupt's, M68kInterrupt's,
   // MipsInterrupt's and AnyX86Interrupt's spellings must match.
@@ -2249,18 +2259,37 @@ def MicroMips : InheritableAttr, TargetSpecificAttr<TargetMips32> {
 }
 def : MutualExclusions<[Mips16, MicroMips]>;
 
+// trellis session 90: the dsPIC `far`/`near` placement attributes. On DATA, far leaves the
+// near 4 KB (no 13-bit file-register forms; plain `.data`/`.bss`); on a function they are the
+// call reach (carried as the "far" fn-attribute, not yet lowered). They share Mips's spellings,
+// so both families dispatch on the triple through ONE parsed kind (the `interrupt` precedent):
+// the spelling lists must match, and this record, first by name, supplies the subject list.
+def DSPICFar : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"long_call">, GCC<"far">];
+  let Subjects = SubjectList<[Function, Var]>;
+  let ParseKind = "LongCall";
+  let Documentation = [Undocumented];
+}
+def DSPICNear : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"short_call">, GCC<"near">];
+  let Subjects = SubjectList<[Function, Var]>;
+  let ParseKind = "ShortCall";
+  let Documentation = [Undocumented];
+}
+def : MutualExclusions<[DSPICFar, DSPICNear]>;
+
 def MipsLongCall : InheritableAttr, TargetSpecificAttr<TargetAnyMips> {
   let Spellings = [GCC<"long_call">, GCC<"far">];
   let Subjects = SubjectList<[Function]>;
+  let ParseKind = "LongCall";   // trellis session 90: shared with DSPICFar, see there
   let Documentation = [MipsLongCallStyleDocs];
-  let SimpleHandler = 1;
 }
 
 def MipsShortCall : InheritableAttr, TargetSpecificAttr<TargetAnyMips> {
   let Spellings = [GCC<"short_call">, GCC<"near">];
   let Subjects = SubjectList<[Function]>;
+  let ParseKind = "ShortCall";  // trellis session 90: shared with DSPICNear, see there
   let Documentation = [MipsShortCallStyleDocs];
-  let SimpleHandler = 1;
 }
 def : MutualExclusions<[MipsLongCall, MipsShortCall]>;
 

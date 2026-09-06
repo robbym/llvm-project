@@ -1620,6 +1620,12 @@ void MCAsmStreamer::emitAlignmentDirective(uint64_t ByteAlignment,
     return;
   }
 
+  if (MAI->useByteAlignDirective()) {
+    OS << "	.align	" << ByteAlignment;
+    EmitEOL();
+    return;
+  }
+
   // Some assemblers don't support non-power of two alignments, so we always
   // emit alignments as a power of two if possible.
   if (isPowerOf2_64(ByteAlignment)) {

@@ -19,6 +19,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/CodeGen/MachinePassManager.h"
+#include "llvm/CodeGen/MachineOutlinerPass.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CodeGen.h"

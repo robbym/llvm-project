@@ -6663,6 +6663,32 @@ BTFDeclTagAttr *Sema::mergeBTFDeclTagAttr(Decl *D, const BTFDeclTagAttr &AL) {
   return ::new (Context) BTFDeclTagAttr(Context, AL, AL.getBTFDeclTag());
 }
 
+// trellis session 90: `far`/`near` (`long_call`/`short_call`) share one parsed kind across
+// Mips and dsPIC, dispatched on the triple like `interrupt`. On dsPIC they apply to DATA too:
+// a far object leaves the near 4 KB and the 13-bit file-register forms (CodeGen/Targets/
+// DSPIC.cpp forwards it as the "far"/"near" global attribute); on a function they are the
+// call reach. Mips keeps its function-only rule here, since the shared subject list is wider.
+static void handleLongOrShortCallAttr(Sema &S, Decl *D, const ParsedAttr &AL, bool Long) {
+  if (!AL.checkExactlyNumArgs(S, 0))
+    return;
+  if (S.Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic) {
+    if (Long)
+      D->addAttr(::new (S.Context) DSPICFarAttr(S.Context, AL));
+    else
+      D->addAttr(::new (S.Context) DSPICNearAttr(S.Context, AL));
+    return;
+  }
+  if (!isFuncOrMethodForAttrSubject(D)) {
+    S.Diag(D->getLocation(), diag::warn_attribute_wrong_decl_type)
+        << AL << AL.isRegularKeywordAttribute() << ExpectedFunctionOrMethod;
+    return;
+  }
+  if (Long)
+    D->addAttr(::new (S.Context) MipsLongCallAttr(S.Context, AL));
+  else
+    D->addAttr(::new (S.Context) MipsShortCallAttr(S.Context, AL));
+}
+
 static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // Dispatch the interrupt attribute based on the current target.
   switch (S.Context.getTargetInfo().getTriple().getArch()) {
@@ -6682,6 +6708,18 @@ static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     break;
   case llvm::Triple::avr:
     S.AVR().handleInterruptAttr(D, AL);
+    break;
+  case llvm::Triple::dspic:
+    // trellis L1f-b: a function attribute, no arguments; what it may apply to beyond
+    // a function is L1d's to decide.
+    if (!isFuncOrMethodForAttrSubject(D)) {
+      S.Diag(D->getLocation(), diag::warn_attribute_wrong_decl_type)
+          << AL << AL.isRegularKeywordAttribute() << ExpectedFunctionOrMethod;
+      break;
+    }
+    if (!AL.checkExactlyNumArgs(S, 0))
+      break;
+    D->addAttr(::new (S.Context) DSPICInterruptAttr(S.Context, AL));
     break;
   case llvm::Triple::riscv32:
   case llvm::Triple::riscv64:
@@ -7692,6 +7730,12 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_Interrupt:
     handleInterruptAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_LongCall:
+    handleLongOrShortCallAttr(S, D, AL, /*Long=*/true);
+    break;
+  case ParsedAttr::AT_ShortCall:
+    handleLongOrShortCallAttr(S, D, AL, /*Long=*/false);
     break;
   case ParsedAttr::AT_ARMInterruptSaveFP:
     S.ARM().handleInterruptSaveFPAttr(D, AL);

@@ -147,6 +147,7 @@ add_clang_library(clangCodeGen
   Targets/Lanai.cpp
   Targets/LoongArch.cpp
   Targets/M68k.cpp
+  Targets/DSPIC.cpp
   Targets/MSP430.cpp
   Targets/Mips.cpp
   Targets/NVPTX.cpp
