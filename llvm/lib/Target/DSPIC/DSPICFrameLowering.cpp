@@ -21,6 +21,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/RegisterScavenging.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetOptions.h"
 
@@ -37,22 +38,55 @@ DSPICFrameLowering::DSPICFrameLowering(const DSPICSubtarget &STI)
                           Align(2)),
       STI(STI), TII(*STI.getInstrInfo()), TRI(STI.getRegisterInfo()) {}
 
-// A frame is linked (`lnk`/`ulnk`, w14 the base) iff anything is addressed through a
-// frame index: a local, a spill, a fixed object (an incoming stack argument, or a tail
-// call's outgoing one written over it), the outgoing call area, or a variable-sized object. Callee-saved slots alone are pushes and pops.
-// w14 is reserved whatever this returns, so a late spill cannot change the answer for a
-// register already handed out.
+// Session 94: frame-pointer elimination is OFF by default. Measured a net +16 bytes on bl_fw
+// (LLVM's allocator spills where cc1 does not even with w14 free, and w14's save is then not
+// repaid); the implementation is correct and kept behind the flag for revival.
+static cl::opt<bool> EnableFPElim(
+    "dspic-frame-pointer-elim", cl::Hidden, cl::init(false),
+    cl::desc("dsPIC: free w14 as a 15th register for functions whose stack pointer is fixed"));
+
+bool DSPICFrameLowering::isFramePointerElimEnabled() const { return EnableFPElim; }
+
+// Session 94: the body moves w15 iff it PUSHES a stack argument. A PUSH with no FrameSetup
+// flag is such a push; the callee-saved pushes PEI adds carry FrameSetup, so this answer is
+// the same before and after PEI (getMaxCallFrameSize reads 0 until PEI, which would flip
+// hasFP mid-pipeline and hand w14 out, then reserve it -- a miscompile).
+static bool functionMovesSP(const MachineFunction &MF) {
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB) {
+      if (MI.getFlag(MachineInstr::FrameSetup))
+        continue;
+      switch (MI.getOpcode()) {
+      case DSPIC::PUSH16r: case DSPIC::PUSH8r:
+      case DSPIC::PUSH16i: case DSPIC::PUSH16c:
+        return true;
+      default: break;
+      }
+    }
+  return false;
+}
+
+// w14 is the frame pointer (`lnk`/`ulnk`, and reserved) ONLY when a stable base is needed:
+// the body moves w15 (an argument push -- then a spill's distance from w15 varies), or a
+// var-sized object / a frame-or-return-address builtin / -fno-omit-frame-pointer demands it.
+// Otherwise w15 is fixed after the prologue, locals and spills are w15-relative at a fixed
+// offset, and w14 is a free allocatable register (session 93's NextChunk shape; the register
+// class already lists R4 last, so the allocator reaches it only under pressure).
 bool DSPICFrameLowering::hasFPImpl(const MachineFunction &MF) const {
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   if (MF.getTarget().Options.DisableFramePointerElim(MF) ||
       MFI.hasVarSizedObjects() || MFI.isFrameAddressTaken() ||
       MFI.isReturnAddressTaken())
     return true;
-  for (int I = MFI.getObjectIndexBegin(), E = MFI.getObjectIndexEnd(); I != E;
-       ++I)
-    if (!MFI.isDeadObjectIndex(I) && !MFI.isCalleeSavedObjectIndex(I))
-      return true;
-  return false; // a call frame alone links nothing: the arguments are pushed (L1f-a)
+  if (!EnableFPElim) {
+    // The pre-session-94 rule: any non-callee-saved stack object links a `lnk` frame (and w14
+    // is reserved by getReservedRegs whatever this returns), so the default is unchanged.
+    for (int I = MFI.getObjectIndexBegin(), E = MFI.getObjectIndexEnd(); I != E; ++I)
+      if (!MFI.isDeadObjectIndex(I) && !MFI.isCalleeSavedObjectIndex(I))
+        return true;
+    return false;
+  }
+  return functionMovesSP(MF);
 }
 
 // L1f-a: never reserved. Outgoing arguments are PUSHED (the pushes move w15) and popped
@@ -71,11 +105,28 @@ int64_t DSPICFrameLowering::frameOffsetFromFP(const MachineFunction &MF,
                    FuncInfo->getCalleeSavedFrameSize());
 }
 
+// Session 94 (no frame pointer): an object's true address is entrySP + ObjectOffset (the
+// identity the FP form above rests on), and after the prologue w15 = entrySP + StackSize, so
+// the object sits at [w15 + (ObjectOffset - StackSize)] -- a fixed negative displacement,
+// because w15 does not move in the body (functionMovesSP is false here).
+int64_t DSPICFrameLowering::frameOffsetFromSP(const MachineFunction &MF,
+                                             int FI) const {
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
+  // The objects start at getOffsetOfLocalArea() (the gap the FP form spends on the saved w14);
+  // w15 is bumped past Locals + that gap, so the object at ObjectOffset sits this far below it.
+  return MFI.getObjectOffset(FI) -
+         (int64_t)(MFI.getStackSize() + getOffsetOfLocalArea());
+}
+
 StackOffset
 DSPICFrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
                                            Register &FrameReg) const {
-  FrameReg = DSPIC::R4;
-  return StackOffset::getFixed(frameOffsetFromFP(MF, FI));
+  if (hasFP(MF)) {
+    FrameReg = DSPIC::R4;
+    return StackOffset::getFixed(frameOffsetFromFP(MF, FI));
+  }
+  FrameReg = DSPIC::SP;
+  return StackOffset::getFixed(frameOffsetFromSP(MF, FI));
 }
 
 // L1d RCOUNT (trellis session 88): an ISR clobbers the repeat counter if it makes a CALL
@@ -123,13 +174,27 @@ void DSPICFrameLowering::emitPrologue(MachineFunction &MF,
     ++MBBI;
   DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
 
-  if (!hasFP(MF))
-    return;
-
   uint64_t Locals = MFI.getStackSize() - FuncInfo->getCalleeSavedFrameSize();
   if (Locals % 2 != 0 || Locals > MaxLnk)
     report_fatal_error("dspic: frame of " + Twine(Locals) +
                        " bytes is not an even number of bytes up to 16382");
+
+  if (!hasFP(MF)) {
+    // Session 94: no w14. If there are locals/spills, grow w15 past them once (`add #N,w15`);
+    // w15 then holds still for the body (no argument pushes here). No local area -> nothing.
+    if (Locals == 0)
+      return;
+    uint64_t Bump = Locals + getOffsetOfLocalArea();
+    if (Bump > MaxLit10)
+      report_fatal_error("dspic: a frameless local area of " + Twine(Bump) +
+                         " bytes exceeds the 10-bit `add #N,w15`");
+    BuildMI(MBB, MBBI, DL, TII.get(DSPIC::ADD16ri10), DSPIC::SP)
+        .addReg(DSPIC::SP)
+        .addImm(Bump)
+        ->getOperand(3).setIsDead(); // SR
+    return;
+  }
+
   BuildMI(MBB, MBBI, DL, TII.get(DSPIC::LNK))
       .addImm(Locals)
       .setMIFlag(MachineInstr::FrameSetup);
@@ -160,9 +225,21 @@ void DSPICFrameLowering::emitEpilogue(MachineFunction &MF,
   while (I != MBB.begin() && isCalleeSavedPop(*std::prev(I)))
     --I;
 
-  if (hasFP(MF))
+  if (hasFP(MF)) {
     BuildMI(MBB, I, DL, TII.get(DSPIC::ULNK))
         .setMIFlag(MachineInstr::FrameDestroy);
+  } else {
+    // Session 94: undo the frameless local-area bump before the callee-saved pops (`pop.d`
+    // reads [--w15], so w15 must be back at the top of the pushes).
+    const auto *FuncInfo = MF.getInfo<DSPICMachineFunctionInfo>();
+    uint64_t Locals =
+        MF.getFrameInfo().getStackSize() - FuncInfo->getCalleeSavedFrameSize();
+    if (Locals != 0)
+      BuildMI(MBB, I, DL, TII.get(DSPIC::SUB16ri10), DSPIC::SP)
+          .addReg(DSPIC::SP)
+          .addImm(Locals + getOffsetOfLocalArea())
+          ->getOperand(3).setIsDead(); // SR
+  }
 }
 
 // The callee-saved pairs `push.d`/`pop.d` can take: (w8,w9) (w10,w11) (w12,w13), by the
@@ -177,7 +254,8 @@ static const CSPair CSPairs[] = {
 // Singles, in ascending w order, for what is left over.
 static const MCPhysReg CSSingles[] = {
     DSPIC::R12, DSPIC::R13, DSPIC::R14, DSPIC::R15, DSPIC::R11, DSPIC::W5, DSPIC::W6,
-    DSPIC::W7,  DSPIC::R10, DSPIC::R9,  DSPIC::R8,   DSPIC::R7,  DSPIC::R6, DSPIC::R5};
+    DSPIC::W7,  DSPIC::R10, DSPIC::R9,  DSPIC::R8,   DSPIC::R7,  DSPIC::R6, DSPIC::R5,
+    DSPIC::R4};  // session 94: w14, when it is not the frame pointer, is a callee-saved single
 
 // Plan the pushes in ascending w order: a pair where both registers are saved, a
 // single otherwise. Pops are the reverse of this list.

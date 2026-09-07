@@ -51,6 +51,7 @@ DSPICRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   static const MCPhysReg CalleeSavedRegs[] = {
     DSPIC::R5, DSPIC::R6, DSPIC::R7,
     DSPIC::R8, DSPIC::R9, DSPIC::R10,
+    DSPIC::R4,  // session 94: w14 when it is not the frame pointer (reserved -> never saved)
     0
   };
   // L1d (trellis session 88): an ISR may be interrupted at any point, so every GPR it
@@ -63,6 +64,7 @@ DSPICRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     DSPIC::R11, DSPIC::W5,  DSPIC::W6,  DSPIC::W7,   // w4..w7
     DSPIC::R10, DSPIC::R9,  DSPIC::R8,               // w8..w10
     DSPIC::R7,  DSPIC::R6,  DSPIC::R5,               // w11..w13
+    DSPIC::R4,                                        // w14 (session 94: an ISR that uses it saves it)
     0
   };
   return ((F->getCallingConv() == CallingConv::MSP430_INTR ||
@@ -107,8 +109,15 @@ BitVector DSPICRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
   Reserved.set(DSPIC::SP);
   Reserved.set(DSPIC::SR);
   Reserved.set(DSPIC::CG);
-  Reserved.set(DSPIC::R4B);
-  Reserved.set(DSPIC::R4);
+  // Session 94: w14 is reserved ONLY when it is the frame pointer (getFrameLowering->hasFP,
+  // i.e. the body moves w15 or a var-sized/address demand). Otherwise it is a free allocatable
+  // callee-saved register -- the register class already lists R4 last, so it is reached under
+  // pressure only, matching cc1's frameless NextChunk.
+  const DSPICFrameLowering *TFI = getFrameLowering(MF);
+  if (!TFI->isFramePointerElimEnabled() || TFI->hasFP(MF)) {
+    Reserved.set(DSPIC::R4B);
+    Reserved.set(DSPIC::R4);
+  }
 
   return Reserved;
 }
@@ -156,11 +165,6 @@ bool
 DSPICRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
                                         int SPAdj, unsigned FIOperandNum,
                                         RegScavenger *RS) const {
-  // SPAdj is PEI's running w15 adjustment inside a call sequence. Every frame index
-  // here is w14-relative and w14 never moves inside one (a reserved call frame moves
-  // nothing; beside variable-sized objects only w15 moves), so it is not consulted.
-  (void)SPAdj;
-
   MachineInstr &MI = *II;
   MachineBasicBlock &MBB = *MI.getParent();
   MachineFunction &MF = *MBB.getParent();
@@ -169,8 +173,15 @@ DSPICRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   DebugLoc dl = MI.getDebugLoc();
   int FrameIndex = MI.getOperand(FIOperandNum).getIndex();
 
-  assert(TFI->hasFP(MF) && "a frame index in a function with no linked frame");
-  int64_t Offset = TFI->frameOffsetFromFP(MF, FrameIndex) +
+  // Session 94: with a frame pointer the base is w14 (frameOffsetFromFP); without one it is
+  // w15 (frameOffsetFromSP). w14 never moves, and a frameless function does not move w15 in
+  // its body (functionMovesSP is false), so SPAdj is 0 either way -- asserted, not consulted.
+  bool FP = TFI->hasFP(MF);
+  Register Base = FP ? DSPIC::R4 : DSPIC::SP;
+  assert(SPAdj == 0 && "dspic: a frame index under a nonzero SPAdj");
+  (void)SPAdj;
+  int64_t Offset = (FP ? TFI->frameOffsetFromFP(MF, FrameIndex)
+                       : TFI->frameOffsetFromSP(MF, FrameIndex)) +
                    MI.getOperand(FIOperandNum + 1).getImm();
 
   if (MI.getOpcode() == DSPIC::ADDframe) {
@@ -178,20 +189,20 @@ DSPICRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
     Register DstReg = MI.getOperand(0).getReg();
     if (Offset == 0) {
       MI.setDesc(TII.get(DSPIC::MOV16rr));
-      MI.getOperand(FIOperandNum).ChangeToRegister(DSPIC::R4, false);
+      MI.getOperand(FIOperandNum).ChangeToRegister(Base, false);
       MI.removeOperand(FIOperandNum + 1);
     } else if (Offset > 0 && Offset < 32) {
       MI.setDesc(TII.get(DSPIC::ADD16rri_lea));
-      MI.getOperand(FIOperandNum).ChangeToRegister(DSPIC::R4, false);
+      MI.getOperand(FIOperandNum).ChangeToRegister(Base, false);
       MI.getOperand(FIOperandNum + 1).ChangeToImmediate(Offset);
     } else if (Offset < 0 && Offset > -32) {
       MI.setDesc(TII.get(DSPIC::SUB16rri_lea));
-      MI.getOperand(FIOperandNum).ChangeToRegister(DSPIC::R4, false);
+      MI.getOperand(FIOperandNum).ChangeToRegister(Base, false);
       MI.getOperand(FIOperandNum + 1).ChangeToImmediate(-Offset);
     } else {
       BuildMI(MBB, II, dl, TII.get(DSPIC::MOV16ri), DstReg).addImm(Offset);
       MI.setDesc(TII.get(DSPIC::ADD16rrr));
-      MI.getOperand(FIOperandNum).ChangeToRegister(DSPIC::R4, false);
+      MI.getOperand(FIOperandNum).ChangeToRegister(Base, false);
       MI.getOperand(FIOperandNum + 1).ChangeToRegister(DstReg, false, false,
                                                        /*isKill=*/true);
     }
@@ -200,7 +211,7 @@ DSPICRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
 
   bool Byte = isByteAccess(MI.getOpcode());
   if (displacementFits(Offset, Byte)) {
-    MI.getOperand(FIOperandNum).ChangeToRegister(DSPIC::R4, false);
+    MI.getOperand(FIOperandNum).ChangeToRegister(Base, false);
     MI.getOperand(FIOperandNum + 1).ChangeToImmediate(Offset);
     return false;
   }
@@ -220,12 +231,12 @@ DSPICRegisterInfo::eliminateFrameIndex(MachineBasicBlock::iterator II,
   Register Tmp = MF.getRegInfo().createVirtualRegister(&DSPIC::GR16RegClass);
   BuildMI(MBB, II, dl, TII.get(DSPIC::MOV16ri), Tmp).addImm(Offset);
   MI.setDesc(TII.get(Indexed));
-  MI.getOperand(FIOperandNum).ChangeToRegister(DSPIC::R4, false);
+  MI.getOperand(FIOperandNum).ChangeToRegister(Base, false);
   MI.getOperand(FIOperandNum + 1).ChangeToRegister(Tmp, false, false,
                                                    /*isKill=*/true);
   return false;
 }
 
 Register DSPICRegisterInfo::getFrameRegister(const MachineFunction &MF) const {
-  return DSPIC::R4;
+  return getFrameLowering(MF)->hasFP(MF) ? DSPIC::R4 : DSPIC::SP;
 }

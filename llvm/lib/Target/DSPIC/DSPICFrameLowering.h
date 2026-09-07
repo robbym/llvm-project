@@ -70,6 +70,10 @@ public:
                               const TargetRegisterInfo *TRI) const override;
 
   bool hasReservedCallFrame(const MachineFunction &MF) const override;
+
+  /// Session 94: is frame-pointer elimination enabled (`-dspic-frame-pointer-elim`)? Default
+  /// OFF -- with it off w14 is reserved in every function, the pre-session-94 behavior.
+  bool isFramePointerElimEnabled() const;
   /// L1f-a: PEI eliminates the call-frame pseudos inside frame-index resolution, which
   /// it skips for a function with no stack objects; a frameless caller with pushed
   /// arguments still needs its `sub.w #N,w15` after each call.
@@ -91,6 +95,10 @@ public:
 
   /// Bytes a frame index sits from w14: ObjectOffset - (2 + CSSize).
   int64_t frameOffsetFromFP(const MachineFunction &MF, int FI) const;
+
+  /// Session 94: bytes a frame index sits from w15 when there is no frame pointer:
+  /// ObjectOffset - StackSize (a fixed negative displacement; w15 does not move here).
+  int64_t frameOffsetFromSP(const MachineFunction &MF, int FI) const;
 };
 
 } // End llvm namespace
