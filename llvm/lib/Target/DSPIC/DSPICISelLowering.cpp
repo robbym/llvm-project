@@ -1230,7 +1230,36 @@ static SDValue combineCommutativeLibcallOrder(SDNode *N, TargetLowering::DAGComb
                          N->getFlags());
 }
 
+// Session 96: look through AssertZext/AssertSext on a compare's operands.
+//
+// A `bool` global is loaded as `zext from i1`, and the LEGALIZER expands that into a plain byte
+// load plus an AssertZext -- AFTER LowerBR_CC has already built the compare, so the assert appears
+// between the load and a compare that already exists. No pattern rooted at the compare can then
+// see the load, and the direct file form `cp0.b _sym` -- which reads the byte in place and needs
+// no register at all -- cannot match. Measured: cc1 reaches that form 29 times across bl_fw to
+// our 14.
+//
+// An Assert node's VALUE IS ITS OPERAND'S VALUE; it records a guarantee and nothing else. So a
+// comparison may look through it without changing what is compared.
+static SDValue combineCmpThroughAssert(SDNode *N, SelectionDAG &DAG) {
+  auto Strip = [](SDValue V) {
+    while (V.getOpcode() == ISD::AssertZext || V.getOpcode() == ISD::AssertSext)
+      V = V.getOperand(0);
+    return V;
+  };
+  SDValue L = N->getOperand(0), R = N->getOperand(1);
+  SDValue SL = Strip(L), SR = Strip(R);
+  if (SL == L && SR == R)
+    return SDValue();
+  SmallVector<SDValue, 3> Ops = {SL, SR};
+  for (unsigned I = 2, E = N->getNumOperands(); I != E; ++I)
+    Ops.push_back(N->getOperand(I));
+  return DAG.getNode(N->getOpcode(), SDLoc(N), N->getVTList(), Ops);
+}
+
 SDValue DSPICTargetLowering::PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const {
+  if (N->getOpcode() == DSPICISD::CMP || N->getOpcode() == DSPICISD::CMPB)
+    return combineCmpThroughAssert(N, DCI.DAG);
   if (N->getOpcode() == ISD::MUL || N->getOpcode() == ISD::FADD || N->getOpcode() == ISD::FMUL)
     return combineCommutativeLibcallOrder(N, DCI);
   if (N->getOpcode() == ISD::BRCOND || N->getOpcode() == ISD::SELECT)
@@ -1406,6 +1435,35 @@ static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
 
   // FIXME: Handle jump negative someday
   DSPICCC::CondCodes TCC = DSPICCC::COND_INVALID;
+
+  // Session 96: a boolean compared against ONE forces the value into a register -- `cp.b Wn,#1` --
+  // because the direct file compare only compares against zero. For a value whose bits above bit 0
+  // are known zero (a `bool`, which arrives carrying an AssertZext to i1), `X == 1` is `X != 0`,
+  // and that form reads the byte in place. Measured: cc1 compares a byte against one ZERO times
+  // across bl_fw; we did it seven.
+  // ⛔ This must run BEFORE the AssertZext strip below, because the AssertZext is exactly what
+  // proves the upper bits are zero.
+  if (CC == ISD::SETEQ || CC == ISD::SETNE)
+    if (auto *C = dyn_cast<ConstantSDNode>(RHS))
+      if (C->getAPIntValue() == 1) {
+        unsigned Bits = LHS.getValueSizeInBits();
+        if (Bits > 1 &&
+            DAG.MaskedValueIsZero(LHS, APInt::getBitsSetFrom(Bits, 1))) {
+          RHS = DAG.getConstant(0, dl, RHS.getValueType());
+          CC = (CC == ISD::SETEQ) ? ISD::SETNE : ISD::SETEQ;
+        }
+      }
+
+  // Session 96: a `bool` load arrives as `AssertZext(zextload i8, i1)`, and the assert sits between
+  // the load and this compare, so no pattern rooted at the compare can see the load underneath --
+  // which is why testing a near byte global cost three instructions where cc1 spends one.
+  // AssertZext/AssertSext record a GUARANTEE about a value; the node's value IS its operand's
+  // value, so a comparison may look through it without changing what is compared.
+  while (LHS.getOpcode() == ISD::AssertZext || LHS.getOpcode() == ISD::AssertSext)
+    LHS = LHS.getOperand(0);
+  while (RHS.getOpcode() == ISD::AssertZext || RHS.getOpcode() == ISD::AssertSext)
+    RHS = RHS.getOperand(0);
+
   switch (CC) {
   default: llvm_unreachable("Invalid integer condition!");
   case ISD::SETEQ:

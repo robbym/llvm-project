@@ -1792,9 +1792,19 @@ let AddedComplexity = 20, Defs = [SR], mayLoad = 1 in {
   def CP016f : DSPICFrameInst<(outs), (ins memsrc:$f), 2, "cp0.w\t$f"> {
     let Pattern = [(DSPICcmp (i16 (load faddr:$f)), 0)]; }
   def CP08f  : DSPICFrameInst<(outs), (ins memsrc:$f), 2, "cp0.b\t$f"> {
-    let Pattern = [(DSPICcmp (i8 (load faddr:$f)), 0)]; }
-  def CP16fW : DSPICFrameInst<(outs), (ins memsrc:$f, GR16_W0:$w), 2, "cp.w\t$f">;
+    let Pattern = [(DSPICcmp (i8 (load faddr:$f)), 0)]; }  def CP16fW : DSPICFrameInst<(outs), (ins memsrc:$f, GR16_W0:$w), 2, "cp.w\t$f">;
   def CP8fW  : DSPICFrameInst<(outs), (ins memsrc:$f, GR8_W0:$w), 2, "cp.b\t$f">;
+}
+
+// Session 96: comparing a zero-extended byte load against zero is comparing the BYTE against zero
+// -- the extension cannot change whether it is zero -- so it takes the same one-word direct form.
+// Without this, testing a near `bool` global cost three instructions (materialise the address,
+// `ze [Wn],Wd`, `cp0 Wd`) where cc1 spends one. `faddr` and not `faddr1`: a compare produces no
+// value and needs no scratch register, so it does not care whether the address has other uses.
+// The `[Wn]` variant covers the case where the address is not a file address (a far global).
+let AddedComplexity = 25 in {
+def : Pat<(DSPICcmp (i16 (zextloadi16i8 faddr:$f)), 0), (CP08f faddr:$f)>;
+def : Pat<(DSPICcmp (i16 (zextloadi16i8 GR16:$p)), 0), (CP08n GR16:$p)>;
 }
 // cp.w f = f - W0 (the value wrapped into GR16_W0 by COPY_TO_REGCLASS -- short-lived, RA fix)
 let AddedComplexity = 20 in {
