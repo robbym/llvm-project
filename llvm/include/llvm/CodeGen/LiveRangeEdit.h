@@ -179,6 +179,13 @@ public:
   /// UseIdx. It is assumed that parent_.getVNINfoAt(UseIdx) == ParentVNI.
   bool canRematerializeAt(Remat &RM, SlotIndex UseIdx);
 
+  /// (dsPIC port, trellis session 95) Is every PHYSICAL register that RM.OrigMI defines dead
+  /// at \p UseIdx? A target may offer an instruction whose flag def is dead where it stands;
+  /// the copy lands elsewhere, where that register may be live, so the clobber has to be
+  /// checked HERE. Scans forward from the insertion point: a read before a redefinition
+  /// refuses, and falling off the block refuses.
+  bool physDefsDeadAt(const MachineInstr &Orig, SlotIndex UseIdx) const;
+
   /// (dsPIC port, trellis session 94 -- REMAT-PLAN 4.4) For a candidate that reads mutable
   /// memory (TII.isMemoryRematCandidate), is the location unchanged everywhere the value is
   /// live? Walks the segments of RM.ParentVNI and asks the target about each instruction.

@@ -87,6 +87,47 @@ bool LiveRangeEdit::canRematerializeAt(Remat &RM, SlotIndex UseIdx) {
   if (TII.isMemoryRematCandidate(*RM.OrigMI) && !isMemoryRematSafe(RM))
     return false;
 
+  // (dsPIC port, trellis session 95) The default isReMaterializableImpl rejects any physical
+  // register def outright, so for every in-tree target this loop is empty and this is dead
+  // code. A target that overrides it to allow, say, a DEAD condition-code def is asserting
+  // something about the ORIGINAL site; the copy goes somewhere else, and the clobber has to be
+  // checked there. Refusal-only.
+  if (!physDefsDeadAt(*RM.OrigMI, UseIdx))
+    return false;
+
+  return true;
+}
+
+bool LiveRangeEdit::physDefsDeadAt(const MachineInstr &Orig, SlotIndex UseIdx) const {
+  SmallVector<MCRegister, 2> PhysDefs;
+  for (const MachineOperand &MO : Orig.all_defs())
+    if (MO.getReg() && MO.getReg().isPhysical())
+      PhysDefs.push_back(MO.getReg().asMCReg());
+  if (PhysDefs.empty())
+    return true;
+
+  MachineInstr *At = LIS.getInstructionFromIndex(UseIdx);
+  if (!At)
+    return false;
+  const TargetRegisterInfo *TRI = MRI.getTargetRegisterInfo();
+  // A short forward scan is enough for a condition code, which is consumed within a few
+  // instructions or not at all; a longer distance is refused rather than reasoned about.
+  const unsigned MaxScan = 32;
+  for (MCRegister R : PhysDefs) {
+    bool Redefined = false;
+    unsigned Steps = 0;
+    for (MachineBasicBlock::iterator I = At->getIterator(), E = At->getParent()->end();
+         I != E && Steps < MaxScan; ++I, ++Steps) {
+      if (I->readsRegister(R, TRI))
+        return false;
+      if (I->definesRegister(R, TRI)) {
+        Redefined = true;
+        break;
+      }
+    }
+    if (!Redefined)
+      return false;
+  }
   return true;
 }
 

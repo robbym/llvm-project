@@ -584,6 +584,14 @@ multiclass Arith<bits<4> opcode, string asmstring, SDPatternOperator node,
   // L1f-a: the register and literal forms are UNTIED -- dsPIC's `add Wb,Ws,Wd` and
   // `add Wb,#lit5,Wd` are three-operand, and the inherited tie cost a copy per add.
   let Defs = [SR], Uses = uses in {
+  // Session 95: the three-operand register forms are rematerializable -- their result is a
+  // function of their two virtual inputs alone, and canRematerializeAt's allUsesAvailableAt
+  // already proves those are live and unchanged at the use (upstream PR #124327's condition).
+  // ⛔ ONLY for the ops that do not READ the flags: ADDC/SUBC/DADD pass Uses=[SR] and their
+  // result depends on the carry where they stand, so they are not reproducible elsewhere.
+  // The MCID flag alone is inert -- the default isReMaterializableImpl rejects the [SR] def --
+  // until -dspic-remat-alu turns the target override on.
+  let isReMaterializable = !empty(uses) in {
   let isCommutable = commutes in {
   def 8rr : DSPICFrameInst<(outs GR8:$rd), (ins GR8:$src2, GR8:$rs), 2,
                            !strconcat(asmstring, ".b\t$src2,$rs,$rd")> {
@@ -592,6 +600,7 @@ multiclass Arith<bits<4> opcode, string asmstring, SDPatternOperator node,
   def 16rr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$src2, GR16:$rs), 2,
                             !strconcat(asmstring, ".w\t$src2,$rs,$rd")> {
     let Pattern = [(set GR16:$rd, (node GR16:$src2, GR16:$rs))];
+  }
   }
   }
   let Constraints = "$src2 = $rd" in {

@@ -95,6 +95,12 @@ public:
   /// verdict is consulted; -dspic-remat-force stands in for the pass until Phase 3.
   bool hasRematVerdict(const MachineInstr &MI) const;
 
+  /// (session 95) A three-operand ALU form whose ONLY physical operand is a DEAD def of SR.
+  /// Its value is a function of its virtual inputs alone; allUsesAvailableAt proves those are
+  /// live and unchanged at the use, and LiveRangeEdit checks the flag clobber at the remat
+  /// point, which is where `dead at the original site` stops meaning anything.
+  bool isRematerializableALU(const MachineInstr &MI) const;
+
   bool isReMaterializableImpl(const MachineInstr &MI) const override;
   bool isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) const override;
   bool isMemoryRematCandidate(const MachineInstr &MI) const override;

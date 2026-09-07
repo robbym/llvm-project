@@ -127,11 +127,44 @@ bool DSPICInstrInfo::hasRematVerdict(const MachineInstr &MI) const {
          ((*MI.memoperands_begin())->getFlags() & MachineMemOperand::MOTargetFlag1);
 }
 
+static cl::opt<bool> EnableRematALU(
+    "dspic-remat-alu", cl::Hidden, cl::init(false),
+    cl::desc("Offer a three-operand ALU form whose SR def is dead as rematerializable, so a "
+             "value that is a one-instruction function of registers already live across a call "
+             "is recomputed there instead of occupying one (session 95)"));
+
+bool DSPICInstrInfo::isRematerializableALU(const MachineInstr &MI) const {
+  if (!MI.getDesc().isRematerializable() || MI.mayLoadOrStore() ||
+      MI.hasUnmodeledSideEffects() || MI.isNotDuplicable() || MI.isInlineAsm())
+    return false;
+  if (!MI.getNumOperands() || !MI.getOperand(0).isReg() || !MI.getOperand(0).isDef() ||
+      !MI.getOperand(0).getReg().isVirtual() || MI.getOperand(0).getSubReg())
+    return false;
+  Register Def = MI.getOperand(0).getReg();
+  for (const MachineOperand &MO : MI.operands()) {
+    if (!MO.isReg() || !MO.getReg())
+      continue;
+    if (MO.getReg().isPhysical()) {
+      // The one physical shape allowed: a DEAD def of the status register. A physical USE of
+      // SR means the result depends on the carry where the instruction stands (ADDC/SUBC/
+      // DADD), and any other physical def would be clobbered at the remat point.
+      if (MO.getReg() != DSPIC::SR || !MO.isDef() || !MO.isDead())
+        return false;
+      continue;
+    }
+    if (MO.isDef() && MO.getReg() != Def)
+      return false;
+  }
+  return true;
+}
+
 // REMAT-PLAN 4.3 -- the gate. The default refuses every non-invariant load; this admits exactly
 // the flagged near-global loads and defers on everything else.
 bool DSPICInstrInfo::isReMaterializableImpl(const MachineInstr &MI) const {
   if (DSPICEnableRematNearGlobal && isRematerializableNearGlobalLoad(MI) &&
       hasRematVerdict(MI))
+    return true;
+  if (EnableRematALU && isRematerializableALU(MI))
     return true;
   return TargetInstrInfo::isReMaterializableImpl(MI);
 }
