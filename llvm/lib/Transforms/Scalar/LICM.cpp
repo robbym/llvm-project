@@ -121,6 +121,12 @@ static cl::opt<bool>
     DisablePromotion("disable-licm-promotion", cl::Hidden, cl::init(false),
                      cl::desc("Disable memory promotion in LICM pass"));
 
+static cl::opt<bool> KeepTestedLoadsInMemory(
+    "licm-keep-tested-loads-in-memory", cl::Hidden, cl::init(false),
+    cl::desc("Refuse load-only promotion of a location whose in-loop loads are "
+             "only tested, when the loop contains a call (the promoted value "
+             "would hold a callee-saved register across it)"));
+
 static cl::opt<bool> ControlFlowHoisting(
     "licm-control-flow-hoisting", cl::Hidden, cl::init(false),
     cl::desc("Enable control flow (and PHI) hoisting in LICM"));
@@ -2005,6 +2011,80 @@ bool isThreadLocalObject(const Value *Object, const Loop *L, DominatorTree *DT,
 /// the stores in the loop, looking for stores to Must pointers which are
 /// loop invariant.
 ///
+/// Would promoting this location only buy us a value that is never computed
+/// with, only tested? On a register-poor target with memory-operand test forms
+/// that trade is a loss: the promoted value holds a register for the whole
+/// loop -- a callee-saved one if the loop contains a call -- and saves a test
+/// the target can do against memory in one instruction.
+static bool isOnlyTestedInLoop(ArrayRef<Instruction *> LoopUses, Loop *CurLoop) {
+  // A value is only tested if every user is a comparison, a terminator (an i1
+  // consumed by a branch or switch), a select condition, or a narrowing to i1
+  // whose own users pass the same test. That last case is not an ornament: a
+  //  global reaches this as  +  unless GlobalOpt
+  // happened to narrow the global itself, and the bl_fw case that motivated this
+  // only looked like a bare i1 load because it had.
+  SmallVector<Value *, 8> Work;
+  SmallPtrSet<Value *, 8> Seen;
+  bool SawLoad = false;
+  for (Instruction *UI : LoopUses) {
+    auto *Load = dyn_cast<LoadInst>(UI);
+    if (!Load)
+      continue; // stores stay where they are on this path
+    SawLoad = true;
+    Work.push_back(Load);
+  }
+  while (!Work.empty()) {
+    Value *V = Work.pop_back_val();
+    if (!Seen.insert(V).second)
+      continue;
+    for (User *U : V->users()) {
+      auto *I = dyn_cast<Instruction>(U);
+      if (!I)
+        return false;
+      if (isa<ICmpInst>(I) || I->isTerminator())
+        continue;
+      if (auto *Sel = dyn_cast<SelectInst>(I))
+        if (Sel->getCondition() == V)
+          continue;
+      if (auto *Tr = dyn_cast<TruncInst>(I))
+        if (Tr->getType()->isIntegerTy(1)) {
+          Work.push_back(Tr);
+          continue;
+        }
+      return false;
+    }
+  }
+  return SawLoad;
+}
+
+/// Does the loop contain a call that survives to the machine level, so that a
+/// value live across it needs a callee-saved register? Approximated as: any
+/// non-intrinsic call, plus the mem* intrinsics, which do become calls. Other
+/// intrinsics (llvm.umin here) are ignored -- an approximation, and stated as
+/// one: a target that lowers some of them to libcalls would want them counted.
+static bool loopContainsCall(Loop *CurLoop) {
+  for (BasicBlock *BB : CurLoop->blocks())
+    for (Instruction &I : *BB) {
+      auto *CB = dyn_cast<CallBase>(&I);
+      if (!CB)
+        continue;
+      if (auto *II = dyn_cast<IntrinsicInst>(CB)) {
+        switch (II->getIntrinsicID()) {
+        case Intrinsic::memcpy:
+        case Intrinsic::memmove:
+        case Intrinsic::memset:
+        case Intrinsic::memcpy_inline:
+        case Intrinsic::memset_inline:
+          return true;
+        default:
+          continue;
+        }
+      }
+      return true;
+    }
+  return false;
+}
+
 bool llvm::promoteLoopAccessesToScalars(
     const SmallSetVector<Value *, 8> &PointerMustAliases,
     SmallVectorImpl<BasicBlock *> &ExitBlocks,
@@ -2254,6 +2334,18 @@ bool llvm::promoteLoopAccessesToScalars(
   if (StoreSafety != StoreSafe && !FoundLoadToPromote)
     // If we cannot hoist the load either, give up.
     return false;
+
+  // Load-only promotion of a value that is never computed with, only tested,
+  // buys one loop-carried register in exchange for a memory test. Where the
+  // loop contains a call that register is a callee-saved one held across it.
+  // Measured on dsPIC (trellis session 96): promoting one such i1 flag costs
+  // the function its only stack slot, by eviction cascade.
+  if (KeepTestedLoadsInMemory && StoreSafety != StoreSafe &&
+      isOnlyTestedInLoop(LoopUses, CurLoop) && loopContainsCall(CurLoop)) {
+    LLVM_DEBUG(dbgs() << "LICM: refusing load-only promotion of a tested-only "
+                         "value across a call: " << *SomePtr << '\n');
+    return false;
+  }
 
   // Lets do the promotion!
   if (StoreSafety == StoreSafe) {
