@@ -41,6 +41,7 @@ STATISTIC(NumPushd, "Number of push pairs fused into push.d");
 STATISTIC(NumSkip, "Number of bit test + branch pairs fused into btsc/btss");
 STATISTIC(NumMovdMem, "Number of word-pair loads/stores fused into mov.d with memory");
 STATISTIC(NumByteFile, "Number of byte global load/store materialize+indirect fused into the direct WREG form");
+STATISTIC(NumTailBra, "Number of rcall+return fused into a tail bra");
 
 namespace {
 
@@ -69,6 +70,7 @@ class DSPICPeepholeImpl {
   bool fuseSkip(MachineFunction &MF);
   bool fuseMovdMem(MachineBasicBlock &MBB);
   bool fuseByteFile(MachineBasicBlock &MBB);
+  bool fuseTailCall(MachineBasicBlock &MBB);
 
 public:
   bool runOnMachineFunction(MachineFunction &MF);
@@ -354,6 +356,38 @@ bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
   return Changed;
 }
 
+// (session 92, the libcalls row) `rcall SYM ; return` ending a block -> `bra SYM`: the routine
+// returns straight to our caller, one word for two -- cc1's shape for every runtime-library call
+// in tail position, which LLVM's tail-call lowering never marks (it marks C-level calls only).
+// Adjacency is the whole safety argument: a call with stack arguments is followed by the caller's
+// `sub.w #N,w15` pop, an epilogue with anything to restore by its pops or `ulnk`, and a result
+// that is not the function's own by a move -- any of which sits between the two and blocks the
+// fusion. The rcall's implicit operands (the argument registers it uses, the registers it clobbers)
+// and the return's (the result registers it uses) ride along on the branch.
+bool DSPICPeepholeImpl::fuseTailCall(MachineBasicBlock &MBB) {
+  if (MBB.size() < 2)
+    return false;
+  MachineInstr &Ret = MBB.back();
+  if (Ret.getOpcode() != DSPIC::RET)
+    return false;
+  MachineInstr &Call = *std::prev(Ret.getIterator());
+  if (Call.getOpcode() != DSPIC::RCALLi)
+    return false;
+  const MachineOperand &Target = Call.getOperand(0);
+  if (!Target.isGlobal() && !Target.isSymbol())
+    return false;
+  MachineInstrBuilder B = BuildMI(MBB, Ret, Ret.getDebugLoc(), TII->get(DSPIC::TCRETURNdi));
+  B.add(Target);
+  for (const MachineOperand &MO : Call.implicit_operands())
+    B.add(MO);
+  for (const MachineOperand &MO : Ret.implicit_operands())
+    B.add(MO);
+  Call.eraseFromParent();
+  Ret.eraseFromParent();
+  ++NumTailBra;
+  return true;
+}
+
 bool DSPICPeepholeImpl::runOnMachineFunction(MachineFunction &MF) {
   TII = MF.getSubtarget<DSPICSubtarget>().getInstrInfo();
   TRI = MF.getSubtarget().getRegisterInfo();
@@ -362,6 +396,7 @@ bool DSPICPeepholeImpl::runOnMachineFunction(MachineFunction &MF) {
     Changed |= fuseMovdMem(MBB);
     Changed |= fuseByteFile(MBB);
     Changed |= fusePairs(MBB);
+    Changed |= fuseTailCall(MBB);
     Changed |= fuseRetlw(MBB);
   }
   return Changed;

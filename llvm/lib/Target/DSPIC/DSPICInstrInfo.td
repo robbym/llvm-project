@@ -71,6 +71,9 @@ def DSPICpsvld8z : SDNode<"DSPICISD::PSVLD8Z", SDT_DSPICPsvLd,
 def DSPICpsvld8s : SDNode<"DSPICISD::PSVLD8S", SDT_DSPICPsvLd,
                           [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
 def DSPICcmp     : SDNode<"DSPICISD::CMP", SDT_DSPICCmp, [SDNPOutGlue]>;
+// L1f-k (trellis session 92): the borrow compare `cpb`, the second half of a 32-bit compare --
+// it takes the first half's flags as glue and hands the pair's on.
+def DSPICcmpb    : SDNode<"DSPICISD::CMPB", SDT_DSPICCmp, [SDNPInGlue, SDNPOutGlue]>;
 def DSPICbrcc    : SDNode<"DSPICISD::BR_CC", SDT_DSPICBrCC,
                             [SDNPHasChain, SDNPInGlue]>;
 def DSPICselectcc: SDNode<"DSPICISD::SELECT_CC", SDT_DSPICSelectCC,
@@ -189,6 +192,10 @@ def zextloadi16i8 : PatFrag<(ops node:$ptr), (i16 (zextloadi8 node:$ptr))>;
 def  extloadi16i8 : PatFrag<(ops node:$ptr), (i16 ( extloadi8 node:$ptr))>;
 def bic : PatFrag<(ops node:$lhs, node:$rhs), (and node:$lhs, (not node:$rhs))>;
 def and_su : PatFrag<(ops node:$lhs, node:$rhs), (and node:$lhs, node:$rhs), [{
+  return N->hasOneUse();
+}]>;
+// L1f-k: an `or` whose only use is the compare against zero -- `ior Wb,Ws,[w15]`
+def or_su : PatFrag<(ops node:$lhs, node:$rhs), (or node:$lhs, node:$rhs), [{
   return N->hasOneUse();
 }]>;
 //===----------------------------------------------------------------------===//
@@ -1766,3 +1773,19 @@ let usesCustomInserter = 1, mayLoad = 1, Defs = [SR] in {
   def PSVLD8S : Pseudo<(outs GR16:$dst), (ins GR16:$off, GR16:$page), "# PSVLD8S",
                        [(set GR16:$dst, (DSPICpsvld8s GR16:$off, GR16:$page))]>;
 }
+
+// L1f-k (trellis session 92): the 32-bit compare. `cp lo,lo' ; cpb hi,hi'` sets C/N/OV from the
+// 32-bit difference and Z STICKY (`cpb` clears Z on a nonzero result and leaves it otherwise; the
+// vendor's cc1 branches `leu` after `subb`, the same reliance) -- one word each, and no throwaway
+// store where cc1 writes `[w15]`. The register and lit8 forms are the ones the assembler takes
+// (steps/l1f/as-probe-11.sh: `cpb w1,#255` yes, `#256` and `#-1` no). And the flag-setting
+// `ior Wb,Ws,[w15]` for a 32-bit test against zero -- the `and ...,[w15]` idiom above, on `or`.
+let Defs = [SR], Uses = [SR] in {
+  def CPB16rr : DSPICFrameInst<(outs), (ins GR16:$rb, GR16:$rs), 2, "cpb\t$rb,$rs"> {
+    let Pattern = [(DSPICcmpb GR16:$rb, GR16:$rs)]; }
+  def CPB16ri : DSPICFrameInst<(outs), (ins GR16:$rb, i16imm:$imm), 2, "cpb\t$rb,$imm"> {
+    let Pattern = [(DSPICcmpb GR16:$rb, lit8imm16:$imm)]; }
+}
+let Defs = [SR], isCommutable = 1 in
+  def IORF16rr : DSPICFrameInst<(outs), (ins GR16:$rd, GR16:$rs), 2, "ior\t$rd,$rs,[w15]"> {
+    let Pattern = [(DSPICcmp (or_su GR16:$rd, GR16:$rs), 0)]; }

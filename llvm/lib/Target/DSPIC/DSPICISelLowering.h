@@ -146,6 +146,10 @@ namespace llvm {
       return false;
     }
     SDValue PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const override;
+    // L1f-k: FLAG2BOOL is a 0/1 word; SELECT_CC knows what both arms know
+    void computeKnownBitsForTargetNode(const SDValue Op, KnownBits &Known,
+                                       const APInt &DemandedElts, const SelectionDAG &DAG,
+                                       unsigned Depth = 0) const override;
     // Session 90 (the data model): no load/store expansion of a program-memory block copy, and
     // a program-memory global in an asm "i" operand stays the symbol (an i16 target address).
     bool findOptimalMemOpLowering(LLVMContext &Context, std::vector<EVT> &MemOps,

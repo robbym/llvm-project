@@ -30,6 +30,7 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/MathExtras.h"
+#include "llvm/Support/KnownBits.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -107,6 +108,18 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::SELECT,           MVT::i16,   Expand);
   setOperationAction(ISD::SELECT_CC,        MVT::i8,    Custom);
   setOperationAction(ISD::SELECT_CC,        MVT::i16,   Custom);
+  // L1f-k (trellis session 92): a 32-bit compare is an ILLEGAL-typed OPERAND the integer type
+  // legalizer would expand into two i16 compares joined by a select (~10 words). Custom on the
+  // operand type is consulted FIRST (ExpandIntegerOperand -> CustomLowerNode; the AVR recipe),
+  // and EmitCMP fuses it to `cp lo ; cpb hi ; bra cc`. A SELECT_CC with an i32 RESULT declines
+  // (ReplaceNodeResults) and the legalizer splits it into two i16 selects.
+  setOperationAction(ISD::BR_CC,            MVT::i32,   Custom);
+  setOperationAction(ISD::SETCC,            MVT::i32,   Custom);
+  setOperationAction(ISD::SELECT_CC,        MVT::i32,   Custom);
+  // L1f-k: an i32 min/max (InstCombine's spelling of `a < b ? a : b`) is expanded by the type
+  // legalizer ITSELF, after the combiner; Custom routes it to ReplaceNodeResults as a SELECT_CC.
+  for (unsigned Op : {ISD::UMIN, ISD::UMAX, ISD::SMIN, ISD::SMAX})
+    setOperationAction(Op, MVT::i32, Custom);
   setOperationAction(ISD::SIGN_EXTEND,      MVT::i16,   Custom);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i8, Expand);
   setOperationAction(ISD::DYNAMIC_STACKALLOC, MVT::i16, Expand);
@@ -185,6 +198,13 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   // L1e prog-space: fold an addrspace(1) i16 read into the PSV-window node before the wide
   // (i32) program pointer reaches type legalization.
   setTargetDAGCombine(ISD::LOAD);
+  // L1f-k (trellis session 92): BRCOND(SETCC i32) -> BR_CC and SELECT(SETCC i32) -> SELECT_CC by
+  // hand -- the generic folds require a LEGAL comparand type, and i32 is not one here.
+  setTargetDAGCombine(ISD::BRCOND);
+  setTargetDAGCombine(ISD::SELECT);
+  // (session 92, the libcalls row) a commutative op that becomes a runtime routine takes its
+  // operands in ARGUMENT order, so the routine's registers are already loaded.
+  setTargetDAGCombine({ISD::MUL, ISD::FADD, ISD::FMUL});
 
   setMinFunctionAlignment(Align(2));
   setPrefFunctionAlignment(Align(2));
@@ -1107,7 +1127,100 @@ void DSPICTargetLowering::LowerAsmOperandForConstraint(SDValue Op, StringRef Con
   TargetLowering::LowerAsmOperandForConstraint(Op, Constraint, Ops, DAG);
 }
 
+// L1f-k (trellis session 92): the generic fold BRCOND(SETCC) -> BR_CC (DAGCombiner::visitBRCOND)
+// tests isOperationLegalOrCustom on the COMPARAND type, which requires the type to be legal -- so
+// on i32 it never fires, the SETCC is lowered alone to a boolean during type legalization, and the
+// branch tests that boolean. (SELECT(SETCC) -> SELECT_CC in visitSELECT is gated on the select's
+// RESULT type instead: an i16 select over an i32 compare already folds generically, and the SELECT
+// half below serves an i32-RESULT select only -- the refuter's correction, session 92.)
+// Historically the next lines read: the SETCC is lowered alone to a
+// boolean during type legalization, and the branch tests that boolean (`btst #0 ; bra nz`, three
+// words past the compare). Done by hand here, BEFORE type legalization, for a SETCC on i32 (and its
+// `xor #1` inverted spelling); the fused compare then reaches LowerBR_CC / LowerSELECT_CC through
+// the Custom operand path. An i32-result SELECT_CC is split by the legalizer into two i16 ones.
+static SDValue combineCond32(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
+  SelectionDAG &DAG = DCI.DAG;
+  if (!DCI.isBeforeLegalize())
+    return SDValue();
+  bool IsBr = N->getOpcode() == ISD::BRCOND;
+  SDValue Cond = N->getOperand(IsBr ? 1 : 0);
+  bool Invert = false;
+  if (Cond.getOpcode() == ISD::XOR && isOneConstant(Cond.getOperand(1)) &&
+      Cond.getOperand(0).getOpcode() == ISD::SETCC && Cond.hasOneUse()) {
+    Invert = true;
+    Cond = Cond.getOperand(0);
+  }
+  if (Cond.getOpcode() != ISD::SETCC || Cond.getOperand(0).getValueType() != MVT::i32)
+    return SDValue();
+  ISD::CondCode CC = cast<CondCodeSDNode>(Cond.getOperand(2))->get();
+  if (Invert)
+    CC = ISD::getSetCCInverse(CC, MVT::i32);
+  SDLoc dl(N);
+  if (IsBr)
+    return DAG.getNode(ISD::BR_CC, dl, MVT::Other, N->getOperand(0), DAG.getCondCode(CC),
+                       Cond.getOperand(0), Cond.getOperand(1), N->getOperand(2));
+  return DAG.getNode(ISD::SELECT_CC, dl, N->getValueType(0), Cond.getOperand(0),
+                     Cond.getOperand(1), N->getOperand(1), N->getOperand(2), DAG.getCondCode(CC));
+}
+
+
+// L1f-k (trellis session 92): what the combiner may assume of the target nodes a compare lowers
+// to. The i32 path lowers DURING type legalization, so the `and #1` that the i1 promotion leaves
+// on a boolean meets FLAG2BOOL / SELECT_CC rather than the SETCC the combiner knows is 0/1; these
+// let it fold as it does on i16.
+void DSPICTargetLowering::computeKnownBitsForTargetNode(const SDValue Op, KnownBits &Known,
+                                                        const APInt &DemandedElts,
+                                                        const SelectionDAG &DAG,
+                                                        unsigned Depth) const {
+  Known.resetAll();
+  switch (Op.getOpcode()) {
+  case DSPICISD::FLAG2BOOL:
+    // `clr ; bsw ; [btg #0]`: a 0/1 word
+    Known.Zero.setBitsFrom(1);
+    break;
+  case DSPICISD::SELECT_CC: {
+    KnownBits KT = DAG.computeKnownBits(Op.getOperand(0), Depth + 1);
+    KnownBits KF = DAG.computeKnownBits(Op.getOperand(1), Depth + 1);
+    Known = KT.intersectWith(KF);
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+// (session 92, the libcalls row) InstCombine spells `a * b` on two i64 arguments `mul %b, %a`,
+// and the routine then took its eight argument words through w8..w11 (14 words) where cc1 is one
+// `bra ___muldi3`. For a commutative op the backend hands to a routine (MUL wider than the word,
+// FADD, FMUL), put the operand that is the EARLIER formal argument first: the lowest CopyFromReg
+// vreg under each operand's BUILD_PAIR tree, in the order the arguments were lowered.
+static unsigned firstArgVReg(SDValue V) {
+  while (V.getOpcode() == ISD::BUILD_PAIR)
+    V = V.getOperand(0);
+  if (V.getOpcode() != ISD::CopyFromReg)
+    return 0;
+  Register R = cast<RegisterSDNode>(V.getOperand(1))->getReg();
+  return R.isVirtual() ? R.virtRegIndex() + 1 : 0;
+}
+static SDValue combineCommutativeLibcallOrder(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
+  if (!DCI.isBeforeLegalize())
+    return SDValue();
+  EVT VT = N->getValueType(0);
+  bool Routine = N->getOpcode() == ISD::MUL ? VT.getSizeInBits() > 16 : VT.isFloatingPoint();
+  if (!Routine)
+    return SDValue();
+  unsigned L = firstArgVReg(N->getOperand(0)), R = firstArgVReg(N->getOperand(1));
+  if (!L || !R || L <= R)
+    return SDValue();
+  return DCI.DAG.getNode(N->getOpcode(), SDLoc(N), VT, N->getOperand(1), N->getOperand(0),
+                         N->getFlags());
+}
+
 SDValue DSPICTargetLowering::PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const {
+  if (N->getOpcode() == ISD::MUL || N->getOpcode() == ISD::FADD || N->getOpcode() == ISD::FMUL)
+    return combineCommutativeLibcallOrder(N, DCI);
+  if (N->getOpcode() == ISD::BRCOND || N->getOpcode() == ISD::SELECT)
+    return combineCond32(N, DCI);
   if (N->getOpcode() == ISD::LOAD)
     return combineProgLoad(N, DCI);
   if (N->getOpcode() == ISD::OR) {
@@ -1193,6 +1306,23 @@ void DSPICTargetLowering::ReplaceNodeResults(SDNode *N,
   case ISD::GlobalAddress:
     Results.push_back(LowerGlobalAddress(SDValue(N, 0), DAG));
     break;
+  case ISD::SELECT_CC:
+    // L1f-k: an i32 RESULT -- decline, and the legalizer splits it into two i16 selects whose
+    // i32 comparands then reach LowerSELECT_CC through the operand path.
+    break;
+  case ISD::UMIN:
+  case ISD::UMAX:
+  case ISD::SMIN:
+  case ISD::SMAX: {
+    // L1f-k: `a < b ? a : b` again, as the SELECT_CC the case above splits into fused halves
+    // (ExpandIntRes_MINMAX would build a SETCC on the pair and select on its boolean instead).
+    unsigned Opc = N->getOpcode();
+    ISD::CondCode CC = Opc == ISD::UMIN ? ISD::SETULT : Opc == ISD::UMAX ? ISD::SETUGT
+                     : Opc == ISD::SMIN ? ISD::SETLT : ISD::SETGT;
+    SDValue A = N->getOperand(0), B = N->getOperand(1);
+    Results.push_back(DAG.getSelectCC(SDLoc(N), A, B, A, B, CC));
+    break;
+  }
   default:
     llvm_unreachable("Do not know how to custom expand this result");
   }
@@ -1216,6 +1346,43 @@ SDValue DSPICTargetLowering::LowerBlockAddress(SDValue Op,
   SDValue Result = DAG.getTargetBlockAddress(BA, PtrVT);
 
   return DAG.getNode(DSPICISD::Wrapper, dl, PtrVT, Result);
+}
+
+// L1f-k (trellis session 92): the 32-bit tests ONE half decides, reduced before the compare is
+// emitted so the i16 forms take them: against zero, EQ/NE is `ior lo,hi,[w15]` (Z from both
+// halves, one word -- IORF16rr); the sign (`< 0`, `>= 0`, and InstCombine's `> -1`, `<= -1`) is
+// bit 15 of the high half (L1f-g's `btst`/`btss`); a single-bit mask against zero picks its half
+// (the i16 bit test then applies). Anything else stays a 32-bit compare for EmitCMP to split.
+static void ReduceCmp32(SDValue &LHS, SDValue &RHS, ISD::CondCode &CC, const SDLoc &dl,
+                        SelectionDAG &DAG) {
+  if (LHS.getValueType() != MVT::i32 || !isa<ConstantSDNode>(RHS))
+    return;
+  auto Half = [&](SDValue V, unsigned I) {
+    return DAG.getNode(ISD::EXTRACT_ELEMENT, dl, MVT::i16, V, DAG.getIntPtrConstant(I, dl));
+  };
+  bool Zero = isNullConstant(RHS), AllOnes = isAllOnesConstant(RHS);
+  if ((Zero && (CC == ISD::SETLT || CC == ISD::SETGE)) ||
+      (AllOnes && (CC == ISD::SETGT || CC == ISD::SETLE))) {
+    LHS = Half(LHS, 1);
+    RHS = DAG.getSignedConstant(Zero ? 0 : -1, dl, MVT::i16);
+    return;
+  }
+  if (!Zero || (CC != ISD::SETEQ && CC != ISD::SETNE))
+    return;
+  if (LHS.getOpcode() == ISD::AND && LHS.hasOneUse()) {
+    if (auto *M = dyn_cast<ConstantSDNode>(LHS.getOperand(1))) {
+      uint64_t Mask = M->getZExtValue() & 0xffffffffu;
+      if (isPowerOf2_64(Mask)) {
+        unsigned I = (Mask >> 16) ? 1 : 0;
+        LHS = DAG.getNode(ISD::AND, dl, MVT::i16, Half(LHS.getOperand(0), I),
+                          DAG.getConstant(I ? (Mask >> 16) : Mask, dl, MVT::i16));
+        RHS = DAG.getConstant(0, dl, MVT::i16);
+        return;
+      }
+    }
+  }
+  LHS = DAG.getNode(ISD::OR, dl, MVT::i16, Half(LHS, 0), Half(LHS, 1));
+  RHS = DAG.getConstant(0, dl, MVT::i16);
 }
 
 static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
@@ -1247,7 +1414,9 @@ static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
   case ISD::SETUGE:
     // Turn lhs u>= rhs with lhs constant into rhs u< lhs+1, this allows us to
     // fold constant into instruction.
-    if (const ConstantSDNode * C = dyn_cast<ConstantSDNode>(LHS)) {
+    // (L1f-k: never past the type's maximum -- `x <= MAX` is not `x < MAX+1`)
+    if (const ConstantSDNode *C = dyn_cast<ConstantSDNode>(LHS);
+        C && !C->getAPIntValue().isMaxValue()) {
       LHS = RHS;
       RHS =
           DAG.getSignedConstant(C->getSExtValue() + 1, dl, C->getValueType(0));
@@ -1262,7 +1431,9 @@ static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
   case ISD::SETULT:
     // Turn lhs u< rhs with lhs constant into rhs u>= lhs+1, this allows us to
     // fold constant into instruction.
-    if (const ConstantSDNode * C = dyn_cast<ConstantSDNode>(LHS)) {
+    // (L1f-k: never past the type's maximum -- `x <= MAX` is not `x < MAX+1`)
+    if (const ConstantSDNode *C = dyn_cast<ConstantSDNode>(LHS);
+        C && !C->getAPIntValue().isMaxValue()) {
       LHS = RHS;
       RHS =
           DAG.getSignedConstant(C->getSExtValue() + 1, dl, C->getValueType(0));
@@ -1277,7 +1448,9 @@ static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
   case ISD::SETGE:
     // Turn lhs >= rhs with lhs constant into rhs < lhs+1, this allows us to
     // fold constant into instruction.
-    if (const ConstantSDNode * C = dyn_cast<ConstantSDNode>(LHS)) {
+    // (L1f-k: never past the type's maximum -- `x <= MAX` is not `x < MAX+1`)
+    if (const ConstantSDNode *C = dyn_cast<ConstantSDNode>(LHS);
+        C && !C->getAPIntValue().isMaxSignedValue()) {
       LHS = RHS;
       RHS =
           DAG.getSignedConstant(C->getSExtValue() + 1, dl, C->getValueType(0));
@@ -1292,7 +1465,9 @@ static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
   case ISD::SETLT:
     // Turn lhs < rhs with lhs constant into rhs >= lhs+1, this allows us to
     // fold constant into instruction.
-    if (const ConstantSDNode * C = dyn_cast<ConstantSDNode>(LHS)) {
+    // (L1f-k: never past the type's maximum -- `x <= MAX` is not `x < MAX+1`)
+    if (const ConstantSDNode *C = dyn_cast<ConstantSDNode>(LHS);
+        C && !C->getAPIntValue().isMaxSignedValue()) {
       LHS = RHS;
       RHS =
           DAG.getSignedConstant(C->getSExtValue() + 1, dl, C->getValueType(0));
@@ -1304,6 +1479,18 @@ static SDValue EmitCMP(SDValue &LHS, SDValue &RHS, SDValue &TargetCC,
   }
 
   TargetCC = DAG.getConstant(TCC, dl, MVT::i8);
+  // L1f-k (trellis session 92): the 32-bit compare -- `cp lo,lo'` glued to `cpb hi,hi'`. The
+  // borrow compare sets C/N/OV from the 32-bit difference and Z sticky, so every condition above
+  // reads the pair as one compare (cc1 branches `leu` after `subb`: the same reliance). A
+  // constant's halves fold (EXTRACT_ELEMENT of a constant is constant); a half beyond lit8 is
+  // materialized by isel as any register operand is.
+  if (LHS.getValueType() == MVT::i32) {
+    auto Half = [&](SDValue V, unsigned I) {
+      return DAG.getNode(ISD::EXTRACT_ELEMENT, dl, MVT::i16, V, DAG.getIntPtrConstant(I, dl));
+    };
+    SDValue Lo = DAG.getNode(DSPICISD::CMP, dl, MVT::Glue, Half(LHS, 0), Half(RHS, 0));
+    return DAG.getNode(DSPICISD::CMPB, dl, MVT::Glue, Half(LHS, 1), Half(RHS, 1), Lo);
+  }
   return DAG.getNode(DSPICISD::CMP, dl, MVT::Glue, LHS, RHS);
 }
 
@@ -1315,6 +1502,7 @@ SDValue DSPICTargetLowering::LowerBR_CC(SDValue Op, SelectionDAG &DAG) const {
   SDValue RHS   = Op.getOperand(3);
   SDValue Dest  = Op.getOperand(4);
   SDLoc dl  (Op);
+  ReduceCmp32(LHS, RHS, CC, dl, DAG); // L1f-k
 
   // L1f-g (trellis session 87): a sign test against zero is a test of the top bit, and a bit
   // test can become the skip form (`btsc w0,#15 ; rcall`, 2 words for `cp0 ; bra ; rcall`'s
@@ -1355,6 +1543,19 @@ SDValue DSPICTargetLowering::LowerSETCC(SDValue Op, SelectionDAG &DAG) const {
                 (LHS.getOpcode() == ISD::TRUNCATE &&
                  LHS.getOperand(0).getOpcode() == ISD::AND));
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(2))->get();
+  ReduceCmp32(LHS, RHS, CC, dl, DAG); // L1f-k
+  // L1f-k: the sign as a VALUE is the top bit shifted down (`lsr Wb,#15,Wd`, one word), its
+  // complement one `xor #1` more -- never the five-word branch-select. Word width only (a byte
+  // shift goes through the word form, where the high byte would shift in).
+  if (LHS.getValueType() == MVT::i16 &&
+      ((isNullConstant(RHS) && (CC == ISD::SETLT || CC == ISD::SETGE)) ||
+       (isAllOnesConstant(RHS) && (CC == ISD::SETGT || CC == ISD::SETLE)))) {
+    bool Negative = CC == ISD::SETLT || CC == ISD::SETLE;
+    SDValue Bit = DAG.getNode(ISD::SRL, dl, MVT::i16, LHS, DAG.getConstant(15, dl, MVT::i16));
+    if (!Negative)
+      Bit = DAG.getNode(ISD::XOR, dl, MVT::i16, Bit, DAG.getConstant(1, dl, MVT::i16));
+    return DAG.getZExtOrTrunc(Bit, dl, Op.getValueType());
+  }
   // L1f-g (trellis session 87): a single-bit test as a VALUE. (x & 1<<k) != 0 is (x >> k) & 1
   // and == 0 is ((x ^ 1<<k) >> k) & 1 -- cc1's `bfext #k,#1` in one word (`xor #m` first for
   // == 0), which the .td selects from the shift-and-mask shape, from a register or from a
@@ -1412,6 +1613,11 @@ SDValue DSPICTargetLowering::LowerSELECT_CC(SDValue Op,
   SDValue FalseV = Op.getOperand(3);
   ISD::CondCode CC = cast<CondCodeSDNode>(Op.getOperand(4))->get();
   SDLoc dl   (Op);
+  // L1f-k: an i32 RESULT is the legalizer's to split into two i16 selects (this is only reached
+  // for one through the operand path when the comparands are i32 too); the comparands may be i32.
+  if (Op.getValueType() == MVT::i32)
+    return SDValue();
+  ReduceCmp32(LHS, RHS, CC, dl, DAG);
 
   SDValue TargetCC;
   SDValue Flag = EmitCMP(LHS, RHS, TargetCC, CC, dl, DAG);

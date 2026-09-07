@@ -70,6 +70,7 @@ def IsDXIL : LibcallPredicate<[{TT.isDXIL()}]>;
 def IsHexagon : LibcallPredicate<[{TT.getArch() == Triple::hexagon}]>;
 def IsLanai : LibcallPredicate<[{TT.getArch() == Triple::lanai}]>;
 def IsMSP430 : LibcallPredicate<[{TT.getArch() == Triple::msp430}]>;
+def IsDSPIC : LibcallPredicate<[{TT.getArch() == Triple::dspic}]>;
 def IsNVPTX : LibcallPredicate<[{TT.isNVPTX()}]>;
 
 def IsPPC : LibcallPredicate<[{TT.isPPC()}]>;
@@ -3081,6 +3082,18 @@ def __mspabi_mpyll : RuntimeLibcallImpl<MUL_I64>;
 // setLibcallCallingConv(MUL_I64, CallingConv::MSP430_BUILTIN);
 
 def isMSP430 : RuntimeLibcallAvailability<(all_of IsMSP430)>;
+
+// dsPIC33 (trellis session 92): the vendor library (XC-DSC libc99-pic30-elf.a) exports the
+// standard libgcc names -- the default set -- except the three i32 shifts by a register, which
+// it does not have (cc1 inlines them, as does the legalizer); those are opted out so a miss is a
+// compile-time "unsupported", never a symbol the link cannot find.
+def isDSPIC : RuntimeLibcallAvailability<(all_of IsDSPIC)>;
+defvar DSPICDefaultOptOut = [
+  __ashlsi3, __lshrsi3, __ashrsi3
+];
+def DSPICSystemLibrary
+    : SystemRuntimeLibrary<isDSPIC,
+    (add (sub DefaultRuntimeLibcallImpls, DSPICDefaultOptOut))>;
 
 // msp430 libgcc provides the 32-bit logical right shift only under
 // the __mspabi_srll name. Everything else in the default list
