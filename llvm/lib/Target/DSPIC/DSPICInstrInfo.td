@@ -1403,6 +1403,10 @@ defm COM8   : Unary8<"com.b",   comf8>;
 // setm: all ones, to a register or a place; clr/setm/mov into a post-incremented place are
 // the indexed-store arms (C++)
 let AddedComplexity = 20 in {
+  // Session 94: `setm.w` produces -1 with no inputs and no flag effect -- rematerialize it at a
+  // use instead of spilling the constant (the NextChunk spill debug: -1 held in a slot across
+  // eight calls). The MOV*rc constant generators carry the same two flags.
+  let isReMaterializable = 1, isAsCheapAsAMove = 1 in
   def SETM16r : DSPICFrameInst<(outs GR16:$rd), (ins), 2, "setm.w\t$rd"> {
     let Pattern = [(set GR16:$rd, (i16 -1))]; }
   let mayStore = 1 in {
