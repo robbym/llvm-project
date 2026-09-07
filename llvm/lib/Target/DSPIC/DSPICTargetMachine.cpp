@@ -129,9 +129,14 @@ public:
     // Functions keep the default `.text` handling.
     if (Kind.isText())
       return TargetLoweringObjectFileELF::SelectSectionForGlobal(GO, Kind, TM);
-    // Read-only data -> `.const` (PSV / program memory).
+    // Read-only data -> the SHARED .const (never per-object). The pic30 as special-cases the
+    // exact name .const to give it the psv/code attribute AND allow near data access; a
+    // per-object .const.<sym> (from -fdata-sections) gets neither (probe psvprobe: alloc-only
+    // refuses tbloffset, exec refuses a data reference), so const cannot be split on this
+    // assembler. Dead const is therefore not stripped, but dead functions (.text.*) and near
+    // data (.ndata/.nbss.*) still are -- which is where the size is.
     if (Kind.isReadOnly() || Kind.isMergeableCString() || Kind.isMergeableConst())
-      return pic30Section(".const", GO, Kind, TM, ELF::SHT_PROGBITS, ELF::SHF_ALLOC);
+      return ConstSection;
     // Session 90: `far` data (the attribute clang forwards) leaves the near 4 KB: cc1 places it
     // in plain `.bss`/`.data` (bss/data attributes, no `near`), which a near-tight script
     // allocates anywhere in data memory. The 13-bit file forms are refused on it in isel.
