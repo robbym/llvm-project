@@ -202,6 +202,8 @@ struct CfgSetting { std::string Name; uint32_t Mask; std::vector<CfgValue> Value
 struct CfgWord {
   uint32_t Addr, Mask, Default, Value;
   bool Primary;
+  bool Touched = false;
+  std::string TouchedBy; // the first pragma's file:line, for the repeat refusal
   std::vector<CfgSetting> Settings;
 };
 } // namespace
@@ -245,7 +247,9 @@ void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
       W.Mask = Hex(F[2]);
       W.Default = Hex(F[3]);
       W.Value = W.Default;
-      W.Primary = F.size() < 5 || F[4].trim() == "01";
+      // every word but the type-02 second-partition copies (the refuter, session 92: the
+      // 33CK-MC/33E/33F/33EV/PIC24F-KA databases type every word 00; FBOOT here is 00)
+      W.Primary = F.size() < 5 || F[4].trim() != "02";
       Words.push_back(W);
     } else if (F[0] == "CSETTING" && !Words.empty()) {
       Words.back().Settings.push_back({F[2].trim().str(), Hex(F[1]), {}});
@@ -285,11 +289,24 @@ void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
                            /*gen_crash_diag=*/false);
       V = (N << llvm::countr_zero(S->Mask)) & S->Mask;
     }
+    // cc1 refuses a repeated setting outright, even at the same value ("multiple definitions
+    // for configuration setting"); so does this, naming both pragmas
+    for (const std::string &Q : ConfigPragmas) {
+      if (&Q == &P)
+        break;
+      size_t QEq = Q.find('='), QColon = Q.rfind(':', QEq);
+      if (QEq != std::string::npos && QColon != std::string::npos &&
+          StringRef(Q.data() + QColon + 1, QEq - QColon - 1) == Name)
+        report_fatal_error(Twine(Where) + ": #pragma config: multiple definitions for configuration setting '" +
+                               Name + "' (first at " + StringRef(Q.data(), QColon) + ")",
+                           /*gen_crash_diag=*/false);
+    }
     W->Value = (W->Value & ~S->Mask) | (V & S->Mask);
+    W->Touched = true;
   }
   std::vector<const CfgWord *> Out;
   for (const CfgWord &W : Words)
-    if (W.Primary && !W.Settings.empty())
+    if (W.Primary && W.Touched && !W.Settings.empty()) // cc1 emits the words a pragma touched
       Out.push_back(&W);
   llvm::sort(Out, [](const CfgWord *A, const CfgWord *B) { return A->Addr > B->Addr; });
   OutStreamer->emitRawText("; MCHP configuration words");
