@@ -38,11 +38,27 @@
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/Support/CommandLine.h"
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/IOSandbox.h"
 using namespace llvm;
 
 #define DEBUG_TYPE "asm-printer"
 
 namespace {
+
+// The config-words row (trellis session 92): the device's configuration-word database -- the
+// DFP's xc16/bin/config/<device>/aux_configuration.data -- read at the end of a file that carries
+// `#pragma config` markers. Without it a pragma is a fatal error, never silence.
+static cl::opt<std::string> DSPICConfigDB(
+    "dspic-config-db", cl::init(""),
+    cl::desc("dsPIC: the configuration-word database for #pragma config "
+             "(the DFP's xc16/bin/config/<device>/aux_configuration.data)"));
+
   class DSPICAsmPrinter : public AsmPrinter {
   public:
     DSPICAsmPrinter(TargetMachine &TM, std::unique_ptr<MCStreamer> Streamer)
@@ -66,6 +82,10 @@ namespace {
     /// L1b: print the frame's accounting as a comment, so a report's frame size is a
     /// line the compiler printed (trellis standing rule 12).
     void emitFunctionBodyStart() override;
+    // the config-words row: the `#pragma config` markers, collected here and emitted as words
+    std::vector<std::string> ConfigPragmas;
+    void emitGlobalVariable(const GlobalVariable *GV) override;
+    void emitEndOfAsmFile(Module &M) override;
 
     void EmitInterruptVectorSection(MachineFunction &ISR);
 
@@ -161,6 +181,128 @@ bool DSPICAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
 // linked frame), C the callee-saved bytes pushed, F 2 when w14 is saved by `lnk` else 0,
 // and 4 the two-word return address `call` pushed; T is their sum: the bytes this
 // function adds to the stack above the caller's w15 at the call.
+
+// The config-words row (trellis session 92). A `#pragma config NAME = VALUE` reaches the backend
+// as a marker global in section `.dspic.config` whose initializer is "file:line:NAME=VALUE" (the
+// clang handler, ParsePragma.cpp). The markers are collected here and never emitted as data.
+void DSPICAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
+  if (GV->hasSection() && GV->getSection() == ".dspic.config") {
+    if (GV->hasInitializer())
+      if (auto *CDA = dyn_cast<ConstantDataArray>(GV->getInitializer()))
+        if (CDA->isCString())
+          ConfigPragmas.push_back(CDA->getAsCString().str());
+    return;
+  }
+  AsmPrinter::emitGlobalVariable(GV);
+}
+
+namespace {
+struct CfgValue { std::string Name; uint32_t Val; };
+struct CfgSetting { std::string Name; uint32_t Mask; std::vector<CfgValue> Values; };
+struct CfgWord {
+  uint32_t Addr, Mask, Default, Value;
+  bool Primary;
+  std::vector<CfgSetting> Settings;
+};
+} // namespace
+
+// At the end of the file: the database is read (CWORD:addr:mask:default[:type] opens a word;
+// CSETTING:mask:name:desc a field in it; CVALUE:value:name:desc an option of the field), each
+// pragma is resolved -- the setting by name over the PRIMARY words (type 01, or every word when
+// the file has no type column), the value by option name or as a number shifted into the field --
+// and cc1's shape is printed for every primary word that has at least one setting (cc1 skips the
+// settingless ones), highest address first: the value is the word's default with each set field
+// masked in. An unknown setting or value is a fatal error naming the pragma's file:line -- cc1
+// refuses those too, and silence was the defect this row repairs.
+void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
+  if (ConfigPragmas.empty())
+    return;
+  if (DSPICConfigDB.empty())
+    report_fatal_error(Twine("#pragma config at ") + ConfigPragmas.front().substr(0, ConfigPragmas.front().rfind(':', ConfigPragmas.front().find('='))) +
+                           ": no configuration database -- pass -mllvm -dspic-config-db=<the DFP's "
+                           "xc16/bin/config/<device>/aux_configuration.data>",
+                       /*gen_crash_diag=*/false);
+  // the codegen pipeline runs under an IO sandbox (IOSandbox.h); the database is the one file
+  // this backend reads, and it is read here under the sandbox's own scoped escape
+  auto BypassSandbox = sys::sandbox::scopedDisable();
+  auto Buf = MemoryBuffer::getFile(DSPICConfigDB);
+  if (!Buf)
+    report_fatal_error(Twine("#pragma config: cannot read the configuration database ") + DSPICConfigDB,
+                       /*gen_crash_diag=*/false);
+  std::vector<CfgWord> Words;
+  SmallVector<StringRef, 512> Lines;
+  (*Buf)->getBuffer().split(Lines, '\n');
+  auto Hex = [](StringRef S) { uint32_t V = 0; S.trim().getAsInteger(16, V); return V; };
+  for (StringRef Line : Lines) {
+    Line = Line.rtrim("\r");
+    SmallVector<StringRef, 6> F;
+    Line.split(F, ':');
+    if (F.size() < 3)
+      continue;
+    if (F[0] == "CWORD" && F.size() >= 4) {
+      CfgWord W;
+      W.Addr = Hex(F[1]);
+      W.Mask = Hex(F[2]);
+      W.Default = Hex(F[3]);
+      W.Value = W.Default;
+      W.Primary = F.size() < 5 || F[4].trim() == "01";
+      Words.push_back(W);
+    } else if (F[0] == "CSETTING" && !Words.empty()) {
+      Words.back().Settings.push_back({F[2].trim().str(), Hex(F[1]), {}});
+    } else if (F[0] == "CVALUE" && !Words.empty() && !Words.back().Settings.empty()) {
+      Words.back().Settings.back().Values.push_back({F[2].trim().str(), Hex(F[1])});
+    }
+  }
+  for (const std::string &P : ConfigPragmas) {
+    size_t Eq = P.find('=');
+    size_t Colon = P.rfind(':', Eq);
+    if (Eq == std::string::npos || Colon == std::string::npos)
+      continue;
+    StringRef Where(P.data(), Colon), Name(P.data() + Colon + 1, Eq - Colon - 1), Val(P.data() + Eq + 1);
+    CfgWord *W = nullptr;
+    CfgSetting *S = nullptr;
+    for (CfgWord &Cand : Words) {
+      if (!Cand.Primary)
+        continue;
+      for (CfgSetting &SC : Cand.Settings)
+        if (SC.Name == Name) { W = &Cand; S = &SC; break; }
+      if (S)
+        break;
+    }
+    if (!S)
+      report_fatal_error(Twine(Where) + ": #pragma config: unknown configuration setting '" + Name +
+                             "' for this device (" + DSPICConfigDB + ")",
+                         /*gen_crash_diag=*/false);
+    bool Found = false;
+    uint32_t V = 0;
+    for (const CfgValue &CV : S->Values)
+      if (CV.Name == Val) { V = CV.Val; Found = true; break; }
+    if (!Found) {
+      uint32_t N = 0;
+      if (Val.getAsInteger(0, N))
+        report_fatal_error(Twine(Where) + ": #pragma config: unknown value '" + Val + "' for setting '" +
+                               Name + "'",
+                           /*gen_crash_diag=*/false);
+      V = (N << llvm::countr_zero(S->Mask)) & S->Mask;
+    }
+    W->Value = (W->Value & ~S->Mask) | (V & S->Mask);
+  }
+  std::vector<const CfgWord *> Out;
+  for (const CfgWord &W : Words)
+    if (W.Primary && !W.Settings.empty())
+      Out.push_back(&W);
+  llvm::sort(Out, [](const CfgWord *A, const CfgWord *B) { return A->Addr > B->Addr; });
+  OutStreamer->emitRawText("; MCHP configuration words");
+  for (const CfgWord *W : Out) {
+    const std::string &Last = W->Settings.back().Name;
+    std::string A = llvm::utohexstr(W->Addr, /*LowerCase=*/true);
+    OutStreamer->emitRawText(Twine("; Configuration word @ 0x") + A);
+    OutStreamer->emitRawText(Twine("\t.section\t.config_") + Last + ", code, address(0x" + A + "), keep");
+    OutStreamer->emitRawText(Twine("__config_") + Last + ":");
+    OutStreamer->emitRawText(Twine("\t.pword\t") + Twine(W->Value));
+  }
+}
+
 void DSPICAsmPrinter::emitFunctionBodyStart() {
   const MachineFrameInfo &MFI = MF->getFrameInfo();
   const auto *FuncInfo = MF->getInfo<DSPICMachineFunctionInfo>();

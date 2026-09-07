@@ -413,6 +413,111 @@ private:
   Sema &Actions;
 };
 
+/// dsPIC (trellis session 92, the config-words row): `#pragma config NAME = VALUE[, NAME = VALUE]`
+/// sets the device's configuration words. The pragma is rewritten into a marker global,
+///   static const char __dspic_config_N[] __attribute__((used, section(".dspic.config")))
+///     = "file:line:NAME=VALUE";
+/// which the DSPIC AsmPrinter collects (and never emits) and resolves against the device's
+/// configuration database into the `.config_*` sections cc1 emits. The front end owns the syntax
+/// and the location; the backend owns the semantics and the diagnostics of an unknown setting.
+struct PragmaDSPICConfigHandler : public PragmaHandler {
+  PragmaDSPICConfigHandler() : PragmaHandler("config") {}
+  void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
+                    Token &FirstToken) override;
+  unsigned Counter = 0;
+};
+
+void PragmaDSPICConfigHandler::HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
+                                            Token &FirstToken) {
+  SourceLocation Loc = FirstToken.getLocation();
+  PresumedLoc PLoc = PP.getSourceManager().getPresumedLoc(Loc);
+  std::string Where = PLoc.isValid()
+                          ? (llvm::Twine(PLoc.getFilename()) + ":" + llvm::Twine(PLoc.getLine())).str()
+                          : std::string("?");
+  SmallVector<std::pair<std::string, std::string>, 4> Pairs;
+  Token Tok;
+  PP.Lex(Tok);
+  while (Tok.isNot(tok::eod)) {
+    if (Tok.isNot(tok::identifier)) {
+      PP.Diag(Tok, diag::warn_pragma_expected_identifier) << "config";
+      return;
+    }
+    std::string Name = Tok.getIdentifierInfo()->getName().str();
+    PP.Lex(Tok);
+    if (Tok.isNot(tok::equal)) {
+      PP.Diag(Tok, diag::warn_pragma_expected_punc) << "config" << "=";
+      return;
+    }
+    PP.Lex(Tok);
+    std::string Value;
+    if (Tok.is(tok::identifier))
+      Value = Tok.getIdentifierInfo()->getName().str();
+    else if (Tok.is(tok::numeric_constant))
+      Value = PP.getSpelling(Tok);
+    else {
+      PP.Diag(Tok, diag::warn_pragma_expected_identifier) << "config";
+      return;
+    }
+    Pairs.push_back({Name, Value});
+    PP.Lex(Tok);
+    if (Tok.is(tok::comma)) {
+      PP.Lex(Tok);
+      continue;
+    }
+    if (Tok.isNot(tok::eod)) {
+      PP.Diag(Tok, diag::warn_pragma_extra_tokens_at_eol) << "config";
+      return;
+    }
+  }
+  if (Pairs.empty())
+    return;
+  SmallVector<Token, 32> Toks;
+  auto Ident = [&](StringRef S) {
+    Token T;
+    T.startToken();
+    IdentifierInfo *II = PP.getIdentifierInfo(S);
+    T.setIdentifierInfo(II);
+    T.setKind(II->getTokenID());
+    T.setLocation(Loc);
+    Toks.push_back(T);
+  };
+  auto Punct = [&](tok::TokenKind K) {
+    Token T;
+    T.startToken();
+    T.setKind(K);
+    T.setLocation(Loc);
+    Toks.push_back(T);
+  };
+  auto Str = [&](StringRef S) {
+    std::string Lit = "\"";
+    for (char C : S) {
+      if (C == '\\' || C == '"')
+        Lit += '\\';
+      Lit += C;
+    }
+    Lit += '"';
+    Token T;
+    T.startToken();
+    T.setKind(tok::string_literal);
+    PP.CreateString(Lit, T, Loc, Loc);
+    Toks.push_back(T);
+  };
+  for (auto &P : Pairs) {
+    std::string Name = ("__dspic_config_" + llvm::Twine(Counter++)).str();
+    Ident("static"); Ident("const"); Ident("char"); Ident(Name);
+    Punct(tok::l_square); Punct(tok::r_square);
+    Ident("__attribute__"); Punct(tok::l_paren); Punct(tok::l_paren);
+    Ident("used"); Punct(tok::comma);
+    Ident("section"); Punct(tok::l_paren); Str(".dspic.config"); Punct(tok::r_paren);
+    Punct(tok::r_paren); Punct(tok::r_paren);
+    Punct(tok::equal); Str(Where + ":" + P.first + "=" + P.second); Punct(tok::semi);
+  }
+  auto Owned = std::make_unique<Token[]>(Toks.size());
+  std::copy(Toks.begin(), Toks.end(), Owned.get());
+  PP.EnterTokenStream(std::move(Owned), Toks.size(), /*DisableMacroExpansion=*/true,
+                      /*IsReinject=*/false);
+}
+
 void markAsReinjectedForRelexing(llvm::MutableArrayRef<clang::Token> Toks) {
   for (auto &T : Toks)
     T.setFlag(clang::Token::IsReinjected);
@@ -576,6 +681,12 @@ void Parser::initializePragmaHandlers() {
     RISCVPragmaHandler = std::make_unique<PragmaRISCVHandler>(Actions);
     PP.AddPragmaHandler("clang", RISCVPragmaHandler.get());
   }
+
+  // dsPIC (trellis session 92): `#pragma config`, the configuration words
+  if (getTargetInfo().getTriple().getArch() == llvm::Triple::dspic) {
+    DSPICConfigHandler = std::make_unique<PragmaDSPICConfigHandler>();
+    PP.AddPragmaHandler(DSPICConfigHandler.get());
+  }
 }
 
 void Parser::resetPragmaHandlers() {
@@ -715,6 +826,10 @@ void Parser::resetPragmaHandlers() {
   if (getTargetInfo().getTriple().isRISCV()) {
     PP.RemovePragmaHandler("clang", RISCVPragmaHandler.get());
     RISCVPragmaHandler.reset();
+  }
+  if (DSPICConfigHandler) {
+    PP.RemovePragmaHandler(DSPICConfigHandler.get());
+    DSPICConfigHandler.reset();
   }
 }
 
