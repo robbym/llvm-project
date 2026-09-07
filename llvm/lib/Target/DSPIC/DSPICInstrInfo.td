@@ -498,6 +498,11 @@ def MOVZX16rr8 : I8rr<0b0100,
                       (outs GR16:$rd), (ins GR8:$rs),
                       "ze\t$rs,$rd",
                       [(set GR16:$rd, (zext GR8:$rs))]>;
+// Session 94 (REMAT-PLAN Phase 0): the MCID flag the remat gate needs. MOV8rm/MOV16rm already
+// carry it from the MSP430 table; this one did not. The flag ALONE does nothing -- the default
+// isReMaterializableImpl still refuses a non-invariant load -- so this is inert until
+// -dspic-remat-near-global.
+let isReMaterializable = 1 in
 def MOVZX16rm8 : I8rm<0b0100,
                       (outs GR16:$rd), (ins memsrc:$src),
                       "mov.b\t$src,$rd\n\tze\t$rd,$rd",

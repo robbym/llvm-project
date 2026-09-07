@@ -78,6 +78,37 @@ bool LiveRangeEdit::canRematerializeAt(Remat &RM, SlotIndex UseIdx) {
   if (!VirtRegAuxInfo::allUsesAvailableAt(RM.OrigMI, UseIdx, LIS, MRI, TII))
     return false;
 
+  // (dsPIC port, trellis session 94 -- REMAT-PLAN 4.4) allUsesAvailableAt checks the address
+  // REGISTERS; nothing checks the MEMORY, because the rematerializable loads upstream admits are
+  // ones whose freshness is not at issue (invariant loads, immutable stack slots, and a few
+  // named opcodes), so the question never arose. A target now offers a load of MUTABLE memory,
+  // so the memory has to be checked -- an ADDED REFUSAL, reached only when the target answers
+  // true below, which by default no target does.
+  if (TII.isMemoryRematCandidate(*RM.OrigMI) && !isMemoryRematSafe(RM))
+    return false;
+
+  return true;
+}
+
+bool LiveRangeEdit::isMemoryRematSafe(const Remat &RM) const {
+  // No parent live range to walk, or no value: nothing to prove the location with.
+  if (!Parent || !RM.ParentVNI)
+    return false;
+  SlotIndexes *Indexes = LIS.getSlotIndexes();
+  for (const LiveRange::Segment &S : *Parent) {
+    if (S.valno != RM.ParentVNI)
+      continue;
+    SlotIndex I = S.start;
+    while (I < S.end) {
+      const MachineInstr *MI = Indexes->getInstructionFromIndex(I);
+      if (MI && MI != RM.OrigMI && TII.isMemoryRematClobber(*RM.OrigMI, *MI))
+        return false;
+      SlotIndex N = Indexes->getNextNonNullIndex(I);
+      if (!(I < N)) // end of the function: no forward progress left
+        break;
+      I = N;
+    }
+  }
   return true;
 }
 

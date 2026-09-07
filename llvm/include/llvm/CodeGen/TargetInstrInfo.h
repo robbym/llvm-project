@@ -198,6 +198,28 @@ public:
     return false;
   }
 
+  /// (dsPIC port, trellis session 94 -- REMAT-PLAN 4.4) Is \p MI a rematerialization candidate
+  /// that reads MUTABLE memory? This DEFAULTS TO FALSE, so the extra refusal it enables in
+  /// LiveRangeEdit is unreachable for every target that does not implement it. A target that
+  /// answers true asserts that isMemoryRematClobber() can judge, for every other instruction,
+  /// whether it may write the location \p MI reads.
+  ///
+  /// Why no such check existed: the default isReMaterializableImpl admits a load only when it
+  /// is dereferenceable-INVARIANT or an IMMUTABLE fixed-stack slot, and the target overrides
+  /// that admit loads admit named opcodes (X86's LOAD_STACK_GUARD and LD_Fp0*/LD_Fp1*, for
+  /// instance) rather than a general mutable class -- so memory freshness never arose.
+  virtual bool isMemoryRematCandidate(const MachineInstr &MI) const {
+    return false;
+  }
+
+  /// (dsPIC port, trellis session 94 -- REMAT-PLAN 4.4) May \p MI write the memory that the
+  /// rematerialization candidate \p Orig reads? Answer TRUE when unsure: the caller REFUSES the
+  /// rematerialization on true, so the safe answer is the default.
+  virtual bool isMemoryRematClobber(const MachineInstr &Orig,
+                                    const MachineInstr &MI) const {
+    return true;
+  }
+
   virtual bool isSafeToSink(MachineInstr &MI, MachineBasicBlock *SuccToSinkTo,
                             MachineCycleInfo *CI) const {
     return true;

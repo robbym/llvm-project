@@ -86,6 +86,12 @@ namespace llvm {
     EmitInstrWithCustomInserter(MachineInstr &MI,
                                 MachineBasicBlock *BB) const override;
 
+    /// REMAT-PLAN 4.2 (trellis session 94): carry the IR-level verdict about a near-global load
+    /// down to the spiller as MachineMemOperand::MOTargetFlag1, which is target-private, so no
+    /// generic pass can misread it as invariance.
+    MachineMemOperand::Flags
+    getTargetMMOFlags(const Instruction &I) const override;
+
   private:
     /// Clauses 2-5 of the compatible-frame rule (L1c); Why names the failing one.
     bool isEligibleForTailCall(const TargetLowering::CallLoweringInfo &CLI,

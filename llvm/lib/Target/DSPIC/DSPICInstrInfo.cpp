@@ -16,13 +16,210 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineOutliner.h"
+#include "llvm/CodeGen/PseudoSourceValue.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
 #define GET_INSTRINFO_CTOR_DTOR
 #include "DSPICGenInstrInfo.inc"
+
+// ---- REMAT-PLAN (trellis session 94): rematerializing a near-global load ------------------
+// The two options. The feature is OFF by default, so the default build is byte-identical.
+static cl::opt<bool> EnableRematNearGlobal(
+    "dspic-remat-near-global", cl::Hidden, cl::init(false),
+    cl::desc("Offer a load of a near global as rematerializable, so the allocator re-reads it "
+             "from memory instead of holding it in a register across a call (REMAT-PLAN)"));
+
+// TEMPORARY (REMAT-PLAN Phase 1/2). The Phase-3 IR pass is what may legitimately clear an
+// opaque call; this knob asserts the clearance for EVERY near-global load with nothing behind
+// it, so that the spiller path can be built and its explicit-store scan validated in isolation.
+// It is UNSOUND BY CONSTRUCTION for any program whose callees write the global, and it is
+// retired when the pass lands.
+static cl::opt<bool> RematForce(
+    "dspic-remat-force", cl::Hidden, cl::init(false),
+    cl::desc("REMAT-PLAN Phase 1/2 scaffolding: put the IR pass's verdict on every near-global "
+             "load without proving it. Unsound for calls; for building the spiller path only"));
+
+// The instrument. A refusal is invisible otherwise -- the output simply does not change -- and
+// the first run of Phase 1 refused everything for a reason no print showed.
+static cl::opt<bool> RematWhy(
+    "dspic-remat-why", cl::Hidden, cl::init(false),
+    cl::desc("Print, for each near-global load rematerialization the memory check refuses, the "
+             "instruction in the value's live range that vetoed it"));
+
+bool llvm::DSPICIsRematerializableNearGlobalLoad(const Instruction &I) {
+  const auto *LI = dyn_cast<LoadInst>(&I);
+  if (!LI || !LI->isSimple()) // not volatile, not atomic, unordered
+    return false;
+  Type *Ty = LI->getType();
+  if (!Ty->isIntegerTy(8) && !Ty->isIntegerTy(16))
+    return false;
+  // The whole object by its own name: a GEP or any computed address is a different class.
+  const auto *GVar = dyn_cast<GlobalVariable>(LI->getPointerOperand());
+  return GVar && GVar->getAddressSpace() == 0 && !GVar->isConstant() &&
+         !GVar->hasSection() && !GVar->hasAttribute("far");
+}
+
+MachineMemOperand::Flags llvm::DSPICGetRematMMOFlags(const Instruction &I) {
+  if (EnableRematNearGlobal && RematForce &&
+      DSPICIsRematerializableNearGlobalLoad(I))
+    return MachineMemOperand::MOTargetFlag1;
+  return MachineMemOperand::MONone;
+}
+
+// The MIR half of the same class. SelectAddr plants $sr in the base-register slot as the "no
+// base register" sentinel for a bare file address, and the displacement is then the symbol.
+static bool isNearGlobalLoadOpcode(unsigned Op) {
+  switch (Op) {
+  case DSPIC::MOV16rm:
+  case DSPIC::MOV8rm:
+  case DSPIC::MOVZX16rm8:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool DSPICInstrInfo::isRematerializableNearGlobalLoad(
+    const MachineInstr &MI, const GlobalValue **GVOut) const {
+  if (!isNearGlobalLoadOpcode(MI.getOpcode()) || MI.getNumOperands() < 3)
+    return false;
+  if (!MI.getOperand(0).isReg() || !MI.getOperand(0).isDef() ||
+      MI.getOperand(0).getSubReg())
+    return false;
+  if (MI.mayStore() || MI.hasUnmodeledSideEffects() || MI.isNotDuplicable())
+    return false;
+  const MachineOperand &Base = MI.getOperand(1);
+  const MachineOperand &Disp = MI.getOperand(2);
+  if (!Base.isReg() || Base.getReg() != DSPIC::SR || !Disp.isGlobal())
+    return false;
+  const GlobalValue *GV = Disp.getGlobal();
+  const auto *GVar = dyn_cast<GlobalVariable>(GV);
+  if (!GVar || GVar->getAddressSpace() != 0 || GVar->isConstant() ||
+      GVar->hasSection() || GVar->hasAttribute("far"))
+    return false;
+  // Exactly one ordinary load memory operand.
+  if (MI.memoperands_empty() ||
+      std::next(MI.memoperands_begin()) != MI.memoperands_end())
+    return false;
+  const MachineMemOperand *MMO = *MI.memoperands_begin();
+  if (!MMO->isLoad() || MMO->isStore() || MMO->isVolatile() || !MMO->isUnordered())
+    return false;
+  if (GVOut)
+    *GVOut = GV;
+  return true;
+}
+
+bool DSPICInstrInfo::hasRematVerdict(const MachineInstr &MI) const {
+  return !MI.memoperands_empty() &&
+         ((*MI.memoperands_begin())->getFlags() & MachineMemOperand::MOTargetFlag1);
+}
+
+// REMAT-PLAN 4.3 -- the gate. The default refuses every non-invariant load; this admits exactly
+// the flagged near-global loads and defers on everything else.
+bool DSPICInstrInfo::isReMaterializableImpl(const MachineInstr &MI) const {
+  if (EnableRematNearGlobal && isRematerializableNearGlobalLoad(MI) &&
+      hasRematVerdict(MI))
+    return true;
+  return TargetInstrInfo::isReMaterializableImpl(MI);
+}
+
+// $sr in the base slot of a bare file address is a SENTINEL, not a read: the encoded
+// instruction names only the symbol. Without this, allUsesAvailableAt refuses every
+// rematerialization of a near-global load on the strength of a physreg use that is not there.
+bool DSPICInstrInfo::isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) const {
+  if (!EnableRematNearGlobal || OpIdx != 1)
+    return false;
+  const MachineOperand &MO = MI.getOperand(OpIdx);
+  if (!MO.isReg() || MO.getReg() != DSPIC::SR)
+    return false;
+  return isRematerializableNearGlobalLoad(MI);
+}
+
+bool DSPICInstrInfo::isMemoryRematCandidate(const MachineInstr &MI) const {
+  return EnableRematNearGlobal && isRematerializableNearGlobalLoad(MI);
+}
+
+// REMAT-PLAN 4.4 -- the judgement CodeGen asks for at every instruction the value is live
+// across. TRUE means "may write the global the candidate reads", and the caller refuses on it.
+// Print a refusal under -dspic-remat-why and return true (the caller refuses on true), so every
+// veto in this function reads as `return report(...)`.
+static bool reportImpl(const MachineInstr &Orig, const MachineInstr &MI,
+                       const GlobalValue *GV, const char *Why, StringRef OpName) {
+  if (RematWhy)
+    errs() << "dspic-remat: " << Orig.getMF()->getName() << ": refuse re-reading @"
+           << (GV ? GV->getName() : "?") << " -- " << Why << " (" << OpName << ")\n";
+  return true;
+}
+
+bool DSPICInstrInfo::isMemoryRematClobber(const MachineInstr &Orig,
+                                          const MachineInstr &MI) const {
+  auto report = [&](const MachineInstr &O, const MachineInstr &M,
+                    const GlobalValue *G, const char *Why) {
+    return reportImpl(O, M, G, Why, getName(M.getOpcode()));
+  };
+  const GlobalValue *GV = nullptr;
+  if (!isRematerializableNearGlobalLoad(Orig, &GV))
+    return true; // not the class this reasoning covers
+
+  // Instructions that are not code, and the call-frame pseudos, which only move w15.
+  if (MI.isDebugInstr() || MI.isPosition() || MI.isImplicitDef() || MI.isKill() ||
+      MI.isCFIInstruction() || MI.isLabel() || isFrameInstr(MI))
+    return false;
+
+  // An opaque call may write ANY global; nothing at MIR can see through one. The IR pass is the
+  // only thing that can, and it says so through the load's MMO flag. Without that flag, refuse.
+  if (MI.isCall() || MI.isInlineAsm())
+    return hasRematVerdict(Orig)
+               ? false
+               : report(Orig, MI, GV, "an opaque call, with no IR-level verdict on the load");
+
+  if (MI.hasUnmodeledSideEffects())
+    return report(Orig, MI, GV, "unmodeled side effects");
+  if (!MI.mayStore())
+    return false;
+
+  // An explicit store. Name its destination, or refuse. (No AAResults is threaded in here --
+  // REMAT-PLAN 9.2 -- so a pointer or indexed store is a clobber even when it is not one.)
+  bool Named = false;
+  for (const MachineMemOperand *MMO : MI.memoperands()) {
+    if (!MMO->isStore())
+      continue;
+    Named = true;
+    if (const PseudoSourceValue *PSV = MMO->getPseudoValue()) {
+      switch (PSV->kind()) {
+      case PseudoSourceValue::Stack:
+      case PseudoSourceValue::FixedStack:
+      case PseudoSourceValue::ConstantPool:
+      case PseudoSourceValue::JumpTable:
+        continue; // the frame and read-only pools are not this data global
+      default:
+        return report(Orig, MI, GV, "a store to a pseudo source this scan does not model");
+      }
+    }
+    const Value *V = MMO->getValue();
+    if (!V)
+      return report(Orig, MI, GV, "a store with an unnamed destination");
+    // `sink[1] = x` names `getelementptr (@sink, 2)`, a ConstantExpr, not `@sink`. The object
+    // an offset is taken into is the object the NoAlias comparison is about.
+    V = V->stripInBoundsConstantOffsets();
+    if (isa<AllocaInst>(V))
+      continue; // a stack object cannot be the global
+    const auto *DstGV = dyn_cast<GlobalValue>(V);
+    if (!DstGV)
+      return report(Orig, MI, GV, "a store through a pointer this scan cannot name");
+    if (DstGV == GV)
+      return report(Orig, MI, GV, "a store to the same global");
+  }
+  // A store whose destination no memory operand names says nothing; refuse.
+  return Named ? false : report(Orig, MI, GV, "a store with no memory operand at all");
+}
 
 // Pin the vtable to this file.
 void DSPICInstrInfo::anchor() {}

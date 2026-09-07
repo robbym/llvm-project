@@ -85,12 +85,36 @@ public:
                      MachineBasicBlock::iterator &It, MachineFunction &MF,
                      outliner::Candidate &C) const override;
 
+  // ---- REMAT-PLAN (trellis session 94): rematerializing a near-global load ----------------
+  /// Is MI a load of a whole near, non-far, non-volatile, non-atomic, mutable data global by
+  /// its bare file address? That is the class REMAT-PLAN section 3 restricts remat to. GVOut,
+  /// when given, receives the global the load reads.
+  bool isRematerializableNearGlobalLoad(const MachineInstr &MI,
+                                        const GlobalValue **GVOut = nullptr) const;
+  /// Does MI's memory operand carry the IR pass's verdict (MOTargetFlag1)? The ONE place that
+  /// verdict is consulted; -dspic-remat-force stands in for the pass until Phase 3.
+  bool hasRematVerdict(const MachineInstr &MI) const;
+
+  bool isReMaterializableImpl(const MachineInstr &MI) const override;
+  bool isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) const override;
+  bool isMemoryRematCandidate(const MachineInstr &MI) const override;
+  bool isMemoryRematClobber(const MachineInstr &Orig,
+                            const MachineInstr &MI) const override;
+
   int64_t getFramePoppedByCallee(const MachineInstr &I) const {
     assert(isFrameInstr(I) && "Not a frame instruction");
     assert(I.getOperand(1).getImm() >= 0 && "Size must not be negative");
     return I.getOperand(1).getImm();
   }
 };
+
+/// (REMAT-PLAN 4.2, trellis session 94) The IR-level twin of the MIR class above: the same
+/// restrictions, stated on a LoadInst. Phase 3's annotation pass will add the MemorySSA proof
+/// on top of this; today -dspic-remat-force stands in for it.
+bool DSPICIsRematerializableNearGlobalLoad(const Instruction &I);
+
+/// The getTargetMMOFlags body, kept beside the class it belongs to.
+MachineMemOperand::Flags DSPICGetRematMMOFlags(const Instruction &I);
 
 }
 

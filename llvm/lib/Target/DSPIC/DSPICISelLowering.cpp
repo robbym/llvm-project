@@ -17,6 +17,7 @@
 #include "DSPICSelectionDAGInfo.h"
 #include "DSPICSubtarget.h"
 #include "DSPICTargetMachine.h"
+#include "DSPICInstrInfo.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -2047,4 +2048,11 @@ DSPICTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
 
   MI.eraseFromParent(); // The pseudo instruction is gone now.
   return BB;
+}
+
+// REMAT-PLAN 4.2 -- the whole IR-to-spiller plumbing, in one override. The body lives beside the
+// class it describes, in DSPICInstrInfo.cpp.
+MachineMemOperand::Flags
+DSPICTargetLowering::getTargetMMOFlags(const Instruction &I) const {
+  return DSPICGetRematMMOFlags(I);
 }

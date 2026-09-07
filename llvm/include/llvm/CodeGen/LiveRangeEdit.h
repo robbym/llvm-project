@@ -179,6 +179,12 @@ public:
   /// UseIdx. It is assumed that parent_.getVNINfoAt(UseIdx) == ParentVNI.
   bool canRematerializeAt(Remat &RM, SlotIndex UseIdx);
 
+  /// (dsPIC port, trellis session 94 -- REMAT-PLAN 4.4) For a candidate that reads mutable
+  /// memory (TII.isMemoryRematCandidate), is the location unchanged everywhere the value is
+  /// live? Walks the segments of RM.ParentVNI and asks the target about each instruction.
+  /// Sound because a writer on any def->use path is an instruction at which the value is live.
+  bool isMemoryRematSafe(const Remat &RM) const;
+
   /// rematerializeAt - Rematerialize RM.ParentVNI into DestReg by inserting an
   /// instruction into MBB before MI. The new instruction is mapped, but
   /// liveness is not updated. If ReplaceIndexMI is not null it will be replaced
