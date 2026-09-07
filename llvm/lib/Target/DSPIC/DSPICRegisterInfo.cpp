@@ -19,6 +19,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DSPICRegisterInfo.h"
+#include "llvm/CodeGen/LiveIntervals.h"
 #include "DSPICFrameLowering.h"
 #include "DSPICMachineFunctionInfo.h"
 #include "DSPICTargetMachine.h"
@@ -125,6 +126,34 @@ BitVector DSPICRegisterInfo::getReservedRegs(const MachineFunction &MF) const {
 const TargetRegisterClass *
 DSPICRegisterInfo::getPointerRegClass(unsigned Kind) const {
   return &DSPIC::GR16RegClass;
+}
+
+// Session 95. `add.w _sym,WREG` and friends take their operand in WREG, so their operand class
+// GR16_W0 (and GR8_W0) holds exactly ONE register. Isel puts a COPY beside the instruction; the
+// coalescer then merges it and the merged value carries the one-register class over the source's
+// ENTIRE live range. Two of those -- two volatile near globals read-modify-written in one
+// function -- both demand w0 for their whole lives, cannot coexist, and after spilling leave
+// unspillable halves needing w0 at the function entry, where w0 holds the first argument. The
+// allocator then reports "ran out of registers during register allocation" and compilation FAILS
+// on legal C.
+//
+// Refuse the join when the result is a single-register class and the value would leave the block
+// the copy is in. Inside one block the w0 pressure is local and the allocator can see it; across
+// blocks the constraint outlives the reason for it. The copy survives, w0 is written next to the
+// instruction that wants it, and the value stays an ordinary GR16.
+bool DSPICRegisterInfo::shouldCoalesce(MachineInstr *MI, const TargetRegisterClass *SrcRC,
+                                       unsigned SubReg, const TargetRegisterClass *DstRC,
+                                       unsigned DstSubReg, const TargetRegisterClass *NewRC,
+                                       LiveIntervals &LIS) const {
+  if (!NewRC || NewRC->getNumRegs() > 1)
+    return true;
+  for (const MachineOperand &MO : MI->operands()) {
+    if (!MO.isReg() || !MO.getReg().isVirtual() || !LIS.hasInterval(MO.getReg()))
+      continue;
+    if (!LIS.intervalIsInOneMBB(LIS.getInterval(MO.getReg())))
+      return false;
+  }
+  return true;
 }
 
 bool DSPICRegisterInfo::requiresRegisterScavenging(

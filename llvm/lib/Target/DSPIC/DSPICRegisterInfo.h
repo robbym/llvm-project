@@ -33,6 +33,14 @@ public:
 
   /// Frame indices past the 10-bit displacement need a scratch register: a virtual
   /// one is created in eliminateFrameIndex and PEI scavenges it afterwards (L1b).
+  /// (session 95) Refuse a coalesce that would give a long-lived value a ONE-REGISTER class.
+  /// The WREG-only file forms take GR16_W0/GR8_W0, and merging a copy into one of those spreads
+  /// the constraint over the source's whole live range; two such values cannot coexist and the
+  /// allocator aborts outright. See crashfix.py for the trace.
+  bool shouldCoalesce(MachineInstr *MI, const TargetRegisterClass *SrcRC, unsigned SubReg,
+                      const TargetRegisterClass *DstRC, unsigned DstSubReg,
+                      const TargetRegisterClass *NewRC, LiveIntervals &LIS) const override;
+
   bool requiresRegisterScavenging(const MachineFunction &MF) const override;
   bool requiresFrameIndexScavenging(const MachineFunction &MF) const override;
 
