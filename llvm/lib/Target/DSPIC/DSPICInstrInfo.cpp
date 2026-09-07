@@ -31,7 +31,7 @@ using namespace llvm;
 
 // ---- REMAT-PLAN (trellis session 94): rematerializing a near-global load ------------------
 // The two options. The feature is OFF by default, so the default build is byte-identical.
-static cl::opt<bool> EnableRematNearGlobal(
+cl::opt<bool> llvm::DSPICEnableRematNearGlobal(
     "dspic-remat-near-global", cl::Hidden, cl::init(false),
     cl::desc("Offer a load of a near global as rematerializable, so the allocator re-reads it "
              "from memory instead of holding it in a register across a call (REMAT-PLAN)"));
@@ -67,7 +67,7 @@ bool llvm::DSPICIsRematerializableNearGlobalLoad(const Instruction &I) {
 }
 
 MachineMemOperand::Flags llvm::DSPICGetRematMMOFlags(const Instruction &I) {
-  if (EnableRematNearGlobal && RematForce &&
+  if (DSPICEnableRematNearGlobal && RematForce &&
       DSPICIsRematerializableNearGlobalLoad(I))
     return MachineMemOperand::MOTargetFlag1;
   return MachineMemOperand::MONone;
@@ -80,6 +80,12 @@ static bool isNearGlobalLoadOpcode(unsigned Op) {
   case DSPIC::MOV16rm:
   case DSPIC::MOV8rm:
   case DSPIC::MOVZX16rm8:
+  // Session 95: the byte read of a near global, as one instruction that uses its own
+  // destination as the address scratch. ⚠ MOV8rm and MOVZX16rm8 stay in the list and stay
+  // DEAD -- isel never builds the $sr-sentinel base for them (measured: 0 of 55 byte loads on
+  // bl_fw) -- because they are the forms the gate would have to accept if it ever did.
+  case DSPIC::ZE16f:
+  case DSPIC::MOV8f:
     return true;
   default:
     return false;
@@ -124,7 +130,7 @@ bool DSPICInstrInfo::hasRematVerdict(const MachineInstr &MI) const {
 // REMAT-PLAN 4.3 -- the gate. The default refuses every non-invariant load; this admits exactly
 // the flagged near-global loads and defers on everything else.
 bool DSPICInstrInfo::isReMaterializableImpl(const MachineInstr &MI) const {
-  if (EnableRematNearGlobal && isRematerializableNearGlobalLoad(MI) &&
+  if (DSPICEnableRematNearGlobal && isRematerializableNearGlobalLoad(MI) &&
       hasRematVerdict(MI))
     return true;
   return TargetInstrInfo::isReMaterializableImpl(MI);
@@ -134,7 +140,7 @@ bool DSPICInstrInfo::isReMaterializableImpl(const MachineInstr &MI) const {
 // instruction names only the symbol. Without this, allUsesAvailableAt refuses every
 // rematerialization of a near-global load on the strength of a physreg use that is not there.
 bool DSPICInstrInfo::isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) const {
-  if (!EnableRematNearGlobal || OpIdx != 1)
+  if (!DSPICEnableRematNearGlobal || OpIdx != 1)
     return false;
   const MachineOperand &MO = MI.getOperand(OpIdx);
   if (!MO.isReg() || MO.getReg() != DSPIC::SR)
@@ -143,7 +149,7 @@ bool DSPICInstrInfo::isIgnorableUse(const MachineInstr &MI, unsigned OpIdx) cons
 }
 
 bool DSPICInstrInfo::isMemoryRematCandidate(const MachineInstr &MI) const {
-  return EnableRematNearGlobal && isRematerializableNearGlobalLoad(MI);
+  return DSPICEnableRematNearGlobal && isRematerializableNearGlobalLoad(MI);
 }
 
 // REMAT-PLAN 4.4 -- the judgement CodeGen asks for at every instruction the value is live

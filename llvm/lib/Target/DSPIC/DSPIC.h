@@ -37,7 +37,14 @@ namespace DSPICCC {
   };
 }
 
+#include "llvm/Support/CommandLine.h"
+
 namespace llvm {
+/// (session 95) `-dspic-remat-near-global`, defined in DSPICInstrInfo.cpp. It gates the byte
+/// near-global load FORMS as well as their rematerialization, so the TableGen-generated matcher
+/// reads it too -- hence the non-static definition and this declaration.
+extern llvm::cl::opt<bool> DSPICEnableRematNearGlobal;
+
 class FunctionPass;
 class DSPICTargetMachine;
 class PassRegistry;

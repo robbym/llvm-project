@@ -131,6 +131,7 @@ namespace {
 
     bool SelectAddr(SDValue Addr, SDValue &Base, SDValue &Disp);
     bool SelectFileAddr(SDValue Addr, SDValue &Base, SDValue &Disp);
+    bool SelectFileAddr1(SDValue Addr, SDValue &Base, SDValue &Disp);
   };
 
   class DSPICDAGToDAGISelLegacy : public SelectionDAGISelLegacy {
@@ -346,6 +347,17 @@ bool DSPICDAGToDAGISel::SelectFileAddr(SDValue N, SDValue &Base, SDValue &Disp) 
   else
     Disp = CurDAG->getTargetExternalSymbol(AM.ES, MVT::i16, 0);
   return true;
+}
+
+/// SelectFileAddr1 (session 95): SelectFileAddr, and the address node must have exactly ONE use.
+/// The byte-global forms below consume their address INTERNALLY (they use their own destination as
+/// the scratch), so an address that is also feeding a store -- `_gb++` materialises it once and
+/// uses it twice -- would have to be materialised a second time. Refusing a shared address leaves
+/// those on the old `MOV16ri` + `[Wn]` shape, which is what measured smaller.
+bool DSPICDAGToDAGISel::SelectFileAddr1(SDValue N, SDValue &Base, SDValue &Disp) {
+  if (!N.hasOneUse())
+    return false;
+  return SelectFileAddr(N, Base, Disp);
 }
 
 bool DSPICDAGToDAGISel::SelectInlineAsmMemoryOperand(

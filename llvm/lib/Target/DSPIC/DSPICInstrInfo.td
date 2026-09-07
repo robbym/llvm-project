@@ -185,6 +185,8 @@ def addr : ComplexPattern<iPTR, 2, "SelectAddr", [], []>;
 // L1f-g: a file-register (near data) address -- a symbol with an optional offset and NO
 // register; the bit forms and the file-form bfext take it. Prints as the bare symbol.
 def faddr : ComplexPattern<iPTR, 2, "SelectFileAddr", [], []>;
+// session 95: the same, but the address must have a single use -- see SelectFileAddr1
+def faddr1 : ComplexPattern<iPTR, 2, "SelectFileAddr1", [], []>;
 
 //===----------------------------------------------------------------------===//
 // Pattern Fragments
@@ -1433,6 +1435,45 @@ let AddedComplexity = 20 in {
   // a displaced byte one add away: `add.w Wp,#d,Wt ; se [Wt],Wd` (no `se [Wn+d]` exists)
   def : Pat<(sext_inreg (extloadi16i8 (add GR16:$p, lit5imm16:$d)), i8), (SE16n (ADD16rri_lea GR16:$p, imm:$d))>;
   def : Pat<(zextloadi16i8 (add GR16:$p, lit5imm16:$d)), (ZE16n (ADD16rri_lea GR16:$p, imm:$d))>;
+}
+
+// Session 95 -- a BYTE read of a near global as ONE rematerializable instruction.
+//
+// dsPIC has no `mov.b _sym,Wn` for an arbitrary Wn (the file byte forms reach WREG only, which is
+// why session 88 routes every byte global access through a materialised address), so a byte global
+// read is `MOV16ri @sym` + `MOV8rm/ZE16n [vreg]` -- two instructions with a register between them.
+// The spiller clones ONE instruction, so such a value can never be rematerialized and instead
+// rides a callee-saved register across every call. In NextChunk that register is the difference
+// between seven call-surviving values (cc1's, no frame) and eight (ours, a `lnk` frame).
+//
+// ⛔ The pair needs no scratch: `mov #_sym,wD ; ze [wD],wD` uses its own DESTINATION, so as one
+// instruction it has NO register inputs and is trivially rematerializable. Same two words, same
+// text. `faddr` (SelectFileAddr) supplies the `$sr`-sentinel base + symbol pair that session 94's
+// isNearGlobalLoadOpcode/isIgnorableUse already understand, so the remat side gains one opcode
+// entry and no new reasoning. AddedComplexity beats the 20 on the [Wn] forms above.
+// isCodeGenOnly: the asm parser cannot read a two-instruction mnemonic (TableGen refuses it
+// otherwise) -- MOVZX16rm8 carries the same mark for the same reason.
+// session 95: formation is gated with the rematerialization it exists to enable -- measured a
+// small net loss on bl_fw and a win on an isolated spill, so it rides the flag, not the default.
+def HasNearByteRemat : Predicate<"DSPICEnableRematNearGlobal">;
+let Predicates = [HasNearByteRemat],
+    AddedComplexity = 30, mayLoad = 1, isReMaterializable = 1, isCodeGenOnly = 1 in {
+// the zero-extending read: the high half MUST be zero, so this one keeps `ze` and is never
+// rewritten to the byte-WREG form by the peephole.
+def ZE16f : DSPICFrameInst<(outs GR16:$rd), (ins memsrc:$src), 4,
+                           "mov\t#$src,$rd\n\tze\t[$rd],$rd"> {
+  let Pattern = [(set GR16:$rd, (zextloadi16i8 faddr1:$src))];
+}
+// the plain byte read: `mov.b`, leaving the high half undefined exactly as the MOV16ri+MOV8rm
+// pair it replaces did. fuseByteFile rewrites this back to the 1-word `mov.b _sym,WREG` when the
+// destination is w0 -- session 90's win, which the first build of this row had displaced.
+def MOV8f : DSPICFrameInst<(outs GR16:$rd), (ins memsrc:$src), 4,
+                           "mov\t#$src,$rd\n\tmov.b\t[$rd],$rd">;
+}
+let Predicates = [HasNearByteRemat], AddedComplexity = 30 in {
+  // an any-extending byte read is the plain read (the high half is don't-care)
+  def : Pat<(i16 (extloadi16i8 faddr1:$src)), (MOV8f faddr1:$src)>;
+  def : Pat<(i8 (load faddr1:$src)), (EXTRACT_SUBREG (MOV8f faddr1:$src), subreg_8bit)>;
 }
 let Defs = [SR], mayLoad = 1 in {
   def CP016n : DSPICFrameInst<(outs), (ins GR16:$p), 2, "cp0.w\t[$p]"> {

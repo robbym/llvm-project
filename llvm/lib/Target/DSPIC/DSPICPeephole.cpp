@@ -316,6 +316,25 @@ bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
     if (J == MBB.end())
       break;
     // I: MOV16ri wN, <global/external symbol>   (materialize a near-global address)
+    // Session 95: a `MOV8f wD, _sym` -- the byte read of a near global emitted as ONE
+    // rematerializable instruction (`mov #_sym,wD ; mov.b [wD],wD`) -- collapses to the 1-word
+    // direct form when wD is w0, exactly as the two-instruction pair below did. Only MOV8f: the
+    // zero-extending ZE16f must keep its high half zero and `mov.b _sym,WREG` does not.
+    if (I->getOpcode() == DSPIC::MOV8f && I->getOperand(0).isReg() &&
+        wNumber(I->getOperand(0).getReg()) == 0 && I->getOperand(2).isGlobal()) {
+      Register D8 = TRI->getSubReg(I->getOperand(0).getReg(), DSPIC::subreg_8bit);
+      if (D8) {
+        BuildMI(MBB, *I, I->getDebugLoc(), TII->get(DSPIC::MOV8fW), D8)
+            .addReg(DSPIC::SR)
+            .add(I->getOperand(2));
+        auto K = std::next(I);
+        I->eraseFromParent();
+        I = K;
+        ++NumByteFile;
+        Changed = true;
+        continue;
+      }
+    }
     if (I->getOpcode() != DSPIC::MOV16ri || !I->getOperand(0).isReg() ||
         !(I->getOperand(1).isGlobal() || I->getOperand(1).isSymbol())) {
       ++I; continue;
