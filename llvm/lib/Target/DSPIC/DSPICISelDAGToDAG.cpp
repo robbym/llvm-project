@@ -85,6 +85,22 @@ namespace {
 /// DSPICDAGToDAGISel - DSPIC specific code to select DSPIC machine
 /// instructions for SelectionDAG operations.
 ///
+// Session 93 (item 4 -- the store_nn PatFrag's predicate): a DSPICISD::Wrapper around a DATA
+// symbol the 13-bit file forms can name -- a global variable not marked "far" (session 90's
+// attribute) or an external symbol. A function's address is not a place; a far variable has no
+// file form and keeps the memory-to-memory move.
+static bool isNearFileSymbol(SDValue Addr) {
+  if (Addr.getOpcode() != DSPICISD::Wrapper)
+    return false;
+  SDValue S = Addr.getOperand(0);
+  if (auto *GA = dyn_cast<GlobalAddressSDNode>(S)) {
+    if (auto *GVar = dyn_cast<GlobalVariable>(GA->getGlobal()))
+      return !GVar->hasAttribute("far");
+    return false;
+  }
+  return isa<ExternalSymbolSDNode>(S);
+}
+
 namespace {
   class DSPICDAGToDAGISel : public SelectionDAGISel {
   public:

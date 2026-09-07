@@ -2420,6 +2420,42 @@ void RAGreedy::aboutToRemoveInterval(const LiveInterval &LI) {
   SetOfBrokenHints.remove(&LI);
 }
 
+// (dsPIC port, trellis session 93) EarlyMachineLICM hoists a trivially rematerializable def out
+// of its loop "providing the register allocator can just pull them down again when needed", and
+// this allocator never needs to while an unused callee-saved register is free -- so a loop's
+// `mov #lit,Wn` came to cost its word plus the register's push/pop pair where re-creating it at
+// each use costs a word apiece (bl_fw's StnBlUart_GetByte held three such in w9..w11 behind two
+// push.d/pop.d pairs; cc1 rematerializes). When the target prices a callee-saved register's first
+// save in words (getCSRFirstUseSizeCost) and the function is optimized for size, a PURE
+// materialization -- one value, no register operand, every use a plain untied read -- whose uses
+// are fewer than the def plus that save is spilled instead of taking the register; InlineSpiller
+// then rematerializes it before every use (every use qualifies, so nothing is left to spill and no
+// slot is made) and deletes the def. A tie keeps the register. Not under optsize the rule is off
+// (COSTED: a frequency form against the entry frequency is one comparison away).
+bool RAGreedy::shouldRematInsteadOfCSR(const LiveInterval &VirtReg, MCRegister PhysReg) {
+  if (!MF->getFunction().hasOptSize() || !VirtReg.isSpillable() ||
+      VirtReg.getNumValNums() != 1)
+    return false;
+  unsigned SaveWords = TRI->getCSRFirstUseSizeCost(
+      *MF, PhysReg, [&](MCRegister R) { return Matrix->isPhysRegUsed(R); });
+  if (!SaveWords)
+    return false;
+  MachineInstr *Def = MRI->getUniqueVRegDef(VirtReg.reg());
+  if (!Def || !TII->isTriviallyReMaterializable(*Def) || !TII->isAsCheapAsAMove(*Def))
+    return false;
+  for (const MachineOperand &MO : Def->operands())
+    if (MO.isReg() && !(MO.isDef() && MO.getReg() == VirtReg.reg()))
+      return false;
+  unsigned Uses = 0;
+  for (MachineInstr &UseMI : MRI->use_nodbg_instructions(VirtReg.reg())) {
+    for (const MachineOperand &MO : UseMI.operands())
+      if (MO.isReg() && MO.getReg() == VirtReg.reg() && (MO.isDef() || MO.isTied()))
+        return false;
+    ++Uses;
+  }
+  return Uses && Uses < 1 + SaveWords;
+}
+
 void RAGreedy::initializeCSRCost() {
   if (!CSRCostScale.getNumOccurrences() &&
       (CSRFirstTimeCost.getNumOccurrences() || TRI->getCSRCost())) {
@@ -2666,6 +2702,19 @@ MCRegister RAGreedy::selectOrSplitImpl(const LiveInterval &VirtReg,
     // When NewVRegs is not empty, we may have made decisions such as evicting
     // a virtual register, go with the earlier decisions and use the physical
     // register.
+    // (dsPIC port, trellis session 93) a constant cheaper re-created at its uses than saved in
+    // this unused callee-saved register: spill it now, and the spiller rematerializes it.
+    if (EvictAdvisor->isUnusedCalleeSavedReg(PhysReg) && NewVRegs.empty() &&
+        shouldRematInsteadOfCSR(VirtReg, PhysReg)) {
+      LiveRangeEdit LRE(&VirtReg, NewVRegs, *MF, *LIS, VRM, this, &DeadRemats);
+      spiller().spill(LRE, &Order);
+      ExtraInfo->setStage(NewVRegs.begin(), NewVRegs.end(), RS_Done);
+      for (Register r : spiller().getSpilledRegs())
+        DebugVars->splitRegister(r, LRE.regs(), *LIS);
+      for (Register r : spiller().getReplacedRegs())
+        DebugVars->splitRegister(r, LRE.regs(), *LIS);
+      return MCRegister();
+    }
     if (CSRCost.getFrequency() &&
         EvictAdvisor->isUnusedCalleeSavedReg(PhysReg) && NewVRegs.empty()) {
       MCRegister CSRReg = tryAssignCSRFirstTime(VirtReg, Order, PhysReg,

@@ -40,6 +40,14 @@ public:
                            int SPAdj, unsigned FIOperandNum,
                            RegScavenger *RS = nullptr) const override;
 
+  // Session 93 (the CSR-vs-remat row): the words a callee-saved register's first save costs --
+  // push and pop, or nothing when its push.d partner is already saved -- so RAGreedy
+  // rematerializes a cheap constant instead of saving a register for it
+  // (RegAllocGreedy.cpp::shouldRematInsteadOfCSR). Under -mllvm -dspic-remat-over-csr=0 it is 0
+  // and the rule is off (the row's own red).
+  unsigned getCSRFirstUseSizeCost(const MachineFunction &MF, MCRegister PhysReg,
+                                  function_ref<bool(MCRegister)> IsUsed) const override;
+
   // Debug information queries.
   Register getFrameRegister(const MachineFunction &MF) const override;
 };

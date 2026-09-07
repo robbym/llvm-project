@@ -362,6 +362,9 @@ private:
                                    SmallVectorImpl<Register> &NewVRegs);
   BlockFrequency calcSpillCost(const LiveInterval &LI);
   void initializeCSRCost();
+  /// (dsPIC port, trellis session 93) A cheap constant that is cheaper re-created at its
+  /// uses than kept in an unused callee-saved register: spill it (the spiller rematerializes).
+  bool shouldRematInsteadOfCSR(const LiveInterval &VirtReg, MCRegister PhysReg);
   MCRegister tryBlockSplit(const LiveInterval &, AllocationOrder &,
                            SmallVectorImpl<Register> &);
   MCRegister tryInstructionSplit(const LiveInterval &, AllocationOrder &,

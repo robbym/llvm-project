@@ -16,6 +16,7 @@
 #define LLVM_CODEGEN_TARGETREGISTERINFO_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/iterator_range.h"
@@ -867,6 +868,16 @@ public:
   /// the first time. Default value of 0 means we will use a callee-saved
   /// register if it is available.
   virtual unsigned getCSRFirstUseCost(const MachineFunction &MF) const {
+    return 0;
+  }
+  /// (dsPIC port, trellis session 93) The code-size cost, in instruction words, of saving PhysReg
+  /// -- a callee-saved register the function has not used -- for the first time, given which
+  /// physical registers the allocator has already used (IsUsed): the prologue push and epilogue
+  /// pop, or 0 when the save rides on one already paid for (the second half of a paired push).
+  /// 0 from a target that does not price it, which keeps RAGreedy's remat-instead-of-save rule
+  /// (RegAllocGreedy.cpp::shouldRematInsteadOfCSR) off.
+  virtual unsigned getCSRFirstUseSizeCost(const MachineFunction &MF, MCRegister PhysReg,
+                                          function_ref<bool(MCRegister)> IsUsed) const {
     return 0;
   }
   /// FIXME: We should deprecate this usage.

@@ -193,6 +193,19 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::VACOPY,           MVT::Other, Expand);
   setOperationAction(ISD::JumpTable,        MVT::i16,   Custom);
 
+  // Session 93 (the SESSION 93 PREP's items 2 and 5), each value the one-flag sweep chose
+  // (steps/l1f/s93-sweep.sh -> prints/l1f/s93-sweep.txt: bl_fw at -Oz with config words, and the
+  // same-C corpus at -Os). A constant memcpy of MORE THAN TWO stores goes to the `repeat` block
+  // (DSPICSelectionDAGInfo::EmitTargetCodeForMemcpy) instead of the store expansion -- an
+  // unaligned 6-byte copy had become three rounds of `ze ; ze ; sl #8 ; ior` where cc1 and the
+  // block write `repeat #5 ; mov.b [w1++],[w0++]` (-mllvm -max-store-memcpy: 1 and 2 both -84
+  // bytes, 3 unchanged, so the smallest value that keeps a two-word copy unrolled). And a switch
+  // builds a jump table from SIX cases, not LLVM's four -- cc1 -Os spells a five-case switch as a
+  // compare chain (-mllvm -min-jump-table-entries: 6 and 8 both -88 bytes, 5 -76, never -40).
+  // The fixtures: copy.c's cp6/cp6u/mcu6 and switch.c.
+  MaxStoresPerMemcpy = MaxStoresPerMemcpyOptSize = 2;
+  setMinimumJumpTableEntries(6);
+
   // L1f-f: the i32 shift-by-one pair is recovered from the `or` the type legalizer leaves
   setTargetDAGCombine(ISD::OR);
   // L1e prog-space: fold an addrspace(1) i16 read into the PSV-window node before the wide

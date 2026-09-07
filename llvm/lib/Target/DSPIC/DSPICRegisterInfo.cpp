@@ -28,6 +28,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
 #include "llvm/IR/Function.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
@@ -67,6 +68,29 @@ DSPICRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
   return ((F->getCallingConv() == CallingConv::MSP430_INTR ||
            F->hasFnAttribute("interrupt")) ?
           CalleeSavedRegsIntr : CalleeSavedRegs);
+}
+
+// Session 93 (the SESSION 93 PREP's item 1; the fixture is prints/l1f/cc1/csr.c). The flag is the
+// row's own switch: with it off, the allocator hands a loop's hoisted constant a callee-saved
+// register and the frame a push/pop pair for it.
+static cl::opt<bool> RematOverCSR(
+    "dspic-remat-over-csr", cl::Hidden, cl::init(true),
+    cl::desc("dsPIC: rematerialize a cheap constant instead of saving a callee-saved register for it"));
+
+// The frame saves callee-saved registers in even:odd pairs by `push.d`/`pop.d` where both halves
+// are saved (DSPICFrameLowering.cpp's CSPairs -- (w8,w9) (w10,w11) (w12,w13), and every w0..w13
+// pair in an ISR), one word each way for the PAIR: the two words a single `push`/`pop` costs. So
+// the first register of a pair costs two words and its partner none. The encoding value is the
+// w-number (w0 = 0 .. w13 = 13), so the partner is the register numbered w ^ 1.
+unsigned DSPICRegisterInfo::getCSRFirstUseSizeCost(const MachineFunction &MF, MCRegister PhysReg,
+                                                   function_ref<bool(MCRegister)> IsUsed) const {
+  if (!RematOverCSR)
+    return 0;
+  unsigned W = getEncodingValue(PhysReg);
+  for (MCPhysReg P : DSPIC::GR16RegClass)
+    if (getEncodingValue(P) == (W ^ 1) && IsUsed(P))
+      return 0;
+  return 2;
 }
 
 // w14 is reserved in every function (COSTED: one register lost to frameless functions;

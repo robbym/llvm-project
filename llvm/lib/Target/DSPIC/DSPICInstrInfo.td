@@ -1445,14 +1445,21 @@ def addrr : PatFrag<(ops node:$b, node:$i), (add node:$b, node:$i), [{
   }
   return true;
 }]>;
+// Session 93 (item 4): the memory-to-memory move must NOT take a near file symbol as its
+// destination -- `mov.w [w1+4],w2 ; mov.w w2,_LATB` (2 words) beats `add.w w1,#4,w2 ; mov #_LATB,w3 ;
+// mov.w [w2],[w3]` (3) and ties the plain-pointer case, while a FAR symbol (no file form) keeps
+// the two-word `mov #_far,w3 ; mov.w [w1],[w3]`. isNearFileSymbol is DSPICISelDAGToDAG.cpp's.
+def store_nn : PatFrag<(ops node:$v, node:$q), (store node:$v, node:$q), [{
+  return !isNearFileSymbol(cast<StoreSDNode>(N)->getBasePtr());
+}]>;
 let AddedComplexity = 20 in {
   let mayLoad = 1, mayStore = 1 in {
   def MOV16nn : DSPICFrameInst<(outs), (ins GR16:$p, GR16:$q), 2, "mov.w\t[$p],[$q]"> {
-    let Pattern = [(store (i16 (load GR16:$p)), GR16:$q)]; }
+    let Pattern = [(store_nn (i16 (load GR16:$p)), GR16:$q)]; }
   def MOV8nn  : DSPICFrameInst<(outs), (ins GR16:$p, GR16:$q), 2, "mov.b\t[$p],[$q]"> {
-    let Pattern = [(store (i8 (load GR16:$p)), GR16:$q)]; }
+    let Pattern = [(store_nn (i8 (load GR16:$p)), GR16:$q)]; }
   def MOV16xn : DSPICFrameInst<(outs), (ins GR16:$b, GR16:$i, GR16:$q), 2, "mov.w\t[${b}+${i}],[$q]"> {
-    let Pattern = [(store (i16 (load (addrr GR16:$b, GR16:$i))), GR16:$q)]; }
+    let Pattern = [(store_nn (i16 (load (addrr GR16:$b, GR16:$i))), GR16:$q)]; }
   }
   def : Pat<(i16 (load (addrr GR16:$b, GR16:$i))), (MOV16rx GR16:$b, GR16:$i)>;
   def : Pat<(i8 (load (addrr GR16:$b, GR16:$i))), (MOV8rx GR16:$b, GR16:$i)>;
