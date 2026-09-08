@@ -189,7 +189,14 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
 
   // varargs support
   setOperationAction(ISD::VASTART,          MVT::Other, Custom);
-  setOperationAction(ISD::VAARG,            MVT::Other, Expand);
+  // Session 96: the variadic convention -- va_arg PRE-DECREMENTS (`ap -= words*2` then load at
+  // the new pointer), because the argument list grows DOWNWARD from the last named parameter.
+  // LLVM's default expansion post-increments, which is the opposite direction, so this is Custom.
+  setOperationAction(ISD::VAARG,            MVT::Other, Custom);
+  // and for the ILLEGAL i32 too: type legalization consults the action table for the VALUE type,
+  // so without this the integer legalizer expands an i32 va_arg itself -- into two i16 fetches that
+  // each step down, exchanging the words. Custom here routes it to ReplaceNodeResults instead.
+  setOperationAction(ISD::VAARG,            MVT::i32,   Custom);
   setOperationAction(ISD::VAEND,            MVT::Other, Expand);
   setOperationAction(ISD::VACOPY,           MVT::Other, Expand);
   setOperationAction(ISD::JumpTable,        MVT::i16,   Custom);
@@ -245,6 +252,7 @@ SDValue DSPICTargetLowering::LowerOperation(SDValue Op,
   case ISD::RETURNADDR:       return LowerRETURNADDR(Op, DAG);
   case ISD::FRAMEADDR:        return LowerFRAMEADDR(Op, DAG);
   case ISD::VASTART:          return LowerVASTART(Op, DAG);
+  case ISD::VAARG:            return LowerVAARG(Op, DAG);
   case ISD::JumpTable:        return LowerJumpTable(Op, DAG);
   default:
     llvm_unreachable("unimplemented operand");
@@ -413,14 +421,27 @@ static int lowestFreeRun(unsigned Used, unsigned Parts) {
 template <typename ArgT>
 static void AnalyzeArguments(CCState &State,
                              SmallVectorImpl<CCValAssign> &ArgLocs,
-                             const SmallVectorImpl<ArgT> &Args) {
-  if (State.isVarArg())
-    report_fatal_error("dspic: variadic arguments have no measured convention "
-                       "(L1c; cc1 was not asked)",
-                       /*gen_crash_diag=*/false);
-
+                             const SmallVectorImpl<ArgT> &Args,
+                             unsigned NumFixedGroups = ~0u) {
   SmallVector<unsigned, 8> ArgsParts;
   ParseFunctionArgs(Args, ArgsParts);
+
+  // Session 96: the variadic convention, measured from cc1 (steps/varargs/CONVENTION.md).
+  // All named parameters EXCEPT THE LAST go in registers by the ordinary rule; the last named
+  // parameter and every unnamed argument go on the STACK, because va_start needs the last named
+  // parameter's address. Measured at four arities: v_one takes its only named argument on the
+  // stack, v_four takes a/b/c in w0/w1/w2 and d on the stack. It holds even when the callee never
+  // reads the unnamed part (v_unused), so it is the ABI and not an optimisation.
+  //
+  // NumFixedGroups is the count of NAMED arguments: on the callee side every formal is named, so
+  // it is the group count; on the caller side it is CLI.NumFixedArgs.
+  // On the CALLEE side every formal is named, so the caller of this template passes nothing and
+  // the last group is the last named one. On the CALLER side the count is CLI.NumFixedArgs.
+  unsigned FirstStackGroup = ~0u;
+  if (State.isVarArg()) {
+    unsigned Named = NumFixedGroups == ~0u ? ArgsParts.size() : NumFixedGroups;
+    FirstStackGroup = Named ? Named - 1 : 0;
+  }
 
   // Pass 1: registers by the lowest-free-run rule; what finds none is a stack argument.
   struct Plan {
@@ -439,7 +460,8 @@ static void AnalyzeArguments(CCState &State,
       report_fatal_error("dspic: an argument of " + Twine(Parts) +
                          " words has no measured convention",
                          /*gen_crash_diag=*/false);
-    int Run = lowestFreeRun(Used, Parts);
+    // the last named argument and everything after it are stack arguments, whatever is free
+    int Run = Plans.size() >= FirstStackGroup ? -1 : lowestFreeRun(Used, Parts);
     if (Run >= 0)
       Used |= ((1u << Parts) - 1) << Run;
     Plans.push_back({ValNo, Parts, Run, 0});
@@ -540,7 +562,7 @@ bool DSPICTargetLowering::isEligibleForTailCall(
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CLI.CallConv, CLI.IsVarArg, MF, ArgLocs,
                  *CLI.DAG.getContext());
-  AnalyzeArguments(CCInfo, ArgLocs, CLI.Outs);
+  AnalyzeArguments(CCInfo, ArgLocs, CLI.Outs, CLI.NumFixedArgs);
   unsigned Need = CCInfo.getStackSize();
   unsigned Have = FuncInfo->getIncomingArgBytes();
   if (Need > Have) {
@@ -618,8 +640,8 @@ DSPICTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
     }
   }
 
-  return LowerCCCCallTo(Chain, Callee, CallConv, isVarArg, isTailCall,
-                        Outs, OutVals, Ins, dl, DAG, InVals);
+  return LowerCCCCallTo(Chain, Callee, CallConv, isVarArg, CLI.NumFixedArgs,
+                        isTailCall, Outs, OutVals, Ins, dl, DAG, InVals);
 }
 
 /// LowerCCCArguments - transform physical registers into virtual registers and
@@ -656,6 +678,11 @@ SDValue DSPICTargetLowering::LowerCCCArguments(
       int FI = MFI.CreateFixedObject(
           ObjSize, (int64_t)VA.getLocMemOffset() - (int64_t)N - 4,
           /*IsImmutable=*/true);
+      // Session 96: the variadic convention -- va_start(ap, last) is &last, the address of the
+      // LAST NAMED parameter, which clause 1 has just forced onto the stack. Its frame index is
+      // what LowerVASTART stores. The last memory location in argument order is that parameter.
+      if (isVarArg)
+        FuncInfo->setVarArgsFrameIndex(FI);
       SDValue FIN = DAG.getFrameIndex(FI, MVT::i16);
       InVals.push_back(DAG.getLoad(VA.getLocVT(), dl, Chain, FIN,
                                    MachinePointerInfo::getFixedStack(MF, FI)));
@@ -767,6 +794,7 @@ DSPICTargetLowering::LowerReturn(SDValue Chain, CallingConv::ID CallConv,
 /// bracket a plain call; a tail call ends the function with TC_RETURN.
 SDValue DSPICTargetLowering::LowerCCCCallTo(
     SDValue Chain, SDValue Callee, CallingConv::ID CallConv, bool isVarArg,
+    unsigned NumFixedArgs,
     bool isTailCall, const SmallVectorImpl<ISD::OutputArg> &Outs,
     const SmallVectorImpl<SDValue> &OutVals,
     const SmallVectorImpl<ISD::InputArg> &Ins, const SDLoc &dl,
@@ -775,7 +803,7 @@ SDValue DSPICTargetLowering::LowerCCCCallTo(
   MachineFrameInfo &MFI = MF.getFrameInfo();
   SmallVector<CCValAssign, 16> ArgLocs;
   CCState CCInfo(CallConv, isVarArg, MF, ArgLocs, *DAG.getContext());
-  AnalyzeArguments(CCInfo, ArgLocs, Outs);
+  AnalyzeArguments(CCInfo, ArgLocs, Outs, NumFixedArgs);
 
   unsigned NumBytes = CCInfo.getStackSize();
   MVT PtrVT = getFrameIndexTy(DAG.getDataLayout());
@@ -1349,6 +1377,35 @@ void DSPICTargetLowering::ReplaceNodeResults(SDNode *N,
   case ISD::GlobalAddress:
     Results.push_back(LowerGlobalAddress(SDValue(N, 0), DAG));
     break;
+  case ISD::VAARG: {
+    // Session 96: a multi-word va_arg must be expanded HERE, not by the integer legalizer.
+    // Its ExpandIntRes_VAARG splits an i32 fetch into two i16 fetches, and because this argument
+    // list walks DOWNWARD each of those steps down by 2 -- so the low half lands ABOVE the high
+    // half and the value comes out with its words exchanged. Measured against cc1's `one32`, whose
+    // low word is at the LOWER address, the same order the caller pushes (mov.d w0,[w15++]).
+    // One decrement of the whole size, then low at the new pointer and high just above it.
+    SDLoc dl(N);
+    SDValue Chain = N->getOperand(0);
+    SDValue ApPtr = N->getOperand(1);
+    const Value *SV = cast<SrcValueSDNode>(N->getOperand(2))->getValue();
+    EVT VT = N->getValueType(0);
+    if (VT.getSizeInBits() != 32)
+      break;
+    EVT PtrVT = ApPtr.getValueType();
+    SDValue Cur = DAG.getLoad(PtrVT, dl, Chain, ApPtr, MachinePointerInfo(SV));
+    SDValue New = DAG.getNode(ISD::SUB, dl, PtrVT, Cur,
+                              DAG.getConstant(4, dl, PtrVT));
+    SDValue St =
+        DAG.getStore(Cur.getValue(1), dl, New, ApPtr, MachinePointerInfo(SV));
+    SDValue Lo = DAG.getLoad(MVT::i16, dl, St, New, MachinePointerInfo());
+    SDValue HiAddr =
+        DAG.getNode(ISD::ADD, dl, PtrVT, New, DAG.getConstant(2, dl, PtrVT));
+    SDValue Hi = DAG.getLoad(MVT::i16, dl, Lo.getValue(1), HiAddr,
+                             MachinePointerInfo());
+    Results.push_back(DAG.getNode(ISD::BUILD_PAIR, dl, VT, Lo, Hi));
+    Results.push_back(Hi.getValue(1));
+    break;
+  }
   case ISD::SELECT_CC:
     // L1f-k: an i32 RESULT -- decline, and the legalizer splits it into two i16 selects whose
     // i32 comparands then reach LowerSELECT_CC through the operand path.
@@ -1786,6 +1843,34 @@ SDValue DSPICTargetLowering::LowerVASTART(SDValue Op,
   // Create a store of the frame index to the location operand
   return DAG.getStore(Op.getOperand(0), SDLoc(Op), FrameIndex, Ptr,
                       MachinePointerInfo(SV));
+}
+
+// Session 96: the variadic convention -- va_arg steps DOWN.
+//
+//   ap_cur = load ap ; ap_new = ap_cur - words(T)*2 ; store ap_new -> ap ; return *(T*)ap_new
+//
+// cc1's own layout is why: the caller pushes arguments in reverse order, so the first argument is
+// at the HIGHEST address and the list grows downward. v_step reads its three unnamed arguments at
+// [w15-10], [w15-14]/[w15-12] and [w15-16] -- a pre-decrement by the promoted size each time.
+SDValue DSPICTargetLowering::LowerVAARG(SDValue Op, SelectionDAG &DAG) const {
+  SDNode *N = Op.getNode();
+  SDLoc dl(N);
+  SDValue Chain = N->getOperand(0);
+  SDValue ApPtr = N->getOperand(1);
+  const Value *SV = cast<SrcValueSDNode>(N->getOperand(2))->getValue();
+  EVT VT = N->getValueType(0);
+  EVT PtrVT = ApPtr.getValueType();
+
+  // the argument occupies whole words, promoted
+  unsigned Bytes = (VT.getStoreSize() + 1) & ~1u;
+
+  SDValue Cur = DAG.getLoad(PtrVT, dl, Chain, ApPtr, MachinePointerInfo(SV));
+  SDValue New = DAG.getNode(ISD::SUB, dl, PtrVT, Cur,
+                            DAG.getConstant(Bytes, dl, PtrVT));
+  SDValue Store =
+      DAG.getStore(Cur.getValue(1), dl, New, ApPtr, MachinePointerInfo(SV));
+  SDValue Val = DAG.getLoad(VT, dl, Store, New, MachinePointerInfo());
+  return DAG.getMergeValues({Val, Val.getValue(1)}, dl);
 }
 
 SDValue DSPICTargetLowering::LowerJumpTable(SDValue Op,
