@@ -16,6 +16,8 @@
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/TargetFrameLowering.h"
 #include "MCTargetDesc/DSPICInstPrinter.h"
+// S_HANDLE lives here; DSPICMCInstLower.cpp reaches it the same way.
+#include "MCTargetDesc/DSPICMCAsmInfo.h"
 #include "DSPICMCInstLower.h"
 #include "DSPICTargetMachine.h"
 #include "TargetInfo/DSPICTargetInfo.h"
@@ -78,6 +80,13 @@ static cl::opt<std::string> DSPICConfigDB(
     bool PrintAsmMemoryOperand(const MachineInstr *MI, unsigned OpNo,
                                const char *ExtraCode, raw_ostream &O) override;
     void emitInstruction(const MachineInstr *MI) override;
+
+    /// Session 96: a function's address AS DATA is `handle(_f)` -- the address of the veneer the
+    /// linker builds, which is what makes a function pointer fit in 16 bits on a part whose
+    /// program memory does not. The immediate form is already handled in DSPICMCInstLower; a
+    /// global initializer never passes through there, so it is wrapped here.
+    const MCExpr *lowerConstant(const Constant *CV, const Constant *BaseCV,
+                                uint64_t Offset) override;
 
     /// L1b: print the frame's accounting as a comment, so a report's frame size is a
     /// line the compiler printed (trellis standing rule 12).
@@ -340,6 +349,18 @@ void DSPICAsmPrinter::emitFunctionBodyStart() {
 }
 
 //===----------------------------------------------------------------------===//
+// Session 96: `.word handle(_f)` for a function's address in data, cc1's own spelling. Only a
+// FUNCTION takes a handle: a data symbol is an ordinary 16-bit address, and a block label
+// (a jump-table entry) is not a symbol the linker builds a veneer for.
+const MCExpr *DSPICAsmPrinter::lowerConstant(const Constant *CV,
+                                             const Constant *BaseCV,
+                                             uint64_t Offset) {
+  const MCExpr *E = AsmPrinter::lowerConstant(CV, BaseCV, Offset);
+  if (isa<Function>(CV->stripPointerCasts()))
+    E = MCSpecifierExpr::create(E, DSPIC::S_HANDLE, OutContext);
+  return E;
+}
+
 void DSPICAsmPrinter::emitInstruction(const MachineInstr *MI) {
   DSPIC_MC::verifyInstructionPredicates(MI->getOpcode(),
                                          getSubtargetInfo().getFeatureBits());
