@@ -411,8 +411,15 @@ bool DSPICPeepholeImpl::fuseTailCall(MachineBasicBlock &MBB) {
   B.add(Target);
   for (const MachineOperand &MO : Call.implicit_operands())
     B.add(MO);
-  for (const MachineOperand &MO : Ret.implicit_operands())
-    B.add(MO);
+  // trellis session 97: and NOTHING from the RET. Its implicit operands are the RETURN-VALUE
+  // registers it USES; on a tail branch the CALLEE defines them, so copying them claims they are
+  // live INTO the branch -- false, and "Using an undefined physical register" wherever a returned
+  // register is not also live-in as an argument. RET (DSPICInstrInfo.td) declares no Uses of its
+  // own and TCRETURNdi already declares `Uses = [SP]`, so there is nothing else there to carry.
+  // ⛔ THE FILTERED FORM ("copy what the call does not define", mirroring fuseRetlw above) WAS
+  // WRITTEN FIRST, and BOTH of its mutants LIVED -- on the fixture AND on the whole corpus. That
+  // priced the filter's precision at zero everywhere measured, so the simpler code is the honest
+  // one. steps/tailfix/mutant.sh carries the measurement.
   Call.eraseFromParent();
   Ret.eraseFromParent();
   ++NumTailBra;
