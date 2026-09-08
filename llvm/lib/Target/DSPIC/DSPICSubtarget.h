@@ -59,6 +59,12 @@ public:
   void ParseSubtargetFeatures(StringRef CPU, StringRef TuneCPU, StringRef FS);
 
   bool isLargeCode() const { return LargeCode; }
+  // trellis session 96 (follow-up 15): carried so `-mattr=` accepts them; the placement decision
+  // is clang's (a per-global `near`/`far` attribute), not read here.
+  bool LargeScalar = false;
+  bool SmallAggregate = false;
+  bool ConstInData = false;
+  bool LargeArrays = false;
   bool hasHWMult16() const { return HWMultMode == HWMult16; }
   bool hasHWMult32() const { return HWMultMode == HWMult32; }
   bool hasHWMultF5() const { return HWMultMode == HWMultF5; }

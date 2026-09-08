@@ -232,6 +232,16 @@ public:
     // refuses tbloffset, exec refuses a data reference), so const cannot be split on this
     // assembler. Dead const is therefore not stripped, but dead functions (.text.*) and near
     // data (.ndata/.nbss.*) still are -- which is where the size is.
+    // trellis session 96 (follow-up 15): a `const` object under -mconst-in-data leaves program
+    // memory for ordinary data placement, near or far by the same rule as any other object.
+    // ⛔ BEFORE the readonly return, not after. The first spelling of this sat below it and was
+    // DEAD CODE -- every const had already left for ConstSection.
+    if (const auto *GVc = dyn_cast<GlobalVariable>(GO))
+      if (GVc->hasAttribute("dspic-const-in-data")) {
+        bool Near = !GVc->hasAttribute("far");
+        return pic30Section(Near ? ".ndata" : ".data", GO, Kind, TM,
+                            ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_WRITE);
+      }
     if (Kind.isReadOnly() || Kind.isMergeableCString() || Kind.isMergeableConst())
       return ConstSection;
     // Session 90: `far` data (the attribute clang forwards) leaves the near 4 KB: cc1 places it

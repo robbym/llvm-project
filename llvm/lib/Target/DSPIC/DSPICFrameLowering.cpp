@@ -238,6 +238,7 @@ void DSPICFrameLowering::emitEpilogue(MachineFunction &MF,
   case DSPIC::RET:
   case DSPIC::RETI:
   case DSPIC::TCRETURNdi: // L1c: `bra _sym` after the epilogue
+  case DSPIC::TCRETURNdiL: // session 96: `goto _sym`, the same under -mlarge-code
   case DSPIC::TCRETURNri: // L1c: `goto wN`, wN caller-saved
     break;
   default:

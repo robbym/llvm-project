@@ -6452,6 +6452,33 @@ def mmadd4 : Flag<["-"], "mmadd4">, Group<m_mips_Features_Group>,
   HelpText<"Enable the generation of 4-operand madd.s, madd.d and related instructions.">;
 def mno_madd4 : Flag<["-"], "mno-madd4">, Group<m_mips_Features_Group>,
   HelpText<"Disable the generation of 4-operand madd.s, madd.d and related instructions.">;
+// trellis session 96 (follow-up 15): the dsPIC code and data models. Defaults are cc1's own,
+// measured and then confirmed in the vendor's source (see steps/models/model-edit.py).
+def msmall_code : Flag<["-"], "msmall-code">, Group<m_Group>,
+  HelpText<"Use the small code model (the default): rcall/bra, PC-relative, +/-32K words">;
+def mlarge_code : Flag<["-"], "mlarge-code">, Group<m_Group>,
+  HelpText<"Use the large code model: call/goto, absolute, all of program memory">;
+def msmall_data : Flag<["-"], "msmall-data">, Group<m_Group>,
+  HelpText<"Place both scalars and aggregates in near data">;
+def mlarge_data : Flag<["-"], "mlarge-data">, Group<m_Group>,
+  HelpText<"Place both scalars and aggregates in far data">;
+def msmall_scalar : Flag<["-"], "msmall-scalar">, Group<m_Group>,
+  HelpText<"Place scalars in near data (the default)">;
+def mlarge_scalar : Flag<["-"], "mlarge-scalar">, Group<m_Group>,
+  HelpText<"Place scalars in far data">;
+def msmall_aggregate : Flag<["-"], "msmall-aggregate">, Group<m_Group>,
+  HelpText<"Place aggregates in near data">;
+def mlarge_aggregate : Flag<["-"], "mlarge-aggregate">, Group<m_Group>,
+  HelpText<"Place aggregates in far data (the default)">;
+def mconst_in_code : Flag<["-"], "mconst-in-code">, Group<m_Group>,
+  HelpText<"Place constants in program memory (the default)">;
+def mconst_in_data : Flag<["-"], "mconst-in-data">, Group<m_Group>,
+  HelpText<"Place constants in data memory">;
+def menable_large_arrays : Flag<["-"], "menable-large-arrays">, Group<m_Group>,
+  HelpText<"Allow arrays larger than 32K">;
+def mlarge_arrays : Flag<["-"], "mlarge-arrays">, Group<m_Group>,
+  Alias<menable_large_arrays>;
+
 def mmsa : Flag<["-"], "mmsa">, Group<m_mips_Features_Group>,
   Visibility<[ClangOption, CC1Option, CC1AsOption]>,
   HelpText<"Enable MSA ASE (MIPS only)">,

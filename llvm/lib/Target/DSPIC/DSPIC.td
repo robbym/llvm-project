@@ -17,6 +17,22 @@ include "llvm/Target/Target.td"
 //===----------------------------------------------------------------------===//
 // Subtarget Features. 
 //===----------------------------------------------------------------------===//
+// trellis session 96 (follow-up 15): the data-model features exist so the driver has somewhere
+// to put them and `llc` can be told; the PLACEMENT decision itself is clang's, stamped per global
+// as `near`/`far`, so these are declarations rather than switches the backend reads.
+def FeatureLargeScalar
+ : SubtargetFeature<"large-scalar", "LargeScalar", "true",
+                    "Place scalars in far data">;
+def FeatureSmallAggregate
+ : SubtargetFeature<"small-aggregate", "SmallAggregate", "true",
+                    "Place aggregates in near data">;
+def FeatureConstInData
+ : SubtargetFeature<"const-in-data", "ConstInData", "true",
+                    "Place constants in data memory">;
+def FeatureLargeArrays
+ : SubtargetFeature<"large-arrays", "LargeArrays", "true",
+                    "Allow arrays larger than 32K">;
+
 def FeatureLargeCode
  : SubtargetFeature<"large-code", "LargeCode", "true",
                     "call (24-bit absolute) for every direct call; the default is rcall, as cc1's small-code model (trellis L1f-a)">;

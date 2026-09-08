@@ -308,6 +308,16 @@ bool DSPICPeepholeImpl::fuseMovdMem(MachineBasicBlock &MBB) {
 // register), and only when the address reg dies at the byte op, so it is a strict 2->1 win that
 // never over-constrains RA (this runs after allocation) and never pessimizes (if the value is
 // not in w0 the materialize form stands).
+// trellis session 96 (follow-up 15): a global the 13-bit byte file forms may name. A `far`
+// object lies outside that field, and one with an explicit section may be placed anywhere -- the
+// same two conditions DSPICInstrInfo.cpp already applies to the near-global remat class.
+static bool isNearFileGlobal(const MachineOperand &MO) {
+  if (!MO.isGlobal())
+    return MO.isSymbol();
+  const auto *GVar = dyn_cast<GlobalVariable>(MO.getGlobal());
+  return GVar && !GVar->hasAttribute("far") && !GVar->hasSection();
+}
+
 bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
   bool Changed = false;
   auto I = MBB.begin();
@@ -321,7 +331,8 @@ bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
     // direct form when wD is w0, exactly as the two-instruction pair below did. Only MOV8f: the
     // zero-extending ZE16f must keep its high half zero and `mov.b _sym,WREG` does not.
     if (I->getOpcode() == DSPIC::MOV8f && I->getOperand(0).isReg() &&
-        wNumber(I->getOperand(0).getReg()) == 0 && I->getOperand(2).isGlobal()) {
+        wNumber(I->getOperand(0).getReg()) == 0 && I->getOperand(2).isGlobal() &&
+        isNearFileGlobal(I->getOperand(2))) {
       Register D8 = TRI->getSubReg(I->getOperand(0).getReg(), DSPIC::subreg_8bit);
       if (D8) {
         BuildMI(MBB, *I, I->getDebugLoc(), TII->get(DSPIC::MOV8fW), D8)
@@ -336,7 +347,8 @@ bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
       }
     }
     if (I->getOpcode() != DSPIC::MOV16ri || !I->getOperand(0).isReg() ||
-        !(I->getOperand(1).isGlobal() || I->getOperand(1).isSymbol())) {
+        !(I->getOperand(1).isGlobal() || I->getOperand(1).isSymbol()) ||
+        !isNearFileGlobal(I->getOperand(1))) {
       ++I; continue;
     }
     Register Addr = I->getOperand(0).getReg();

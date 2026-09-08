@@ -957,6 +957,36 @@ void tools::getTargetFeatures(const Driver &D, const llvm::Triple &Triple,
   case llvm::Triple::m68k:
     m68k::getM68kTargetFeatures(D, Triple, Args, Features);
     break;
+  case llvm::Triple::dspic:
+    // trellis session 96 (follow-up 15): the code and data models. Processed IN COMMAND-LINE ORDER
+    // so a later flag wins, as gcc does; -m{small,large}-data sets BOTH halves, which is exactly
+    // what the vendor's own option handler does (pic30.c:4379).
+    for (const Arg *A : Args) {
+      switch (A->getOption().getID()) {
+      default: continue;
+      case options::OPT_msmall_code:      Features.push_back("-large-code"); break;
+      case options::OPT_mlarge_code:      Features.push_back("+large-code"); break;
+      case options::OPT_msmall_scalar:    Features.push_back("-large-scalar"); break;
+      case options::OPT_mlarge_scalar:    Features.push_back("+large-scalar"); break;
+      case options::OPT_msmall_aggregate: Features.push_back("+small-aggregate"); break;
+      case options::OPT_mlarge_aggregate: Features.push_back("-small-aggregate"); break;
+      case options::OPT_msmall_data:
+        Features.push_back("-large-scalar");
+        Features.push_back("+small-aggregate");
+        break;
+      case options::OPT_mlarge_data:
+        Features.push_back("+large-scalar");
+        Features.push_back("-small-aggregate");
+        break;
+      case options::OPT_mconst_in_code:   Features.push_back("-const-in-data"); break;
+      case options::OPT_mconst_in_data:   Features.push_back("+const-in-data"); break;
+      case options::OPT_menable_large_arrays:
+        Features.push_back("+large-arrays");
+        break;
+      }
+      A->claim();
+    }
+    break;
   case llvm::Triple::msp430:
     msp430::getMSP430TargetFeatures(D, Args, Features);
     break;

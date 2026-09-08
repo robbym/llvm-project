@@ -378,11 +378,23 @@ let isCall = 1,
 // pops restore w8-w13 after the target is computed. Both forms accepted by the GPL `as`
 // (prints/l1c/probe4.log).
 //===----------------------------------------------------------------------===//
+// trellis session 96 (follow-up 15): the code model, for the tail call. The ordinary call picks
+// its form in LowerCall; a tail call is selected by pattern, so it needs these.
+// ⚠ DEFINED HERE, not beside the other Predicate 1000 lines below: TableGen resolves in file
+// order and the uses are at line ~425, so a later definition is "Variable not defined" -- the
+// same failure `store_1u` hit earlier this session, one file over.
+// ⚠ Spelled through MF, not `Subtarget->`: DSPICDAGToDAGISel holds no Subtarget member (the
+// target's only other Predicate reads a cl::opt global instead), and SelectionDAGISel's own MF is
+// what is in scope in the generated matcher.
+def IsSmallCode : Predicate<"!MF->getSubtarget<DSPICSubtarget>().isLargeCode()">;
+def IsLargeCode : Predicate<"MF->getSubtarget<DSPICSubtarget>().isLargeCode()">;
+
 def DSPICtcret : SDNode<"DSPICISD::TC_RETURN", SDT_DSPICCall,
                         [SDNPHasChain, SDNPOptInGlue, SDNPVariadic]>;
 let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, isCodeGenOnly = 1,
     Uses = [SP] in {
   def TCRETURNdi : DSPICFrameInst<(outs), (ins calltarget:$dst), 2, "bra\t$dst">;
+  def TCRETURNdiL : DSPICFrameInst<(outs), (ins calltarget:$dst), 4, "goto\t$dst">;
   def TCRETURNri : DSPICFrameInst<(outs), (ins GR16_TC:$dst), 2, "goto\t$dst">;
 }
 //===----------------------------------------------------------------------===//
@@ -420,8 +432,14 @@ let isCodeGenOnly = 1, isReturn = 1, isTerminator = 1, isBarrier = 1 in {
 let isCodeGenOnly = 1, hasSideEffects = 0 in
 def MOVDrr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs), 2, "mov.d\t$rs,$rd">;
 
-def : Pat<(DSPICtcret (i16 tglobaladdr:$dst)),  (TCRETURNdi tglobaladdr:$dst)>;
-def : Pat<(DSPICtcret (i16 texternalsym:$dst)), (TCRETURNdi texternalsym:$dst)>;
+def : Pat<(DSPICtcret (i16 tglobaladdr:$dst)),  (TCRETURNdi tglobaladdr:$dst)>,
+      Requires<[IsSmallCode]>;
+def : Pat<(DSPICtcret (i16 texternalsym:$dst)), (TCRETURNdi texternalsym:$dst)>,
+      Requires<[IsSmallCode]>;
+def : Pat<(DSPICtcret (i16 tglobaladdr:$dst)),  (TCRETURNdiL tglobaladdr:$dst)>,
+      Requires<[IsLargeCode]>;
+def : Pat<(DSPICtcret (i16 texternalsym:$dst)), (TCRETURNdiL texternalsym:$dst)>,
+      Requires<[IsLargeCode]>;
 def : Pat<(DSPICtcret GR16_TC:$dst),            (TCRETURNri GR16_TC:$dst)>;
 
 //===----------------------------------------------------------------------===//

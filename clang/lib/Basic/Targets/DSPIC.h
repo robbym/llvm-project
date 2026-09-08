@@ -79,8 +79,36 @@ public:
 
   bool allowsLargerPreferedTypeAlignment() const override { return false; }
 
+  // trellis session 96 (follow-up 15): the code and data models. The DEFAULTS are cc1's own,
+  // measured (steps/models/ask.sh) and confirmed in the vendor's source: small code, scalars near,
+  // aggregates far, constants in program memory.
+  bool LargeCode = false;
+  bool LargeScalar = false;
+  bool SmallAggregate = false;
+  bool ConstInData = false;
+  bool LargeArrays = false;
+
+  bool handleTargetFeatures(std::vector<std::string> &Features,
+                            DiagnosticsEngine &Diags) override {
+    for (StringRef F : Features) {
+      bool On = F[0] == '+';
+      StringRef Name = F.drop_front();
+      if (Name == "large-code") LargeCode = On;
+      else if (Name == "large-scalar") LargeScalar = On;
+      else if (Name == "small-aggregate") SmallAggregate = On;
+      else if (Name == "const-in-data") ConstInData = On;
+      else if (Name == "large-arrays") LargeArrays = On;
+    }
+    return true;
+  }
+
   bool hasFeature(StringRef Feature) const override {
-    return Feature == "dspic";
+    return Feature == "dspic" ||
+           (Feature == "large-code" && LargeCode) ||
+           (Feature == "large-scalar" && LargeScalar) ||
+           (Feature == "small-aggregate" && SmallAggregate) ||
+           (Feature == "const-in-data" && ConstInData) ||
+           (Feature == "large-arrays" && LargeArrays);
   }
 
   ArrayRef<const char *> getGCCRegNames() const override;

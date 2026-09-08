@@ -114,10 +114,27 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
   // the record.
   if (const auto *VD = dyn_cast<VarDecl>(D)) {
     if (auto *GVar = dyn_cast<llvm::GlobalVariable>(GV)) {
+      // trellis session 96 (follow-up 15): EXPLICIT beats IMPLICIT, and every global now gets
+      // one or the other, so the placement decision is made in exactly one place. A user's
+      // attribute is explicit; otherwise the data model supplies it, by the vendor's own rule
+      // (pic30.c:21878): an aggregate takes the aggregate model, everything else the scalar one.
+      // ⚠ Ours reads "aggregate" as array/struct/vector where GCC reads it as BLKmode, which
+      // additionally makes a 2/4/8-byte array a scalar -- a placement difference at one shape,
+      // recorded in steps/models/place.expected.first rather than chased.
       if (VD->hasAttr<DSPICFarAttr>())
         GVar->addAttribute("far");
       else if (VD->hasAttr<DSPICNearAttr>())
         GVar->addAttribute("near");
+      else {
+        QualType T = VD->getType();
+        bool Aggregate = T->isArrayType() || T->isRecordType() || T->isVectorType();
+        bool Near = Aggregate ? M.getTarget().hasFeature("small-aggregate")
+                              : !M.getTarget().hasFeature("large-scalar");
+        GVar->addAttribute(Near ? "near" : "far");
+      }
+      if (VD->getType().isConstQualified() &&
+          M.getTarget().hasFeature("const-in-data"))
+        GVar->addAttribute("dspic-const-in-data");
       // trellis session 96 (follow-up 14): the placement attributes ride to the TLOF, which
       // turns them into pic30 section attributes. See DSPICTargetMachine.cpp's pic30Attrs.
       if (const auto *SA = VD->getAttr<DSPICSpaceAttr>())
