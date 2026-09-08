@@ -378,6 +378,12 @@ let isCall = 1,
 // pops restore w8-w13 after the target is computed. Both forms accepted by the GPL `as`
 // (prints/l1c/probe4.log).
 //===----------------------------------------------------------------------===//
+// A callee the user marked `near`: it keeps the PC-relative forms whatever the code model.
+def tglobaladdrNear : PatLeaf<(tglobaladdr), [{
+  const auto *F = dyn_cast<Function>(cast<GlobalAddressSDNode>(N)->getGlobal());
+  return F && F->hasFnAttribute("near");
+}]>;
+
 // trellis session 96 (follow-up 15): the code model, for the tail call. The ordinary call picks
 // its form in LowerCall; a tail call is selected by pattern, so it needs these.
 // ⚠ DEFINED HERE, not beside the other Predicate 1000 lines below: TableGen resolves in file
@@ -436,6 +442,12 @@ def : Pat<(DSPICtcret (i16 tglobaladdr:$dst)),  (TCRETURNdi tglobaladdr:$dst)>,
       Requires<[IsSmallCode]>;
 def : Pat<(DSPICtcret (i16 texternalsym:$dst)), (TCRETURNdi texternalsym:$dst)>,
       Requires<[IsSmallCode]>;
+// Session 96 (follow-up 20): an explicitly `near` callee keeps the ONE-WORD tail form even under
+// -mlarge-code. Without this the ordinary call honoured `near` and the tail call did not, which is
+// the asymmetry the data side does not have. AddedComplexity puts it ahead of the generic row.
+let AddedComplexity = 10 in
+def : Pat<(DSPICtcret (i16 tglobaladdrNear:$dst)), (TCRETURNdi tglobaladdr:$dst)>,
+      Requires<[IsLargeCode]>;
 def : Pat<(DSPICtcret (i16 tglobaladdr:$dst)),  (TCRETURNdiL tglobaladdr:$dst)>,
       Requires<[IsLargeCode]>;
 def : Pat<(DSPICtcret (i16 texternalsym:$dst)), (TCRETURNdiL texternalsym:$dst)>,

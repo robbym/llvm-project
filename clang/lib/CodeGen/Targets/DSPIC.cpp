@@ -156,6 +156,10 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
   // (every call is `rcall` today; a link-time reach question, tagged).
   if (FD->hasAttr<DSPICFarAttr>())
     F->addFnAttr("far");
+  // trellis session 96 (follow-up 20): and `near`, which was being DROPPED -- an explicit near on
+  // a function must beat -mlarge-code the way an explicit near on a datum beats -mlarge-data.
+  else if (FD->hasAttr<DSPICNearAttr>())
+    F->addFnAttr("near");
   if (GV->isDeclaration())
     return;
   const auto *IA = FD->getAttr<DSPICInterruptAttr>();

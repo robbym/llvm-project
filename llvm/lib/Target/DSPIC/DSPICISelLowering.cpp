@@ -588,6 +588,27 @@ bool DSPICTargetLowering::isEligibleForTailCall(
   return true;
 }
 
+// Session 96: does this callee carry `__attribute__((far))`? clang forwards it as the "far"
+// fn-attribute (CodeGen/Targets/DSPIC.cpp). An indirect callee is already a full-range `call Wn`,
+// and an external symbol carries no attribute to read.
+// ⚠ Defined HERE, beside calleeName, and not further down: both users sit above LowerCallResult.
+static bool calleeIsFar(SDValue Callee) {
+  if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
+    if (const auto *F = dyn_cast<Function>(G->getGlobal()))
+      return F->hasFnAttribute("far");
+  return false;
+}
+
+// Session 96 (follow-up 20): an explicit `near` asserts the callee IS in PC-relative reach, so it
+// keeps the one-word form even under -mlarge-code. A false assertion is a LINK error, not a silent
+// miscompile, which is what makes it safe to honour.
+static bool calleeIsNear(SDValue Callee) {
+  if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
+    if (const auto *F = dyn_cast<Function>(G->getGlobal()))
+      return F->hasFnAttribute("near");
+  return false;
+}
+
 static std::string calleeName(SDValue Callee) {
   if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
     return ("_" + G->getGlobal()->getName()).str();
@@ -629,6 +650,18 @@ DSPICTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                        " cannot be honoured: the DAG builder took it out of "
                        "tail position (a demoted struct return)",
                        /*gen_crash_diag=*/false);
+  // trellis session 96 (follow-up 19): a FAR callee cannot be reached by the one-word
+  // PC-relative forms at all -- that is what the attribute asserts -- so a tail call to one is
+  // demoted here. `bra`/`goto` is chosen by a subtarget-wide pattern predicate that cannot see a
+  // per-callee attribute; demoting costs one `return` at these sites and keeps the reach correct.
+  if (isTailCall && calleeIsFar(Callee)) {
+    if (IsMustTail)
+      report_fatal_error("dspic: musttail call to " + Twine(Name) +
+                         " cannot be honoured: the callee is `far` and the tail "
+                         "form is PC-relative",
+                         /*gen_crash_diag=*/false);
+    isTailCall = false;
+  }
   if (isTailCall) {
     std::string Why;
     if (!isEligibleForTailCall(CLI, Why)) {
@@ -887,7 +920,14 @@ SDValue DSPICTargetLowering::LowerCCCCallTo(
   // rcall (one word, PC-relative) by default, as cc1's small-code model; `call` under
   // +large-code. An indirect call is `call wN` either way.
   bool Direct = isa<GlobalAddressSDNode>(Callee) || isa<ExternalSymbolSDNode>(Callee);
-  bool Large = MF.getSubtarget<DSPICSubtarget>().isLargeCode();
+  // A `far` callee takes the long form whatever the code model: the attribute is an assertion that
+  // the target is out of PC-relative reach (stn3255 calls 22 bootloader entry points this way, and
+  // they live in another region entirely).
+  // EXPLICIT beats IMPLICIT in both directions, as on the data side: `far` forces the long form
+  // under any model, `near` keeps the short one under any model, and the model decides the rest.
+  bool Large = (MF.getSubtarget<DSPICSubtarget>().isLargeCode() &&
+                !calleeIsNear(Callee)) ||
+               calleeIsFar(Callee);
   Chain = DAG.getNode(Direct && !Large ? DSPICISD::RCALL : DSPICISD::CALL, dl, NodeTys, Ops);
   InGlue = Chain.getValue(1);
   Chain = DAG.getCALLSEQ_END(Chain, NumBytes, 0, InGlue, dl);
