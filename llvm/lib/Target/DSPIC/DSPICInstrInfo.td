@@ -459,6 +459,20 @@ let isCodeGenOnly = 1, isReturn = 1, isTerminator = 1, isBarrier = 1 in {
 let isCodeGenOnly = 1, hasSideEffects = 0 in
 def MOVDrr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs), 2, "mov.d\t$rs,$rd">;
 
+// trellis session 97: the mirror of tglobaladdrNear. A `far` callee is out of PC-relative reach
+// by assertion, so its TAIL call takes the two-word absolute form -- which is cc1's own answer
+// (steps/callreach/ask.sh: `goto _r_far` at BOTH code models), not a demotion to call+return.
+def tglobaladdrFar : PatLeaf<(tglobaladdr), [{
+  const auto *F = dyn_cast<Function>(cast<GlobalAddressSDNode>(N)->getGlobal());
+  return F && F->hasFnAttribute("far");
+}]>;
+
+// An explicitly `far` callee takes the LONG tail form even under small code, exactly as the
+// ordinary call already did. AddedComplexity puts it ahead of the generic row, which is how the
+// `near` row under large code is already ordered.
+let AddedComplexity = 10 in
+def : Pat<(DSPICtcret (i16 tglobaladdrFar:$dst)), (TCRETURNdiL tglobaladdr:$dst)>,
+      Requires<[IsSmallCode]>;
 def : Pat<(DSPICtcret (i16 tglobaladdr:$dst)),  (TCRETURNdi tglobaladdr:$dst)>,
       Requires<[IsSmallCode]>;
 def : Pat<(DSPICtcret (i16 texternalsym:$dst)), (TCRETURNdi texternalsym:$dst)>,

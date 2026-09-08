@@ -653,18 +653,10 @@ DSPICTargetLowering::LowerCall(TargetLowering::CallLoweringInfo &CLI,
                        " cannot be honoured: the DAG builder took it out of "
                        "tail position (a demoted struct return)",
                        /*gen_crash_diag=*/false);
-  // trellis session 96 (follow-up 19): a FAR callee cannot be reached by the one-word
-  // PC-relative forms at all -- that is what the attribute asserts -- so a tail call to one is
-  // demoted here. `bra`/`goto` is chosen by a subtarget-wide pattern predicate that cannot see a
-  // per-callee attribute; demoting costs one `return` at these sites and keeps the reach correct.
-  if (isTailCall && calleeIsFar(Callee)) {
-    if (IsMustTail)
-      report_fatal_error("dspic: musttail call to " + Twine(Name) +
-                         " cannot be honoured: the callee is `far` and the tail "
-                         "form is PC-relative",
-                         /*gen_crash_diag=*/false);
-    isTailCall = false;
-  }
+  // trellis session 97: a far callee's tail call is NOT demoted. Session 96 demoted it on the
+  // premise that the tail form's opcode could not be chosen per callee; tglobaladdrNear, in the
+  // same file, already did exactly that, and tglobaladdrFar now does it for this row. cc1 emits
+  // `goto _r_far` at both code models, and a musttail to a far callee is compiled, not refused.
   if (isTailCall) {
     std::string Why;
     if (!isEligibleForTailCall(CLI, Why)) {
