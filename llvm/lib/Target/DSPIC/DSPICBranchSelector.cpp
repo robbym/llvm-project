@@ -34,6 +34,17 @@ static cl::opt<bool>
     BranchSelectEnabled("dspic-dspic-branch-select", cl::Hidden, cl::init(true),
                         cl::desc("Expand out of range branches"));
 
+// trellis session 97: the branch displacement, in BITS of signed WORD offset. 16 is the dsPIC's
+// own, measured against the GPL linker for `bra`, `bra z` and `bra nz` alike -- 32,767 words links
+// and 32,768 is refused "out of range" (steps/brreach/reach.sh). The inherited value was 10,
+// MSP430's, which is 64x too tight and cost bl_fw 132 progbytes in branches expanded for nothing.
+// ⚠ The knob exists because J9 in steps/jumptable is the only observable for the BR_JT size arm,
+// and it works by pushing a branch past this threshold; at the correct value no realistic jump
+// table can. J9 passes -dspic-branch-reach-bits=10 to keep its witness.
+static cl::opt<unsigned>
+    BranchReachBits("dspic-branch-reach-bits", cl::Hidden, cl::init(16),
+                    cl::desc("Bits of signed word displacement a branch can reach"));
+
 STATISTIC(NumSplit, "Number of machine basic blocks split");
 STATISTIC(NumExpanded, "Number of branches expanded to long format");
 
@@ -71,17 +82,22 @@ char DSPICBranchSelectLegacyPass::ID = 0;
 } // namespace
 
 static bool isInRage(int DistanceInBytes) {
-  // According to CC430 Family User's Guide, Section 4.5.1.3, branch
-  // instructions have the signed 10-bit word offset field, so first we need to
-  // convert the distance from bytes to words, then check if it fits in 10-bit
-  // signed integer.
+  // trellis session 97: MEASURED, not inherited. The comment here used to cite the CC430 Family
+  // User's Guide for a signed 10-bit word offset -- MSP430's field, carried over with the rest of
+  // the backend. Against the GPL pic30 linker, `bra Expr`, `bra z,Expr` and `bra nz,Expr` all link
+  // at 32,767 words and are all refused "out of range" at 32,768 (steps/brreach/reach.sh, which
+  // crosses the boundary so that the table is a measurement and not a row of "links").
+  // ⛔ And the ASSEMBLER is not the oracle for this: it range-checks no branch at all, emitting a
+  // PC-relative relocation at any distance. Only `ld` refuses.
   const int WordSize = 2;
 
   assert((DistanceInBytes % WordSize == 0) &&
          "Branch offset should be word aligned!");
 
   int Words = DistanceInBytes / WordSize;
-  return isInt<10>(Words);
+  return BranchReachBits >= 32 ||
+         (Words >= -(1 << (BranchReachBits - 1)) &&
+          Words < (1 << (BranchReachBits - 1)));
 }
 
 /// Measure each basic block, fill the BlockOffsets, and return the size of
