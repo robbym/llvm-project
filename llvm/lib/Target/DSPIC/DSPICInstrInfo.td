@@ -412,6 +412,27 @@ let isCall = 1, isTerminator = 1, isReturn = 1, isBarrier = 1, isCodeGenOnly = 1
 //   clr [wN] — a zero stored through a register (no displacement form exists);
 //   retlw / mov.d / push.d — built by DSPICPeephole.cpp, never selected.
 //===----------------------------------------------------------------------===//
+// trellis session 96 (follow-up 18): the computed branch at the head of a jump table. The
+// operands are the case index and the jump-table index; the AsmPrinter expands it into `bra Wn`
+// plus one `bra MBB` per entry, which is cc1's own construct and stores no address anywhere.
+def SDT_DSPICBrJT : SDTypeProfile<0, 2, [SDTCisVT<0, i16>, SDTCisVT<1, i16>]>;
+def DSPICbrjt : SDNode<"DSPICISD::BR_JT", SDT_DSPICBrJT, [SDNPHasChain]>;
+
+// ⛔ `bra Wn` is a COMPUTED RELATIVE branch (PC += 2*Wn) and the target did not have it -- only
+// `goto Wn`, which is ABSOLUTE. Emitting `goto w0` with the case INDEX in w0 jumps to address 0..n,
+// which is what the first version of this change did. The encoding is MEASURED, not guessed:
+//     bra  w0 -> 0x010600     bra  w5 -> 0x010605
+//     goto w0 -> 0x010400     goto w5 -> 0x010405
+// so the 4-bit selector is 0b0110 where the existing `Br` (goto) uses 0b0100.
+let isIndirectBranch = 1, isBarrier = 1, isTerminator = 1, rd = 0 in
+def BrRel : I16rr<0b0110, (outs), (ins GR16:$rs), "bra\t$rs", []>;
+
+let isTerminator = 1, isBarrier = 1, isIndirectBranch = 1, isNotDuplicable = 1 in
+def BR_JT : DSPICFrameInst<(outs), (ins GR16:$idx, i16imm:$jti), 2,
+                           "bra\t$idx"> {
+  let Pattern = [(DSPICbrjt GR16:$idx, tjumptable:$jti)];
+}
+
 def DSPICrcall : SDNode<"DSPICISD::RCALL", SDT_DSPICCall,
                         [SDNPHasChain, SDNPOutGlue, SDNPOptInGlue, SDNPVariadic]>;
 def SDT_DSPICPush : SDTypeProfile<0, 1, [SDTCisVT<0, i16>]>;

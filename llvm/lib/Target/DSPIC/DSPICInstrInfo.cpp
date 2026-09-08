@@ -15,6 +15,7 @@
 #include "DSPICSubtarget.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineOutliner.h"
 #include "llvm/CodeGen/PseudoSourceValue.h"
 #include "llvm/IR/GlobalVariable.h"
@@ -540,6 +541,15 @@ unsigned DSPICInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
   }
   case TargetOpcode::BUNDLE:
     return getInstBundleSize(MI);
+  case DSPIC::BR_JT: {
+    // Session 96: the entries are emitted INLINE after the computed branch, so this instruction
+    // occupies 2 bytes plus 2 per case. A wrong size here mis-sizes every branch that spans the
+    // table, which DSPICBranchSelector then gets wrong silently.
+    const MachineFunction *MF = MI.getParent()->getParent();
+    const MachineJumpTableInfo *MJTI = MF->getJumpTableInfo();
+    unsigned N = MJTI->getJumpTables()[MI.getOperand(1).getIndex()].MBBs.size();
+    return 2 + 2 * N;
+  }
   }
 
   return Desc.getSize();

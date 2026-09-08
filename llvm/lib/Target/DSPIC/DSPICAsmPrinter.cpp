@@ -25,6 +25,7 @@
 #include "llvm/CodeGen/AsmPrinter.h"
 #include "llvm/CodeGen/AsmPrinterAnalysis.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
+#include "llvm/CodeGen/MachineJumpTableInfo.h"
 #include "llvm/CodeGen/MachineFunctionAnalysisManager.h"
 #include "llvm/CodeGen/MachineInstr.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
@@ -80,6 +81,10 @@ static cl::opt<std::string> DSPICConfigDB(
     bool PrintAsmMemoryOperand(const MachineInstr *MI, unsigned OpNo,
                                const char *ExtraCode, raw_ostream &O) override;
     void emitInstruction(const MachineInstr *MI) override;
+
+    /// Session 96: the jump table is a run of `bra` INSTRUCTIONS, so LLVM's own data emission
+    /// must not also run -- there is no data.
+    void emitJumpTableInfo() override {}
 
     /// Session 96: a function's address AS DATA is `handle(_f)` -- the address of the veneer the
     /// linker builds, which is what makes a function pointer fit in 16 bits on a part whose
@@ -366,6 +371,28 @@ void DSPICAsmPrinter::emitInstruction(const MachineInstr *MI) {
                                          getSubtargetInfo().getFeatureBits());
 
   DSPICMCInstLower MCInstLowering(OutContext, *this);
+
+  // Session 96: BR_JT expands to cc1's construct -- the computed branch, then one one-word
+  // relative branch per case, inline in .text. No address is stored anywhere, so the table works
+  // at any address; the previous `.short .LBB` table only worked while the function stayed
+  // under 64K, which is what the stn3255 link refused ten times.
+  if (MI->getOpcode() == DSPIC::BR_JT) {
+    MCInst Bra;
+    Bra.setOpcode(DSPIC::BrRel);   // `bra Wn`, RELATIVE -- not `goto Wn`, which is absolute
+    Bra.addOperand(MCOperand::createReg(MI->getOperand(0).getReg()));
+    EmitToStreamer(*OutStreamer, Bra);
+    const MachineJumpTableInfo *MJTI = MF->getJumpTableInfo();
+    const std::vector<MachineBasicBlock *> &Blocks =
+        MJTI->getJumpTables()[MI->getOperand(1).getIndex()].MBBs;
+    for (const MachineBasicBlock *MBB : Blocks) {
+      MCInst Entry;
+      Entry.setOpcode(DSPIC::JMP);
+      Entry.addOperand(MCOperand::createExpr(
+          MCSymbolRefExpr::create(MBB->getSymbol(), OutContext)));
+      EmitToStreamer(*OutStreamer, Entry);
+    }
+    return;
+  }
 
   MCInst TmpInst;
   MCInstLowering.Lower(MI, TmpInst);

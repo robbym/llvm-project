@@ -99,7 +99,9 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::GlobalAddress,    MVT::i32,   Custom);
   setOperationAction(ISD::ExternalSymbol,   MVT::i16,   Custom);
   setOperationAction(ISD::BlockAddress,     MVT::i16,   Custom);
-  setOperationAction(ISD::BR_JT,            MVT::Other, Expand);
+  // trellis session 96 (follow-up 18): a jump table is a run of `bra` INSTRUCTIONS on this
+  // target, not a table of addresses -- see LowerBR_JT and DSPICAsmPrinter.
+  setOperationAction(ISD::BR_JT,            MVT::Other, Custom);
   setOperationAction(ISD::BR_CC,            MVT::i8,    Custom);
   setOperationAction(ISD::BR_CC,            MVT::i16,   Custom);
   setOperationAction(ISD::BRCOND,           MVT::Other, Expand);
@@ -254,6 +256,7 @@ SDValue DSPICTargetLowering::LowerOperation(SDValue Op,
   case ISD::VASTART:          return LowerVASTART(Op, DAG);
   case ISD::VAARG:            return LowerVAARG(Op, DAG);
   case ISD::JumpTable:        return LowerJumpTable(Op, DAG);
+  case ISD::BR_JT:            return LowerBR_JT(Op, DAG);
   default:
     llvm_unreachable("unimplemented operand");
   }
@@ -1911,6 +1914,20 @@ SDValue DSPICTargetLowering::LowerVAARG(SDValue Op, SelectionDAG &DAG) const {
       DAG.getStore(Cur.getValue(1), dl, New, ApPtr, MachinePointerInfo(SV));
   SDValue Val = DAG.getLoad(VT, dl, Store, New, MachinePointerInfo());
   return DAG.getMergeValues({Val, Val.getValue(1)}, dl);
+}
+
+// Session 96: `bra Wn` plus a run of one-word `bra MBB` entries, cc1's construct. The index
+// arrives in instruction words already -- entry 0 is the instruction immediately after the
+// computed branch -- so nothing is scaled here.
+SDValue DSPICTargetLowering::LowerBR_JT(SDValue Op, SelectionDAG &DAG) const {
+  SDValue Chain = Op.getOperand(0);
+  SDValue Table = Op.getOperand(1);
+  SDValue Index = Op.getOperand(2);
+  SDLoc dl(Op);
+  JumpTableSDNode *JT = cast<JumpTableSDNode>(Table);
+  SDValue TargetJT =
+      DAG.getTargetJumpTable(JT->getIndex(), getPointerTy(DAG.getDataLayout()));
+  return DAG.getNode(DSPICISD::BR_JT, dl, MVT::Other, Chain, Index, TargetJT);
 }
 
 SDValue DSPICTargetLowering::LowerJumpTable(SDValue Op,
