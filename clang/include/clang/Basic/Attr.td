@@ -2282,6 +2282,37 @@ def DSPICNear : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
 }
 def : MutualExclusions<[DSPICFar, DSPICNear]>;
 
+// trellis session 96 (follow-up 14): the dsPIC data-PLACEMENT attributes, carried to the backend
+// as the "dspic-space" / "dspic-persistent" / "dspic-noload" global attributes
+// (CodeGen/Targets/DSPIC.cpp) and turned into pic30 section attributes by the target's TLOF.
+// `space` names a memory space; only prog, psv and data are implemented, and the others are
+// NAMED in the refusal rather than ignored -- silently dropping space(eedata) would put an
+// object in the wrong memory.
+def DSPICSpace : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"space">];
+  let Args = [IdentifierArgument<"Space">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+}
+def DSPICPersistent : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"persistent">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def DSPICAddress : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"address">];
+  let Args = [UnsignedArgument<"Addr">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+}
+def DSPICNoload : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"noload">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
 def MipsLongCall : InheritableAttr, TargetSpecificAttr<TargetAnyMips> {
   let Spellings = [GCC<"long_call">, GCC<"far">];
   let Subjects = SubjectList<[Function]>;

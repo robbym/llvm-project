@@ -88,8 +88,78 @@ public:
     return ConstSection;
   }
 
+  // trellis session 96 (follow-up 14): the pic30 section-attribute suffix for a global, read
+  // off cc1 (steps/placement/ask.sh). The attributes travel INSIDE the MCSection name and
+  // DSPICTargetAsmStreamer::changeSection prints them verbatim, because `persist`, `noload` and
+  // `psv` have no ELF flag and the assembler's name-based inference does not cover the names
+  // this firmware uses. ⛔ `persist` REPLACES `data`/`bss` in cc1's output; it is not appended.
+  static std::string pic30Attrs(const GlobalObject *GO, SectionKind Kind) {
+    if (isa<Function>(GO))
+      return ",code";
+    const auto *GV = dyn_cast<GlobalVariable>(GO);
+    bool Near = !(GV && GV->hasAttribute("far"));
+    bool Noload = GV && GV->hasAttribute("dspic-noload");
+    StringRef Space =
+        GV && GV->hasAttribute("dspic-space")
+            ? GV->getAttribute("dspic-space").getValueAsString()
+            : StringRef();
+    std::string S;
+    // cc1 puts address() FIRST, ahead of the space attribute, and in decimal.
+    if (GV && GV->hasAttribute("dspic-address"))
+      S += ",address(" +
+           GV->getAttribute("dspic-address").getValueAsString().str() + ")";
+    if (GV && GV->hasAttribute("dspic-persistent")) {
+      if (Near)
+        S += ",near";
+      S += ",persist";
+    } else if (Space == "prog") {
+      S += ",code";
+    } else if (Space == "psv") {
+      S += ",psv,page";
+    } else {
+      bool Zero = !GV || !GV->hasInitializer() ||
+                  (GV->getInitializer() && GV->getInitializer()->isNullValue());
+      S += Zero ? ",bss" : ",data";
+      if (Near)
+        S += ",near";
+    }
+    if (Noload)
+      S += ",noload";
+    return S;
+  }
+
   MCSection *getExplicitSectionGlobal(const GlobalObject *GO, SectionKind Kind,
                                       const TargetMachine &TM) const override {
+    // trellis session 96 (follow-up 14). A named section on a FUNCTION was emitted `"a"` --
+    // allocatable but not executable -- and the pic30 as refused four of stn3255's files with
+    // "Cannot locate executable code in a data section". Anything with a pic30 placement
+    // attribute takes the attribute-carrying name; everything else keeps the L1e/session-90
+    // path below, unchanged.
+    {
+      // ⛔ EVERY explicit section takes the pic30 spelling, not only the ones carrying a
+      // placement attribute. cc1 does: a plain `section(".can_buffers")` on initialised data is
+      // `.can_buffers,data,near`, and the `near` is load-bearing under -msmall-data. The first
+      // spelling of this gated on the attributes and left ordinary named sections on the ELF
+      // path, where they came out `"aw",@progbits` with no near.
+      if (GO->getAddressSpace() != 1) {
+        const auto *GV = dyn_cast<GlobalVariable>(GO);
+        std::string Name = (GO->getSection() + pic30Attrs(GO, Kind)).str();
+        unsigned Flags = ELF::SHF_ALLOC;
+        unsigned Type = ELF::SHT_PROGBITS;
+        if (isa<Function>(GO))
+          Flags |= ELF::SHF_EXECINSTR;
+        else {
+          if (!Kind.isReadOnly())
+            Flags |= ELF::SHF_WRITE;
+          // L1e (session 89): a zero-initialised global in a named section is BSS, or the pic30
+          // linker classifies it "attributes = data" and cannot place it.
+          if (!GV || !GV->hasInitializer() ||
+              (GV->getInitializer() && GV->getInitializer()->isNullValue()))
+            Type = ELF::SHT_NOBITS;
+        }
+        return getContext().getELFSection(Name, Type, Flags);
+      }
+    }
     // L1e (session 89), explicit-section bss: a zero-initialised global in a named section is
     // BSS. LLVM would emit it @progbits (a DATA section of zeros) for a section it cannot prove
     // nobits; the pic30 linker then classifies it "attributes = data" and cannot place the far
@@ -122,6 +192,33 @@ public:
       if (F->hasFnAttribute("interrupt"))
         return getContext().getELFSection(".isr.isr.text", ELF::SHT_PROGBITS,
                                           ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+    // trellis session 96 (follow-up 14): a placement attribute with NO section() names cc1's
+    // own default -- `.prog,code` for space(prog), and for a bare `persistent` a per-object
+    // section, where cc1 generates a hashed name and this uses the symbol, which the linker
+    // script's `*(.pbss*)` rule collects the same way.
+    if (const auto *GVar = dyn_cast<GlobalVariable>(GO)) {
+      bool Placed = GVar->hasAttribute("dspic-space") ||
+                    GVar->hasAttribute("dspic-persistent") ||
+                    GVar->hasAttribute("dspic-noload") ||
+                    GVar->hasAttribute("dspic-address");
+      if (Placed && GO->getAddressSpace() != 1) {
+        StringRef Space = GVar->hasAttribute("dspic-space")
+                              ? GVar->getAttribute("dspic-space").getValueAsString()
+                              : StringRef();
+        std::string Base = GVar->hasAttribute("dspic-persistent")
+                               ? (".pbss." + GO->getName()).str()
+                               : (Space == "prog" ? std::string(".prog")
+                                  : Space == "psv" ? std::string(".const")
+                                                   : std::string(".ndata"));
+        unsigned Flags = ELF::SHF_ALLOC;
+        if (Space == "prog" || Space == "psv")
+          Flags |= ELF::SHF_EXECINSTR;
+        else
+          Flags |= ELF::SHF_WRITE;
+        return getContext().getELFSection(Base + pic30Attrs(GO, Kind),
+                                          ELF::SHT_PROGBITS, Flags);
+      }
+    }
     // L1e prog-space: an addrspace(1) global with no explicit section still goes to program memory.
     if (GO->getAddressSpace() == 1 && !isa<Function>(GO))
       return getContext().getELFSection(".const", ELF::SHT_PROGBITS,

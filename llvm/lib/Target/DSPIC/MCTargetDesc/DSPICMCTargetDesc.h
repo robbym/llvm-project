@@ -40,6 +40,14 @@ MCAsmBackend *createDSPICMCAsmBackend(const Target &T,
 
 MCTargetStreamer *
 createDSPICObjectTargetStreamer(MCStreamer &S, const MCSubtargetInfo &STI);
+// trellis session 96 (follow-up 14): prints pic30 section directives; see DSPICELFStreamer.cpp.
+// The two parameter types are only named here, so forward declarations are enough -- this header
+// is included by every DSPIC .cpp and must not pull in MC/Support headers for one signature.
+class formatted_raw_ostream;
+class MCInstPrinter;
+MCTargetStreamer *dspicAsmTargetStreamerCtor(MCStreamer &S,
+                                             formatted_raw_ostream &OS,
+                                             MCInstPrinter *IP);
 
 std::unique_ptr<MCObjectTargetWriter>
 createDSPICELFObjectWriter(uint8_t OSABI);

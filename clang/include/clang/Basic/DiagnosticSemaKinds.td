@@ -14356,4 +14356,10 @@ def err_cuda_device_kernel_launch_not_supported
 def err_cuda_device_kernel_launch_require_rdc
     : Error<"kernel launch from __device__ or __global__ function requires "
             "relocatable device code (i.e. requires -fgpu-rdc)">;
+// trellis session 96 (follow-up 14): a memory space this port does not implement. An ignored
+// space() would put the object in the wrong memory, so it is an error that names what it got.
+def err_dspic_space_unimplemented : Error<
+  "dsPIC memory space '%0' is not implemented; "
+  "'prog', 'psv' and 'data' are">;
+
 } // end of sema component.

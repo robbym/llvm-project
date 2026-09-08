@@ -6668,6 +6668,36 @@ BTFDeclTagAttr *Sema::mergeBTFDeclTagAttr(Decl *D, const BTFDeclTagAttr &AL) {
 // a far object leaves the near 4 KB and the 13-bit file-register forms (CodeGen/Targets/
 // DSPIC.cpp forwards it as the "far"/"near" global attribute); on a function they are the
 // call reach. Mips keeps its function-only rule here, since the shared subject list is wider.
+// trellis session 96 (follow-up 14): `__attribute__((space(prog)))` and friends. The three this
+// port implements become section attributes in the TLOF; every other space is REFUSED BY NAME,
+// because ignoring one would silently place the object in the wrong memory.
+static void handleDSPICSpaceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkExactlyNumArgs(S, 1))
+    return;
+  if (!AL.isArgIdent(0)) {
+    S.Diag(AL.getLoc(), diag::err_attribute_argument_type)
+        << AL << AANT_ArgumentIdentifier;
+    return;
+  }
+  IdentifierInfo *Space = AL.getArgAsIdent(0)->getIdentifierInfo();
+  if (!Space->isStr("prog") && !Space->isStr("psv") && !Space->isStr("data")) {
+    S.Diag(AL.getLoc(), diag::err_dspic_space_unimplemented) << Space->getName();
+    return;
+  }
+  D->addAttr(::new (S.Context) DSPICSpaceAttr(S.Context, AL, Space));
+}
+
+// trellis session 96 (follow-up 14): `__attribute__((address(N)))` pins a section at an absolute
+// address; cc1 emits it FIRST in the section's attribute list and in decimal.
+static void handleDSPICAddressAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkExactlyNumArgs(S, 1))
+    return;
+  uint32_t Addr = 0;
+  if (!S.checkUInt32Argument(AL, AL.getArgAsExpr(0), Addr))
+    return;
+  D->addAttr(::new (S.Context) DSPICAddressAttr(S.Context, AL, Addr));
+}
+
 static void handleLongOrShortCallAttr(Sema &S, Decl *D, const ParsedAttr &AL, bool Long) {
   if (!AL.checkExactlyNumArgs(S, 0))
     return;
@@ -7978,6 +8008,12 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_Ownership:
     handleOwnershipAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICSpace:
+    handleDSPICSpaceAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICAddress:
+    handleDSPICAddressAttr(S, D, AL);
     break;
   case ParsedAttr::AT_Naked:
     handleNakedAttr(S, D, AL);

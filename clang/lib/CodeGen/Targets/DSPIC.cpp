@@ -118,6 +118,16 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         GVar->addAttribute("far");
       else if (VD->hasAttr<DSPICNearAttr>())
         GVar->addAttribute("near");
+      // trellis session 96 (follow-up 14): the placement attributes ride to the TLOF, which
+      // turns them into pic30 section attributes. See DSPICTargetMachine.cpp's pic30Attrs.
+      if (const auto *SA = VD->getAttr<DSPICSpaceAttr>())
+        GVar->addAttribute("dspic-space", SA->getSpace()->getName());
+      if (VD->hasAttr<DSPICPersistentAttr>())
+        GVar->addAttribute("dspic-persistent");
+      if (VD->hasAttr<DSPICNoloadAttr>())
+        GVar->addAttribute("dspic-noload");
+      if (const auto *AA = VD->getAttr<DSPICAddressAttr>())
+        GVar->addAttribute("dspic-address", std::to_string(AA->getAddr()));
     }
     return;
   }

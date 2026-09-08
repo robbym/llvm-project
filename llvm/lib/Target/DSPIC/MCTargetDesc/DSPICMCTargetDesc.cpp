@@ -94,4 +94,6 @@ LLVMInitializeDSPICTargetMC() {
   TargetRegistry::RegisterMCAsmBackend(T, createDSPICMCAsmBackend);
   TargetRegistry::RegisterObjectTargetStreamer(
       T, createDSPICObjectTargetStreamer);
+  // trellis session 96 (follow-up 14): the pic30 section directive needs a target ASM streamer.
+  TargetRegistry::RegisterAsmTargetStreamer(T, dspicAsmTargetStreamerCtor);
 }
