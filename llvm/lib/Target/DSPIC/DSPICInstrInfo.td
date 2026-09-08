@@ -1285,6 +1285,16 @@ def comf8  : PatFrag<(ops node:$x), (xor node:$x, (i8 -1))>;
 // post-increment/decrement source forms carry the pointer's writeback and are selected in
 // C++ (tryIndexedBinOp). Destination: the read-modify-write `op Wb,[Wn],[Wn]`, and the store
 // of a computed value `op Wb,Ws,[Wn]` / `op Wb,#lit5,[Wn]`.
+// Session 96: a memory-destination read-modify-write consumes the arithmetic node and produces NO
+// value, so folding one whose result is ALSO used elsewhere forces the computation to be redone --
+// and, for the [Wn] forms, an address materialisation besides. Two instructions spent to lose the
+// result. Require the stored value to have exactly one use (the store itself); isel then falls
+// through to the file-to-WREG form plus a direct store, which is cc1's own pair for `++g`.
+// A StoreSDNode's operands are (chain, value, ptr), so operand 1 is the value.
+def store_1u : PatFrag<(ops node:$val, node:$ptr), (store node:$val, node:$ptr), [{
+  return N->getOperand(1)->hasOneUse();
+}]>;
+
 multiclass MemALU<string asmw, string asmb, SDPatternOperator node> {
   let Defs = [SR] in {
   let mayLoad = 1 in {
@@ -1301,17 +1311,17 @@ multiclass MemALU<string asmw, string asmb, SDPatternOperator node> {
   }
   let mayLoad = 1, mayStore = 1 in {
   def 16nrn : DSPICFrameInst<(outs), (ins GR16:$rb, GR16:$p), 2, !strconcat(asmw, "\t$rb,[$p],[$p]")> {
-    let Pattern = [(store (node (i16 (load GR16:$p)), GR16:$rb), GR16:$p)]; }
+    let Pattern = [(store_1u (node (i16 (load GR16:$p)), GR16:$rb), GR16:$p)]; }
   def 8nrn  : DSPICFrameInst<(outs), (ins GR8:$rb, GR16:$p), 2, !strconcat(asmb, "\t$rb,[$p],[$p]")> {
-    let Pattern = [(store (node (i8 (load GR16:$p)), GR8:$rb), GR16:$p)]; }
+    let Pattern = [(store_1u (node (i8 (load GR16:$p)), GR8:$rb), GR16:$p)]; }
   }
   let mayStore = 1 in {
   def 16rrn : DSPICFrameInst<(outs), (ins GR16:$rb, GR16:$rs, GR16:$p), 2, !strconcat(asmw, "\t$rb,$rs,[$p]")> {
-    let Pattern = [(store (node GR16:$rb, GR16:$rs), GR16:$p)]; }
+    let Pattern = [(store_1u (node GR16:$rb, GR16:$rs), GR16:$p)]; }
   def 8rrn  : DSPICFrameInst<(outs), (ins GR8:$rb, GR8:$rs, GR16:$p), 2, !strconcat(asmb, "\t$rb,$rs,[$p]")> {
-    let Pattern = [(store (node GR8:$rb, GR8:$rs), GR16:$p)]; }
+    let Pattern = [(store_1u (node GR8:$rb, GR8:$rs), GR16:$p)]; }
   def 16rin : DSPICFrameInst<(outs), (ins GR16:$rb, i16imm:$imm, GR16:$p), 2, !strconcat(asmw, "\t$rb,$imm,[$p]")> {
-    let Pattern = [(store (node GR16:$rb, lit5imm16:$imm), GR16:$p)]; }
+    let Pattern = [(store_1u (node GR16:$rb, lit5imm16:$imm), GR16:$p)]; }
   }
   }
 }
@@ -1346,19 +1356,19 @@ let Defs = [SR], AddedComplexity = 12 in {
   }
   let mayLoad = 1, mayStore = 1 in {
   def SUBM16nrn  : DSPICFrameInst<(outs), (ins GR16:$rb, GR16:$p), 2, "sub\t$rb,[$p],[$p]"> {
-    let Pattern = [(store (sub GR16:$rb, (i16 (load GR16:$p))), GR16:$p)]; }
+    let Pattern = [(store_1u (sub GR16:$rb, (i16 (load GR16:$p))), GR16:$p)]; }
   def SUBRM16nrn : DSPICFrameInst<(outs), (ins GR16:$rb, GR16:$p), 2, "subr\t$rb,[$p],[$p]"> {
-    let Pattern = [(store (sub (i16 (load GR16:$p)), GR16:$rb), GR16:$p)]; }
+    let Pattern = [(store_1u (sub (i16 (load GR16:$p)), GR16:$rb), GR16:$p)]; }
   def SUBM8nrn   : DSPICFrameInst<(outs), (ins GR8:$rb, GR16:$p), 2, "sub.b\t$rb,[$p],[$p]"> {
-    let Pattern = [(store (sub GR8:$rb, (i8 (load GR16:$p))), GR16:$p)]; }
+    let Pattern = [(store_1u (sub GR8:$rb, (i8 (load GR16:$p))), GR16:$p)]; }
   def SUBRM8nrn  : DSPICFrameInst<(outs), (ins GR8:$rb, GR16:$p), 2, "subr.b\t$rb,[$p],[$p]"> {
-    let Pattern = [(store (sub (i8 (load GR16:$p)), GR8:$rb), GR16:$p)]; }
+    let Pattern = [(store_1u (sub (i8 (load GR16:$p)), GR8:$rb), GR16:$p)]; }
   }
   let mayStore = 1 in {
   def SUBM16rrn : DSPICFrameInst<(outs), (ins GR16:$rb, GR16:$rs, GR16:$p), 2, "sub\t$rb,$rs,[$p]"> {
-    let Pattern = [(store (sub GR16:$rb, GR16:$rs), GR16:$p)]; }
+    let Pattern = [(store_1u (sub GR16:$rb, GR16:$rs), GR16:$p)]; }
   def SUBM8rrn  : DSPICFrameInst<(outs), (ins GR8:$rb, GR8:$rs, GR16:$p), 2, "sub.b\t$rb,$rs,[$p]"> {
-    let Pattern = [(store (sub GR8:$rb, GR8:$rs), GR16:$p)]; }
+    let Pattern = [(store_1u (sub GR8:$rb, GR8:$rs), GR16:$p)]; }
   // `x - 5` reaches isel as `x + (-5)`: sub.w Wb,#5,[Wn]
   def SUBM16rin : DSPICFrameInst<(outs), (ins GR16:$rb, i16imm:$imm, GR16:$p), 2, "sub.w\t$rb,$imm,[$p]">;
   }
@@ -1384,10 +1394,10 @@ multiclass Unary16<string asm, PatFrag f, int cx = 12> {
     let Pattern = [(set GR16:$rd, (f (i16 (load GR16:$p))))]; }
   let mayStore = 1 in
   def rn : DSPICFrameInst<(outs), (ins GR16:$rs, GR16:$p), 2, !strconcat(asm, "\t$rs,[$p]")> {
-    let Pattern = [(store (f GR16:$rs), GR16:$p)]; }
+    let Pattern = [(store_1u (f GR16:$rs), GR16:$p)]; }
   let mayLoad = 1, mayStore = 1 in
   def nn : DSPICFrameInst<(outs), (ins GR16:$p), 2, !strconcat(asm, "\t[$p],[$p]")> {
-    let Pattern = [(store (f (i16 (load GR16:$p))), GR16:$p)]; }
+    let Pattern = [(store_1u (f (i16 (load GR16:$p))), GR16:$p)]; }
   }
 }
 multiclass Unary8<string asm, PatFrag f, int cx = 12> {
@@ -1399,10 +1409,10 @@ multiclass Unary8<string asm, PatFrag f, int cx = 12> {
     let Pattern = [(set GR8:$rd, (f (i8 (load GR16:$p))))]; }
   let mayStore = 1 in
   def rn : DSPICFrameInst<(outs), (ins GR8:$rs, GR16:$p), 2, !strconcat(asm, "\t$rs,[$p]")> {
-    let Pattern = [(store (f GR8:$rs), GR16:$p)]; }
+    let Pattern = [(store_1u (f GR8:$rs), GR16:$p)]; }
   let mayLoad = 1, mayStore = 1 in
   def nn : DSPICFrameInst<(outs), (ins GR16:$p), 2, !strconcat(asm, "\t[$p],[$p]")> {
-    let Pattern = [(store (f (i8 (load GR16:$p))), GR16:$p)]; }
+    let Pattern = [(store_1u (f (i8 (load GR16:$p))), GR16:$p)]; }
   }
 }
 defm INC16  : Unary16<"inc.w",  inc1f, 13>;
