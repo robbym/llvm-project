@@ -1644,6 +1644,15 @@ def warn_ext_int_deprecated : Warning<
 def ext_bit_int : Extension<
   "'_BitInt' in %select{C17 and earlier|C++}0 is a Clang extension">,
   InGroup<BitIntExtension>;
+// trellis session 96 (follow-up 13): the dsPIC `interrupt` attribute's sub-arguments. Naming the
+// one we were given, rather than ignoring it, is the operator's standing rule -- an ignored
+// `irq(n)` would silently move an ISR's vector.
+def err_dspic_interrupt_argument : Error<
+  "dsPIC 'interrupt' attribute argument '%0' is not implemented; "
+  "only 'preprologue(\"...\")' is">;
+def err_dspic_interrupt_preprologue_string : Error<
+  "dsPIC 'interrupt' attribute's 'preprologue' takes a string literal">;
+
 } // end of Parse Issue category.
 
 let CategoryName = "Modules Issue" in {

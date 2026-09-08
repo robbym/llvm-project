@@ -131,10 +131,16 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
     F->addFnAttr("far");
   if (GV->isDeclaration())
     return;
-  if (!FD->hasAttr<DSPICInterruptAttr>())
+  const auto *IA = FD->getAttr<DSPICInterruptAttr>();
+  if (!IA)
     return;
   F->addFnAttr(llvm::Attribute::NoInline);
   F->addFnAttr("interrupt");
+  // trellis session 96 (follow-up 13): the preprologue text rides to the backend as its own fn
+  // attribute; DSPICFrameLowering::emitPrologue turns it into an INLINEASM at the top of the
+  // entry block, ahead of the callee-saved pushes, which is where cc1 puts it.
+  if (!IA->getPreprologue().empty())
+    F->addFnAttr("dspic-preprologue", IA->getPreprologue());
 }
 
 std::unique_ptr<TargetCodeGenInfo>

@@ -2211,6 +2211,10 @@ def MSABI : DeclOrTypeAttr {
 // attribute "interrupt" (CodeGen/Targets/DSPIC.cpp); its lowering is L1d's.
 def DSPICInterrupt : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"interrupt">];
+  // trellis session 96 (follow-up 13): the OPTIONAL `preprologue("...")` sub-argument, parsed by
+  // Parser::ParseDSPICInterruptAttribute because `preprologue(STRING)` is not an expression and
+  // the common argument parser would read it as a call to an undeclared function.
+  let Args = [StringArgument<"Preprologue", 1>];
   let Subjects = SubjectList<[Function]>;
   let ParseKind = "Interrupt";
   let Documentation = [Undocumented];

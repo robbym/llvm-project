@@ -170,6 +170,30 @@ void DSPICFrameLowering::emitPrologue(MachineFunction &MF,
   const auto *FuncInfo = MF.getInfo<DSPICMachineFunctionInfo>();
 
   MachineBasicBlock::iterator MBBI = MBB.begin();
+
+  // trellis session 96 (follow-up 13): `interrupt(preprologue("..."))`. cc1 emits the text as the
+  // very first thing in the function, BEFORE the ISR prologue -- the firmware's stack-error trap
+  // captures w15 before the compiler's own push moves it, then branches past the prologue. By the
+  // time this runs the callee-saved pushes are already at MBB.begin(), so inserting here puts the
+  // text ahead of them. An INLINEASM MachineInstr rather than AsmPrinter raw text: raw text is an
+  // error on an object streamer, and AsmPrinter::emitInlineAsm(StringRef,...) is private.
+  if (MF.getFunction().hasFnAttribute("dspic-preprologue")) {
+    StringRef Pre =
+        MF.getFunction().getFnAttribute("dspic-preprologue").getValueAsString();
+    // Indent the continuation lines. The inline-asm printer tabs the FIRST line only, so a
+    // two-line preprologue would otherwise put `bra ...` in column 0 -- which the assembler
+    // accepts, but cc1 indents and a column-0 mnemonic reads like a label.
+    std::string Text;
+    for (char Ch : Pre) {
+      Text.push_back(Ch);
+      if (Ch == '\n')
+        Text.push_back('\t');
+    }
+    BuildMI(MBB, MBBI, DebugLoc(),
+            MF.getSubtarget().getInstrInfo()->get(TargetOpcode::INLINEASM))
+        .addExternalSymbol(MF.createExternalSymbolName(Text))
+        .addImm(InlineAsm::Extra_HasSideEffects);
+  }
   while (MBBI != MBB.end() && isCalleeSavedPush(*MBBI))
     ++MBBI;
   DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();

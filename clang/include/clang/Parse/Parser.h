@@ -2481,6 +2481,17 @@ private:
                                   SourceLocation ScopeLoc,
                                   ParsedAttr::Form Form);
 
+  /// trellis session 96 (follow-up 13): parse the dsPIC `interrupt` attribute's optional
+  /// sub-arguments. `preprologue("...")` is an identifier applied to a string, not an
+  /// expression, so the common argument parser cannot read it.
+  void ParseDSPICInterruptAttribute(IdentifierInfo &AttrName,
+                                    SourceLocation AttrNameLoc,
+                                    ParsedAttributes &Attrs,
+                                    SourceLocation *EndLoc,
+                                    IdentifierInfo *ScopeName,
+                                    SourceLocation ScopeLoc,
+                                    ParsedAttr::Form Form);
+
   void ParseTypeTagForDatatypeAttribute(IdentifierInfo &AttrName,
                                         SourceLocation AttrNameLoc,
                                         ParsedAttributes &Attrs,

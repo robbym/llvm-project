@@ -6717,9 +6717,18 @@ static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
           << AL << AL.isRegularKeywordAttribute() << ExpectedFunctionOrMethod;
       break;
     }
-    if (!AL.checkExactlyNumArgs(S, 0))
+    // trellis session 96 (follow-up 13): zero arguments, or exactly one `preprologue` string
+    // that Parser::ParseDSPICInterruptAttribute has already reduced to a string literal.
+    if (!AL.checkAtMostNumArgs(S, 1))
       break;
-    D->addAttr(::new (S.Context) DSPICInterruptAttr(S.Context, AL));
+    {
+      StringRef Preprologue;
+      if (AL.getNumArgs() == 1 &&
+          !S.checkStringLiteralArgumentAttr(AL, 0, Preprologue))
+        break;
+      D->addAttr(::new (S.Context)
+                     DSPICInterruptAttr(S.Context, AL, Preprologue));
+    }
     break;
   case llvm::Triple::riscv32:
   case llvm::Triple::riscv64:

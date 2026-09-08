@@ -665,6 +665,13 @@ void Parser::ParseGNUAttributeArgs(
     ParseTypeTagForDatatypeAttribute(*AttrName, AttrNameLoc, Attrs, EndLoc,
                                      ScopeName, ScopeLoc, Form);
     return;
+  } else if (AttrKind == ParsedAttr::AT_Interrupt &&
+             getTargetInfo().getTriple().getArch() == llvm::Triple::dspic) {
+    // trellis session 96 (follow-up 13). AT_Interrupt is shared by every target's `interrupt`
+    // attribute, so this is guarded by the triple and every other target keeps the common path.
+    ParseDSPICInterruptAttribute(*AttrName, AttrNameLoc, Attrs, EndLoc,
+                                 ScopeName, ScopeLoc, Form);
+    return;
   } else if (attributeIsTypeArgAttr(*AttrName, Form.getSyntax(), ScopeName)) {
     ParseAttributeWithTypeArg(*AttrName, AttrNameLoc, Attrs, ScopeName,
                               ScopeLoc, Form);
@@ -1655,6 +1662,78 @@ void Parser::ParseObjCBridgeRelatedAttribute(
                SourceRange(ObjCBridgeRelatedLoc, T.getCloseLocation()),
                AttributeScopeInfo(ScopeName, ScopeLoc), RelatedClass,
                ClassMethod, InstanceMethod, Form);
+}
+
+/// Parse the dsPIC `interrupt` attribute's optional sub-arguments:
+///
+///   __attribute__((interrupt))
+///   __attribute__((interrupt(preprologue("mov w15,__defIsrFramePtr"))))
+///
+/// `preprologue(STRING)` is an identifier applied to a string, which the common argument parser
+/// would read as a call to an undeclared function. cc1's other sub-arguments -- irq(n), altirq(n)
+/// and save(...) -- are UNWRITTEN here and are named in the refusal rather than ignored: an
+/// ignored irq(n) would silently move an ISR's vector.
+void Parser::ParseDSPICInterruptAttribute(
+    IdentifierInfo &AttrName, SourceLocation AttrNameLoc,
+    ParsedAttributes &Attrs, SourceLocation *EndLoc, IdentifierInfo *ScopeName,
+    SourceLocation ScopeLoc, ParsedAttr::Form Form) {
+  BalancedDelimiterTracker T(*this, tok::l_paren);
+  if (T.consumeOpen()) {
+    Diag(Tok, diag::err_expected) << tok::l_paren;
+    return;
+  }
+
+  ArgsVector Args;
+  if (Tok.isNot(tok::r_paren)) {
+    if (Tok.isNot(tok::identifier)) {
+      Diag(Tok, diag::err_dspic_interrupt_argument) << PP.getSpelling(Tok);
+      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+      T.consumeClose();
+      return;
+    }
+    IdentifierInfo *Kind = Tok.getIdentifierInfo();
+    SourceLocation KindLoc = ConsumeToken();
+    if (!Kind->isStr("preprologue")) {
+      Diag(KindLoc, diag::err_dspic_interrupt_argument) << Kind->getName();
+      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+      T.consumeClose();
+      return;
+    }
+
+    BalancedDelimiterTracker Inner(*this, tok::l_paren);
+    if (Inner.consumeOpen()) {
+      Diag(Tok, diag::err_expected) << tok::l_paren;
+      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+      T.consumeClose();
+      return;
+    }
+    if (!isTokenStringLiteral()) {
+      Diag(Tok, diag::err_dspic_interrupt_preprologue_string);
+      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+      Inner.consumeClose();
+      T.consumeClose();
+      return;
+    }
+    ExprResult Str(ParseStringLiteralExpression());
+    if (Str.isInvalid()) {
+      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+      Inner.consumeClose();
+      T.consumeClose();
+      return;
+    }
+    Args.push_back(Str.get());
+    if (Inner.consumeClose())
+      return;
+  }
+
+  if (T.consumeClose())
+    return;
+  if (EndLoc)
+    *EndLoc = T.getCloseLocation();
+
+  Attrs.addNew(&AttrName, SourceRange(AttrNameLoc, T.getCloseLocation()),
+               AttributeScopeInfo(ScopeName, ScopeLoc), Args.data(),
+               Args.size(), Form);
 }
 
 void Parser::ParseSwiftNewTypeAttribute(
