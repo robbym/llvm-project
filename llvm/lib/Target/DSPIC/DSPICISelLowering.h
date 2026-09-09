@@ -52,6 +52,12 @@ namespace llvm {
     SDValue LowerSIGN_EXTEND(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerRETURNADDR(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerFRAMEADDR(SDValue Op, SelectionDAG &DAG) const;
+    /// trellis session 99: a target with no vector register must still ANSWER for a vector
+    /// type -- the generic default asserts, and `a > b` on a vector_size type aborted the
+    /// compiler while `a + b` on the same type scalarized and worked.
+    EVT getSetCCResultType(const DataLayout &DL, LLVMContext &Ctx,
+                           EVT VT) const override;
+
     SDValue LowerVASTART(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerVAARG(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerJumpTable(SDValue Op, SelectionDAG &DAG) const;

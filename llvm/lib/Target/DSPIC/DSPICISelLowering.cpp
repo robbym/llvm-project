@@ -1932,6 +1932,24 @@ SDValue DSPICTargetLowering::LowerFRAMEADDR(SDValue Op,
   return FrameAddr;
 }
 
+// trellis session 99: seven of GCC's torture suite's compile failures were ONE assertion --
+// TargetLoweringBase.cpp's `!VT.isVector() && "No default SetCC type for vectors!"`. This target
+// has no vector register, but that does not make a vector_size type unsupported: the type
+// legalizer scalarizes it, and `a + b` on a v4i16 already compiled. Only the COMPARE aborted,
+// because getSetCCResultType is asked for the VECTOR type before scalarization and the generic
+// default has nothing to say. The answer is the ordinary one -- same element count, integer
+// elements of the operand width -- after which the scalarizer takes it apart like any other
+// vector operation.
+// ⚠ MSP430 has the identical hole (neither target overrode this), and it is left alone: the fix
+// belongs to each target, not to TargetLoweringBase, and msp430 still aborting on the same file
+// from the same binary is what the comparer checks to prove this fix is LOCAL.
+EVT DSPICTargetLowering::getSetCCResultType(const DataLayout &DL,
+                                            LLVMContext &Ctx, EVT VT) const {
+  if (!VT.isVector())
+    return TargetLowering::getSetCCResultType(DL, Ctx, VT);
+  return VT.changeVectorElementTypeToInteger();
+}
+
 SDValue DSPICTargetLowering::LowerVASTART(SDValue Op,
                                            SelectionDAG &DAG) const {
   MachineFunction &MF = DAG.getMachineFunction();
