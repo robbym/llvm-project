@@ -129,7 +129,7 @@ namespace {
     bool tryIndexedBinOp(SDNode *Op, SDValue N1, SDValue N2, unsigned Opc8,
                          unsigned Opc16);
 
-    bool SelectAddr(SDValue Addr, SDValue &Base, SDValue &Disp);
+    bool SelectAddr(SDNode *Parent, SDValue Addr, SDValue &Base, SDValue &Disp);
     bool SelectFileAddr(SDValue Addr, SDValue &Base, SDValue &Disp);
     bool SelectFileAddr1(SDValue Addr, SDValue &Base, SDValue &Disp);
   };
@@ -283,12 +283,38 @@ bool DSPICDAGToDAGISel::MatchAddress(SDValue N, DSPICISelAddressMode &AM) {
 /// SelectAddr - returns true if it is able pattern match an addressing mode.
 /// It returns the operands which make up the maximal addressing mode it can
 /// match by reference.
-bool DSPICDAGToDAGISel::SelectAddr(SDValue N,
+bool DSPICDAGToDAGISel::SelectAddr(SDNode *Parent, SDValue N,
                                     SDValue &Base, SDValue &Disp) {
   DSPICISelAddressMode AM;
 
   if (MatchAddress(N, AM))
     return false;
+
+  // ⛔ trellis session 99: A WORD ACCESS MAY NOT CARRY AN ODD DISPLACEMENT. The displacement of
+  // `mov.w [Wn+d],Wd` is encoded in WORDS, so an odd byte offset has no encoding -- the pic30
+  // assembler says so in as many words ("Word operations expect an even offset between -1024 and
+  // 1022") and refuses the file. Found by GCC's torture suite: pr36339 and 20030209-1 build a
+  // deliberately unaligned pointer and we folded the -1 straight into the load.
+  // cc1 materialises such an address instead (`dec.w w0,w1` and then only even displacements),
+  // which is what refusing the fold here produces.
+  // ⚠ A BYTE access keeps its odd displacement: `mov.b [w0+1],w1` is legal, so the test is on the
+  // access WIDTH and not on the offset alone -- which is why the parent node is wanted.
+  // ⚠ The parameter is `SDNode *`, NOT the `SDValue *` TargetSelectionDAG.td's comment on
+  // WantsParent promises: the ISel generator emits an SDNode*. Measured by building it.
+  // ⚠ REFUSING THE FOLD IS NOT THE SAME AS FAILING THE MATCH, and the first version of this got
+  // that wrong: returning false left nothing able to select the load at all ("Cannot select:
+  // load ... t10: i16 = add t2, Constant:i16<-1>"), because MatchAddress had already absorbed the
+  // add and no simpler pattern covers what is left. The address is instead taken WHOLE into a
+  // register with a zero displacement -- which is precisely cc1's `dec.w w0,w1` followed by even
+  // offsets from the new base.
+  if (Parent && (AM.Disp & 1)) {
+    if (const auto *Mem = dyn_cast<MemSDNode>(Parent))
+      if (Mem->getMemoryVT().getStoreSize() > 1) {
+        Base = N;
+        Disp = CurDAG->getSignedTargetConstant(0, SDLoc(N), MVT::i16);
+        return true;
+      }
+  }
 
   if (AM.BaseType == DSPICISelAddressMode::RegBase)
     if (!AM.Base.Reg.getNode())
@@ -367,7 +393,7 @@ bool DSPICDAGToDAGISel::SelectInlineAsmMemoryOperand(
   switch (ConstraintID) {
   default: return true;
   case InlineAsm::ConstraintCode::m: // memory
-    if (!SelectAddr(Op, Op0, Op1))
+    if (!SelectAddr(nullptr, Op, Op0, Op1))   // no parent: the inline-asm operand path
       return true;
     break;
   }

@@ -181,7 +181,11 @@ def cg16imm : Operand<i16>,
 // DSPIC Complex Pattern Definitions.
 //===----------------------------------------------------------------------===//
 
-def addr : ComplexPattern<iPTR, 2, "SelectAddr", [], []>;
+// trellis session 99: WantsParent so SelectAddr can see HOW WIDE the access is. A word
+// access encodes its displacement in WORDS and cannot express an odd byte offset at all;
+// without the parent this one pattern served the byte and word forms alike and folded a -1
+// into `mov.w [w0-1],w1`, which the pic30 assembler refuses (torture pr36339, 20030209-1).
+def addr : ComplexPattern<iPTR, 2, "SelectAddr", [], []> { let WantsParent = true; }
 // L1f-g: a file-register (near data) address -- a symbol with an optional offset and NO
 // register; the bit forms and the file-form bfext take it. Prints as the bare symbol.
 def faddr : ComplexPattern<iPTR, 2, "SelectFileAddr", [], []>;
