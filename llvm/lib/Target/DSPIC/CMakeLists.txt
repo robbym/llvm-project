@@ -32,6 +32,7 @@ add_llvm_target(DSPICCodeGen
   DSPICMCInstLower.cpp
 
   LINK_COMPONENTS
+  Analysis
   AsmPrinter
   CodeGen
   CodeGenTypes

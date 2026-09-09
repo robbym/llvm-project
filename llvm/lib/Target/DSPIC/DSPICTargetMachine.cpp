@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DSPICTargetMachine.h"
+#include "DSPICTargetTransformInfo.h"
 #include "DSPIC.h"
 #include "DSPICMachineFunctionInfo.h"
 #include "TargetInfo/DSPICTargetInfo.h"
@@ -317,6 +318,11 @@ public:
 
 TargetPassConfig *DSPICTargetMachine::createPassConfig(PassManagerBase &PM) {
   return new DSPICPassConfig(*this, PM);
+}
+
+TargetTransformInfo
+DSPICTargetMachine::getTargetTransformInfo(const Function &F) const {
+  return TargetTransformInfo(std::make_unique<DSPICTTIImpl>(this, F));
 }
 
 MachineFunctionInfo *DSPICTargetMachine::createMachineFunctionInfo(

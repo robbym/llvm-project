@@ -40,6 +40,11 @@ public:
   }
   TargetPassConfig *createPassConfig(PassManagerBase &PM) override;
 
+  // trellis session 98: the target answers the vectorizers' cost questions itself, and its
+  // answer is that there is no vector register. Without this override the generic TTI
+  // answered them and the SLP vectorizer built <2 x i16> the backend cannot legalize.
+  TargetTransformInfo getTargetTransformInfo(const Function &F) const override;
+
   TargetLoweringObjectFile *getObjFileLowering() const override {
     return TLOF.get();
   }
