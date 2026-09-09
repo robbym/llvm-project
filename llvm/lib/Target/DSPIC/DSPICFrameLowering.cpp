@@ -140,7 +140,11 @@ static bool isrSavesRCount(const MachineFunction &MF) {
   for (const MachineBasicBlock &MBB : MF)
     for (const MachineInstr &MI : MBB)
       switch (MI.getOpcode()) {
+      // trellis session 99: the divide's repeat is now fused into the divide itself, so the
+      // opcode this scan must recognise is the FUSED one. Leaving only REPEATdiv here would have
+      // made an ISR that divides stop saving RCOUNT -- silently, and only in an ISR.
       case DSPIC::REPEATdiv:
+      case DSPIC::DIVUWrep: case DSPIC::DIVSWrep:
       case DSPIC::MEMCPYrepW: case DSPIC::MEMCPYrepB:
       case DSPIC::MEMSETrepW: case DSPIC::MEMSETrepB:
         return true;

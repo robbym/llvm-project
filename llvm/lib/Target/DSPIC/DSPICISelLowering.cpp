@@ -2246,10 +2246,11 @@ DSPICTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
 
   // L1f-d increment 4: the hardware divide, dividend to w0, the pair out of w0:w1.
   if (Opc == DSPIC::UDIVREM16 || Opc == DSPIC::SDIVREM16) {
-    unsigned DivOpc = Opc == DSPIC::SDIVREM16 ? DSPIC::DIVSW : DSPIC::DIVUW;
+    // ⛔ trellis session 99: ONE instruction, not `REPEATdiv` then the divide. As two, the
+    // MachineOutliner split them -- see the DIVUWrep comment in DSPICInstrInfo.td.
+    unsigned DivOpc = Opc == DSPIC::SDIVREM16 ? DSPIC::DIVSWrep : DSPIC::DIVUWrep;
     BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), DSPIC::R12)
         .addReg(MI.getOperand(2).getReg());
-    BuildMI(*BB, MI, dl, TII.get(DSPIC::REPEATdiv));
     BuildMI(*BB, MI, dl, TII.get(DivOpc)).addReg(MI.getOperand(3).getReg());
     BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), MI.getOperand(0).getReg())
         .addReg(DSPIC::R12);
