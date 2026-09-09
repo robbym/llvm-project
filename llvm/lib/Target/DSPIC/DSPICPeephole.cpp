@@ -42,6 +42,7 @@ STATISTIC(NumSkip, "Number of bit test + branch pairs fused into btsc/btss");
 STATISTIC(NumMovdMem, "Number of word-pair loads/stores fused into mov.d with memory");
 STATISTIC(NumByteFile, "Number of byte global load/store materialize+indirect fused into the direct WREG form");
 STATISTIC(NumTailBra, "Number of rcall+return fused into a tail bra");
+STATISTIC(NumFileALU, "Number of materialize+memory-ALU pairs fused into the direct f,WREG form");
 
 namespace {
 
@@ -71,6 +72,7 @@ class DSPICPeepholeImpl {
   bool fuseMovdMem(MachineBasicBlock &MBB);
   bool fuseByteFile(MachineBasicBlock &MBB);
   bool fuseTailCall(MachineBasicBlock &MBB);
+  bool fuseFileALU(MachineBasicBlock &MBB);
 
 public:
   bool runOnMachineFunction(MachineFunction &MF);
@@ -387,6 +389,86 @@ bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
   return Changed;
 }
 
+// trellis session 99: the WREG-result two-operand file forms, `and.w _g,WREG` and family --
+// class (b') in DSPICInstrInfo.td, and the PREP's rank-1 shape-gap cluster.
+//
+// isel gives a near global fed to an ALU op the materialize-plus-memory-operand pair:
+//     mov #_g,w1 ; and w0,[w1],w0                             3 words
+// and when the value AND the result are both w0 -- an incoming argument, a returned value, a
+// fused chain -- the whole thing is one 1-word instruction:
+//     and.w _g,WREG                                           1 word
+//
+// ⛔ WHY HERE AND NOT IN ISEL: the file form's operand and result are both WREG, a one-register
+// class, and asking the allocator to arrange that before it has allocated anything makes it fail
+// outright on the first function where the value is not already in w0 (see the edit script's
+// header). After allocation "it is in w0" is something to READ. Same trade as fuseByteFile.
+//
+// ⛔ THE SUBTRACTION MAP IS INVERTED AND THAT IS THE WHOLE CONTENT OF TWO OF THE TWELVE ROWS.
+// `sub Wb,Ws,Wd` is Wb - Ws, so `sub w0,[w1],w0` is w0 - g; the file form computing w0 - g is
+// `subr f,WREG`, because `subr f,WREG` is WREG - f. The assembler takes either spelling and
+// cannot tell them apart -- session 84's lesson, and mutant MW1 swaps exactly this.
+static unsigned fileWREGForm(unsigned Op) {
+  switch (Op) {
+  case DSPIC::ADDM16rn:  return DSPIC::ADD16fWr;
+  case DSPIC::ANDM16rn:  return DSPIC::AND16fWr;
+  case DSPIC::IORM16rn:  return DSPIC::IOR16fWr;
+  case DSPIC::XORM16rn:  return DSPIC::XOR16fWr;
+  case DSPIC::SUBM16rn:  return DSPIC::SUBR16fWr; // rb - [p]  =  WREG - f  =  subr f,WREG
+  case DSPIC::SUBRM16rn: return DSPIC::SUB16fWr;  // [p] - rb  =  f - WREG  =  sub  f,WREG
+  case DSPIC::ADDM8rn:   return DSPIC::ADD8fWr;
+  case DSPIC::ANDM8rn:   return DSPIC::AND8fWr;
+  case DSPIC::IORM8rn:   return DSPIC::IOR8fWr;
+  case DSPIC::XORM8rn:   return DSPIC::XOR8fWr;
+  case DSPIC::SUBM8rn:   return DSPIC::SUBR8fWr;
+  case DSPIC::SUBRM8rn:  return DSPIC::SUB8fWr;
+  default:               return 0;
+  }
+}
+
+bool DSPICPeepholeImpl::fuseFileALU(MachineBasicBlock &MBB) {
+  bool Changed = false;
+  auto I = MBB.begin();
+  while (I != MBB.end()) {
+    auto J = std::next(I);
+    if (J == MBB.end())
+      break;
+    // I: MOV16ri wA, <near global>      J: OP wD, wB, [wA]   with wD == wB == w0
+    if (I->getOpcode() != DSPIC::MOV16ri || !I->getOperand(0).isReg() ||
+        !(I->getOperand(1).isGlobal() || I->getOperand(1).isSymbol()) ||
+        !isNearFileGlobal(I->getOperand(1))) {
+      ++I;
+      continue;
+    }
+    unsigned New = fileWREGForm(J->getOpcode());
+    if (!New || J->getNumOperands() < 3 || !J->getOperand(0).isReg() ||
+        !J->getOperand(1).isReg() || !J->getOperand(2).isReg()) {
+      ++I;
+      continue;
+    }
+    Register Addr = I->getOperand(0).getReg();
+    Register Rd = J->getOperand(0).getReg();
+    Register Rb = J->getOperand(1).getReg();
+    // ⚠ the address register must DIE here: anything else still wants the materialized address,
+    // and dropping the `mov` would be a miscompile rather than a saving.
+    if (J->getOperand(2).getReg() != Addr || !J->getOperand(2).isKill() ||
+        wNumber(Rd) != 0 || wNumber(Rb) != 0) {
+      ++I;
+      continue;
+    }
+    BuildMI(MBB, *J, J->getDebugLoc(), TII->get(New), Rd)
+        .addReg(DSPIC::SR)
+        .add(I->getOperand(1))
+        .addReg(Rb, getKillRegState(J->getOperand(1).isKill()));
+    auto K = std::next(J);
+    I->eraseFromParent();
+    J->eraseFromParent();
+    I = K;
+    ++NumFileALU;
+    Changed = true;
+  }
+  return Changed;
+}
+
 // (session 92, the libcalls row) `rcall SYM ; return` ending a block -> `bra SYM`: the routine
 // returns straight to our caller, one word for two -- cc1's shape for every runtime-library call
 // in tail position, which LLVM's tail-call lowering never marks (it marks C-level calls only).
@@ -433,6 +515,7 @@ bool DSPICPeepholeImpl::runOnMachineFunction(MachineFunction &MF) {
   for (MachineBasicBlock &MBB : MF) {
     Changed |= fuseMovdMem(MBB);
     Changed |= fuseByteFile(MBB);
+    Changed |= fuseFileALU(MBB);
     Changed |= fusePairs(MBB);
     Changed |= fuseTailCall(MBB);
     Changed |= fuseRetlw(MBB);

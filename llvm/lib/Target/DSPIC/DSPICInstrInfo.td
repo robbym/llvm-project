@@ -1851,6 +1851,52 @@ let AddedComplexity = 20 in {
   def : Pat<(inc1f8 (i8  (load faddr:$f))), (COPY_TO_REGCLASS (INC8fW  faddr:$f), GR8)>;
 }
 
+// (b') the WREG-result TWO-OPERAND file forms: WREG = f op WREG, and the PLACE IS UNCHANGED.
+// A third form, distinct from both of its neighbours: (b) above is one-operand (`com.w f,WREG`)
+// and (c) below writes the place back (`and.w f`). This one reads the file and W0 and writes
+// only W0 -- `w0 = g & w0`, an argument in w0, a near global, a result in w0.
+//
+// ⛔ THESE CARRY NO ISEL PATTERN ON PURPOSE. A pattern needs a GR16_W0 operand and a GR16_W0
+// result, a one-register class on both sides, decided before allocation -- and the allocator
+// fails outright on the first function where the operand is not already in w0 and another value
+// must survive ("ran out of registers", steps/filew/filew-edit.py's header). DSPICPeephole's
+// fuseFileALU forms them AFTER allocation, where "the value is in w0" is a fact to be read
+// rather than a constraint to be imposed. That is fuseByteFile's argument, at session 90, for
+// the byte move; this is the same trade for the ALU.
+//
+// ⛔ THE ORACLE IS BANKED AND cc1 IS INCONSISTENT WITH ITSELF (steps/filew/ask.cc1.{small,large}.s,
+// byte-identical at both code models). cc1 takes this form for and/ior/xor at word width and for
+// ior/xor/sub at byte width, and spends THREE or FOUR words on the other six:
+//     cc1  `g + x`   mov #_g,w1 ; add.w w0,[w1],w0                          3 words
+//     cc1  `gb & x`  mov #_gb,w1 ; mov.b [w1],w1 ; and.b w0,w1,w0           4 words
+// Ours takes the whole family, so six of the eleven are one word where cc1 spends three or four.
+// A departure from cc1 in our favour, stated as one.
+class FileBinToW16<string asm>
+  : DSPICFrameInst<(outs GR16_W0:$rd), (ins memsrc:$f, GR16_W0:$w), 2,
+                   !strconcat(asm, "\t$f,WREG")> {
+  let mayLoad = 1; let Defs = [SR];
+}
+class FileBinToW8<string asm>
+  : DSPICFrameInst<(outs GR8_W0:$rd), (ins memsrc:$f, GR8_W0:$w), 2,
+                   !strconcat(asm, "\t$f,WREG")> {
+  let mayLoad = 1; let Defs = [SR];
+}
+// ⛔ sub and subr are each other's opposite here, and the fusion INVERTS them: the register form
+// `sub Wb,Ws,Wd` is Wb - Ws, so `sub w0,[w1],w0` computes x - g, and the file form that computes
+// x - g is `subr f,WREG` (WREG - f). Read the comment on each def, not the mnemonic.
+def ADD16fWr  : FileBinToW16<"add.w">;
+def AND16fWr  : FileBinToW16<"and.w">;
+def IOR16fWr  : FileBinToW16<"ior.w">;
+def XOR16fWr  : FileBinToW16<"xor.w">;
+def SUB16fWr  : FileBinToW16<"sub.w">;    // WREG = f - WREG
+def SUBR16fWr : FileBinToW16<"subr.w">;   // WREG = WREG - f
+def ADD8fWr   : FileBinToW8<"add.b">;
+def AND8fWr   : FileBinToW8<"and.b">;
+def IOR8fWr   : FileBinToW8<"ior.b">;
+def XOR8fWr   : FileBinToW8<"xor.b">;
+def SUB8fWr   : FileBinToW8<"sub.b">;     // WREG = f - WREG
+def SUBR8fWr  : FileBinToW8<"subr.b">;    // WREG = WREG - f
+
 // (c) the implied-WREG two-operand forms into the place (f = f op W0). The register operand is
 // forced to W0 and not printed. add/and/ior/xor commute; sub is f - W0, subr is W0 - f.
 class FileBinW16<string asm>
