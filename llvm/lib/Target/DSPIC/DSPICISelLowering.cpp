@@ -199,6 +199,11 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   // so without this the integer legalizer expands an i32 va_arg itself -- into two i16 fetches that
   // each step down, exchanging the words. Custom here routes it to ReplaceNodeResults instead.
   setOperationAction(ISD::VAARG,            MVT::i32,   Custom);
+  // trellis session 99: and i64, for exactly the same reason one width up. `long long` and
+  // `long double` are 8 bytes here (cc1 measured: sizeof 8, alignof 2) and without this row the
+  // integer legalizer expanded them into two 4-byte va_args that each stepped down, so the value
+  // came back with its halves EXCHANGED. That was va-arg-5 and va-arg-6 in GCC's torture suite.
+  setOperationAction(ISD::VAARG,            MVT::i64,   Custom);
   setOperationAction(ISD::VAEND,            MVT::Other, Expand);
   setOperationAction(ISD::VACOPY,           MVT::Other, Expand);
   setOperationAction(ISD::JumpTable,        MVT::i16,   Custom);
@@ -1466,18 +1471,30 @@ void DSPICTargetLowering::ReplaceNodeResults(SDNode *N,
     SDValue ApPtr = N->getOperand(1);
     const Value *SV = cast<SrcValueSDNode>(N->getOperand(2))->getValue();
     EVT VT = N->getValueType(0);
-    if (VT.getSizeInBits() != 32)
+    // ⛔ trellis session 99: this read `!= 32`, and MVT::i64 was not in the action table either,
+    // so an EIGHT-byte va_arg -- `long long`, `long double` -- fell back into precisely the
+    // generic expansion the comment above condemns, one width up, and came back with its two
+    // halves EXCHANGED. Measured before the change: ours loaded w0<-[w14-12] w1<-[-10]
+    // w2<-[-16] w3<-[-14] where cc1 loads w0<-[-16] w1<-[-14] w2<-[-12] w3<-[-10].
+    // The arm is GENERALISED rather than copied: one decrement of the whole promoted size, the
+    // low HALF at the new pointer and the high half half-a-size above it. At 32 bits the halves
+    // are i16 and this is what session 96 wrote; at 64 they are i32, and each of those expands
+    // into its own correctly-ordered pair on the way down.
+    unsigned Bits = VT.getSizeInBits();
+    if (!VT.isInteger() || (Bits != 32 && Bits != 64))
       break;
+    unsigned Bytes = Bits / 8;
+    EVT HalfVT = EVT::getIntegerVT(*DAG.getContext(), Bits / 2);
     EVT PtrVT = ApPtr.getValueType();
     SDValue Cur = DAG.getLoad(PtrVT, dl, Chain, ApPtr, MachinePointerInfo(SV));
     SDValue New = DAG.getNode(ISD::SUB, dl, PtrVT, Cur,
-                              DAG.getConstant(4, dl, PtrVT));
+                              DAG.getConstant(Bytes, dl, PtrVT));
     SDValue St =
         DAG.getStore(Cur.getValue(1), dl, New, ApPtr, MachinePointerInfo(SV));
-    SDValue Lo = DAG.getLoad(MVT::i16, dl, St, New, MachinePointerInfo());
-    SDValue HiAddr =
-        DAG.getNode(ISD::ADD, dl, PtrVT, New, DAG.getConstant(2, dl, PtrVT));
-    SDValue Hi = DAG.getLoad(MVT::i16, dl, Lo.getValue(1), HiAddr,
+    SDValue Lo = DAG.getLoad(HalfVT, dl, St, New, MachinePointerInfo());
+    SDValue HiAddr = DAG.getNode(ISD::ADD, dl, PtrVT, New,
+                                 DAG.getConstant(Bytes / 2, dl, PtrVT));
+    SDValue Hi = DAG.getLoad(HalfVT, dl, Lo.getValue(1), HiAddr,
                              MachinePointerInfo());
     Results.push_back(DAG.getNode(ISD::BUILD_PAIR, dl, VT, Lo, Hi));
     Results.push_back(Hi.getValue(1));
