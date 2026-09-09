@@ -35,6 +35,23 @@
 using namespace clang;
 using namespace clang::CodeGen;
 
+// trellis session 99: cc1's DEFAULT placement rule for an aggregate, MEASURED and not assumed.
+// NEAR iff the object's size is one the machine has a load for AND its alignment lets that load
+// be used: size in {1, 2, 4, 8}, and alignment >= 2 unless the size is 1.
+// The ladder it is fitted to, the two independent signals it was read on, and the single-axis
+// alignment test that picked alignment out of the candidates are in
+// steps/aggnear/AGGNEAR.expected.first. ⚠ It is a FIT to 23 measured objects, not a reading of
+// pic30's source.
+static bool dspicAggregateFitsNear(const ASTContext &Ctx, QualType T) {
+  if (T->isIncompleteType())
+    return false;   // no size to test, and the far form is always legal
+  uint64_t Size = Ctx.getTypeSizeInChars(T).getQuantity();
+  uint64_t Align = Ctx.getTypeAlignInChars(T).getQuantity();
+  if (Size != 1 && Size != 2 && Size != 4 && Size != 8)
+    return false;
+  return Size == 1 || Align >= 2;
+}
+
 namespace {
 
 class DSPICABIInfo : public DefaultABIInfo {
@@ -139,8 +156,21 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       else {
         QualType T = VD->getType();
         bool Aggregate = T->isArrayType() || T->isRecordType() || T->isVectorType();
-        bool Near = Aggregate ? M.getTarget().hasFeature("small-aggregate")
-                              : !M.getTarget().hasFeature("large-scalar");
+        // trellis session 99, the operator's "match vendor". The three configurations were
+        // each measured through cc1 (steps/aggnear/ask.cc1.*.s) and they are three different
+        // rules, not one rule with a knob:
+        //   -msmall-data   every object near, aggregate or not, at every size
+        //   default        scalars near; an aggregate near IFF dspicAggregateFitsNear
+        //   -mlarge-data   every object far
+        bool Near;
+        if (!Aggregate)
+          Near = !M.getTarget().hasFeature("large-scalar");
+        else if (M.getTarget().hasFeature("small-aggregate"))
+          Near = true;
+        else if (M.getTarget().hasFeature("large-scalar"))
+          Near = false;
+        else
+          Near = dspicAggregateFitsNear(M.getContext(), T);
         GVar->addAttribute(Near ? "near" : "far");
       }
       if (VD->getType().isConstQualified() &&
