@@ -179,6 +179,15 @@ void DSPICMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
       break;
     case MachineOperand::MO_BlockAddress:
       MCOp = LowerSymbolOperand(MO, GetBlockAddressSymbol(MO));
+      // ⛔ trellis session 99: a label's address is a CODE address and takes a handle, exactly as
+      // a function's does above -- measured from cc1, which emits `mov #handle(.L9),w1` at both
+      // code models. Bare, the pic30 assembler refuses it: "Cannot reference executable symbol
+      // (.Ltmp0) in a data context". A block address only ever reaches an instruction as a datum
+      // (an indirect branch goes through a register), but the call/branch guard is kept for the
+      // same reason the function case has one.
+      if (!MI->getDesc().isCall() && !MI->getDesc().isBranch())
+        MCOp = MCOperand::createExpr(
+            MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_HANDLE, Ctx));
       break;
     case MachineOperand::MO_RegisterMask:
       continue;

@@ -93,6 +93,13 @@ static cl::opt<std::string> DSPICConfigDB(
     /// global initializer never passes through there, so it is wrapped here.
     const MCExpr *lowerConstant(const Constant *CV, const Constant *BaseCV,
                                 uint64_t Offset) override;
+    /// trellis session 99: `lowerConstant` RECURSES into a ConstantExpr, so a handle must be
+    /// applied only to the OUTERMOST constant. Measured from cc1: a bare label address is
+    /// `handle(.L2)` and a DIFFERENCE of two label addresses is `.L3-(.L2)`, BARE -- a difference
+    /// of two veneer addresses is not a code offset and means nothing. Without this guard the
+    /// first version of the fix emitted `handle(.Ltmp1)-handle(.Ltmp0)`, which the assembler
+    /// refused with "junk at end of line".
+    bool InLowerConstant = false;
 
     /// L1b: print the frame's accounting as a comment, so a report's frame size is a
     /// line the compiler printed (trellis standing rule 12).
@@ -413,14 +420,29 @@ void DSPICAsmPrinter::emitFunctionBodyStart() {
 }
 
 //===----------------------------------------------------------------------===//
-// Session 96: `.word handle(_f)` for a function's address in data, cc1's own spelling. Only a
-// FUNCTION takes a handle: a data symbol is an ordinary 16-bit address, and a block label
-// (a jump-table entry) is not a symbol the linker builds a veneer for.
+// Session 96: `.word handle(_f)` for a function's address in data, cc1's own spelling. A data
+// symbol is an ordinary 16-bit address and takes no handle.
+// ⛔ trellis session 99: A BLOCK ADDRESS TAKES ONE TOO, and this comment used to deny it --
+// "a block label (a jump-table entry) is not a symbol the linker builds a veneer for" -- which
+// conflates two different things. A JUMP-TABLE entry is indeed not data any more: session 96
+// replaced the `.short .LBB` table with inline relative branches, and that was right. A BLOCK
+// ADDRESS (`&&label`, GCC's computed goto) IS stored as data, and cc1 emits `.word handle(.L11)`
+// for it -- measured, both code models. Left bare it produced the assembler's "Cannot reference
+// executable symbol (.Ltmp0) in a data context" on two of the torture suite's four refusals.
 const MCExpr *DSPICAsmPrinter::lowerConstant(const Constant *CV,
                                              const Constant *BaseCV,
                                              uint64_t Offset) {
+  // ⛔ ONLY THE OUTERMOST CONSTANT. This function recurses through AsmPrinter::lowerConstant
+  // into a ConstantExpr's operands, so without this guard a `&&b - &&a` table came out as
+  // `handle(.Ltmp1)-handle(.Ltmp0)` -- two veneer addresses subtracted, which is not a code
+  // offset and which the assembler refused outright ("junk at end of line"). cc1 emits
+  // `.word .L3-(.L2)` there, BARE: a bare label address takes a handle, a DIFFERENCE does not.
+  bool Top = !InLowerConstant;
+  InLowerConstant = true;
   const MCExpr *E = AsmPrinter::lowerConstant(CV, BaseCV, Offset);
-  if (isa<Function>(CV->stripPointerCasts()))
+  InLowerConstant = !Top;
+  const Constant *S = CV->stripPointerCasts();
+  if (Top && (isa<Function>(S) || isa<BlockAddress>(S)))
     E = MCSpecifierExpr::create(E, DSPIC::S_HANDLE, OutContext);
   return E;
 }
