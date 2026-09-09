@@ -714,6 +714,11 @@ SDValue DSPICTargetLowering::LowerCCCArguments(
   unsigned N = CCInfo.getStackSize();
   FuncInfo->setIncomingArgBytes(N);
 
+  // trellis session 99: the LOWEST-ADDRESSED incoming stack slot, which is where va_start points.
+  // See the varargs note in the loop below for why it is that one and not the last created.
+  int64_t VarArgLowestOff = 0;
+  bool HaveVarArgSlot = false;
+
   for (unsigned i = 0, e = ArgLocs.size(); i != e; ++i) {
     CCValAssign &VA = ArgLocs[i];
     if (VA.isRegLoc()) {
@@ -726,14 +731,28 @@ SDValue DSPICTargetLowering::LowerCCCArguments(
     } else {
       assert(VA.isMemLoc());
       unsigned ObjSize = VA.getLocVT().getStoreSize();
-      int FI = MFI.CreateFixedObject(
-          ObjSize, (int64_t)VA.getLocMemOffset() - (int64_t)N - 4,
-          /*IsImmutable=*/true);
+      int64_t Off = (int64_t)VA.getLocMemOffset() - (int64_t)N - 4;
+      int FI = MFI.CreateFixedObject(ObjSize, Off, /*IsImmutable=*/true);
       // Session 96: the variadic convention -- va_start(ap, last) is &last, the address of the
       // LAST NAMED parameter, which clause 1 has just forced onto the stack. Its frame index is
-      // what LowerVASTART stores. The last memory location in argument order is that parameter.
-      if (isVarArg)
+      // what LowerVASTART stores.
+      // ⛔ trellis session 99: "the last memory location in argument order is that parameter" --
+      // as this comment used to end -- IS FALSE FOR AN ARGUMENT WIDER THAN A WORD. A `long` is
+      // split into two i16 locations and the loop kept whichever came last, which was its HIGH
+      // word: va_start pointed one word high, LowerVAARG decrements then loads, and every va_arg
+      // came back with the previous argument's top half. va-arg-1 passes 10L and reads 0. That
+      // was ELEVEN of the 61 tests GCC's torture suite reports wrong, and one bug.
+      // ⚠ It hid because the last named parameter must be WIDER THAN A WORD to have a second
+      // piece: `v_word(int n, ...)` and `v_long(int n, ...)` matched cc1 instruction for
+      // instruction all along, which is why no fixture here caught it.
+      // ⚠ Grouping the pieces by argument does NOT work -- they carry different ValNos. What the
+      // layout states is that later arguments sit at LOWER addresses, so the last named
+      // argument's address is the LOWEST incoming slot; taking the minimum is order-independent.
+      if (isVarArg && (!HaveVarArgSlot || Off < VarArgLowestOff)) {
         FuncInfo->setVarArgsFrameIndex(FI);
+        VarArgLowestOff = Off;
+        HaveVarArgSlot = true;
+      }
       SDValue FIN = DAG.getFrameIndex(FI, MVT::i16);
       InVals.push_back(DAG.getLoad(VA.getLocVT(), dl, Chain, FIN,
                                    MachinePointerInfo::getFixedStack(MF, FI)));
