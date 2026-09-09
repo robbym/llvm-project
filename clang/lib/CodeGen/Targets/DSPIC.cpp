@@ -114,6 +114,17 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
   // the record.
   if (const auto *VD = dyn_cast<VarDecl>(D)) {
     if (auto *GVar = dyn_cast<llvm::GlobalVariable>(GV)) {
+      // trellis session 98: an `sfr` object sits at a silicon-fixed address in SFR space,
+      // which IS near space -- pic30.c:4923, "it is also marked NEAR", and pic30.c builds
+      // its own SFR refs with PIC30_NEAR_FLAG. The data model has no say over it, so this
+      // arm comes BEFORE the model's chain and that chain becomes its `else`.
+      // ⛔ PLACED HERE, OUTSIDE steps/models/model-edit.py's inserted text, and not inside
+      // it: an edit that splits another script's `new` string makes that script's --revert
+      // a silent no-op. steps/roundtrip.py exists to catch that and DID catch it when this
+      // arm was first written into the middle of the chain.
+      if (VD->hasAttr<DSPICSfrAttr>())
+        GVar->addAttribute("near");
+      else
       // trellis session 96 (follow-up 15): EXPLICIT beats IMPLICIT, and every global now gets
       // one or the other, so the placement decision is made in exactly one place. A user's
       // attribute is explicit; otherwise the data model supplies it, by the vendor's own rule

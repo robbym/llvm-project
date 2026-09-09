@@ -2294,6 +2294,20 @@ def DSPICSpace : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Subjects = SubjectList<[Var]>;
   let Documentation = [Undocumented];
 }
+// trellis session 98: the dsPIC `sfr` attribute. The device header declares 2,900 special
+// function registers with it, and in the vendor compiler it ALSO MARKS THE OBJECT NEAR --
+// pic30.c:4923 says so in those words, and pic30.c builds its own SFR refs with
+// PIC30_NEAR_FLAG. Carried to the backend as the "near" global attribute by
+// CodeGen/Targets/DSPIC.cpp, which is the whole of its effect here: the -msfr-warn
+// diagnostics and cc1's validity check are NOT implemented, deliberately.
+// ⚠ It takes an optional argument in cc1 (min 0, max 1); ours accepts the bare form only,
+// which is the only form the device headers use (checked: 2,900 of 2,900).
+def DSPICSfr : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"sfr">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
 def DSPICPersistent : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"persistent">];
   let Subjects = SubjectList<[Var]>;
