@@ -311,6 +311,29 @@ DSPICTargetLowering::getRegForInlineAsmConstraint(
     }
   }
 
+  // trellis session 97: {w0}..{w15} by NAME. The generic fallback matches a constraint against the
+  // TableGen RECORD name, and this target kept MSP430's records (R12..R4, SP) so that its
+  // inherited C++ would compile unchanged -- so `{w5}`, `{w6}` and `{w7}`, the three records
+  // session 84 added under their own names, resolved, and the other thirteen SILENTLY DID NOT.
+  // clang's GCCRegNames lists all sixteen, so the front end accepted every clobber and nothing
+  // diagnosed the gap: a declared clobber was simply dropped and the allocator kept using the
+  // register. Measured before the fix: 11 of 14 tested clobbers reached the machine level with
+  // zero implicit-defs (steps/asmclob).
+  // ⚠ The mapping is read off DSPICRegisterInfo.td's AsmName column, not off README's table.
+  if (Constraint.size() > 2 && Constraint.front() == '{' && Constraint.back() == '}') {
+    static const struct { const char *Name; unsigned Reg; } WRegs[] = {
+        {"w0", DSPIC::R12}, {"w1", DSPIC::R13}, {"w2", DSPIC::R14},
+        {"w3", DSPIC::R15}, {"w4", DSPIC::R11}, {"w5", DSPIC::W5},
+        {"w6", DSPIC::W6},  {"w7", DSPIC::W7},  {"w8", DSPIC::R10},
+        {"w9", DSPIC::R9},  {"w10", DSPIC::R8}, {"w11", DSPIC::R7},
+        {"w12", DSPIC::R6}, {"w13", DSPIC::R5}, {"w14", DSPIC::R4},
+        {"w15", DSPIC::SP}};
+    StringRef Name = Constraint.substr(1, Constraint.size() - 2);
+    for (const auto &W : WRegs)
+      if (Name == W.Name)
+        return std::make_pair(W.Reg, &DSPIC::GR16RegClass);
+  }
+
   return TargetLowering::getRegForInlineAsmConstraint(TRI, Constraint, VT);
 }
 
