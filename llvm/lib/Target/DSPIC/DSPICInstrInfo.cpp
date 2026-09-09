@@ -622,7 +622,17 @@ MachineBasicBlock::iterator
 DSPICInstrInfo::insertOutlinedCall(Module &M, MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator &It, MachineFunction &MF,
                                    outliner::Candidate &C) const {
-  It = MBB.insert(It, BuildMI(MF, DebugLoc(), get(DSPIC::RCALLi))
+  // trellis session 97: the outliner obeys the CODE MODEL, as LowerCCCCallTo does. RCALLi is
+  // the one-word PC-relative call (reach +/-32,767 words, measured -- steps/brreach); under
+  // -mlarge-code an outlined function may sit beyond it, and the link then fails with "PC Relative
+  // branch out of range. Suggest large-code model". This built RCALLi unconditionally, so in
+  // stn3255 -- which builds with the vendor's own -mlarge-code -- every one of 730 outlined calls
+  // disobeyed the model while all 1797 ordinary calls obeyed it.
+  // ⚠ Small code must keep `rcall`: making every outlined call two words would tax every build
+  // that does not need it. Hence the model, not a constant (see mutant MO1).
+  bool Large = MF.getSubtarget<DSPICSubtarget>().isLargeCode();
+  It = MBB.insert(It, BuildMI(MF, DebugLoc(),
+                              get(Large ? DSPIC::CALLi : DSPIC::RCALLi))
                           .addGlobalAddress(M.getNamedValue(MF.getName()), 0, 0));
   return It;
 }
