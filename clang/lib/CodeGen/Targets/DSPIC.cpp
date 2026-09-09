@@ -83,7 +83,14 @@ public:
       llvm::Type *I16 = llvm::Type::getInt16Ty(getVMContext());
       llvm::SmallVector<llvm::Type *, 8> Elems(Words, I16);
       llvm::Type *Coerce = llvm::StructType::get(getVMContext(), Elems);
-      return ABIArgInfo::getDirect(Coerce);
+      // ⛔ trellis session 99: CanBeFlattened=false. The default TRUE turns this struct into N
+      // separate one-word IR arguments, and the backend then cannot tell that they are one
+      // argument: it reverses them with everything else when it lays out the stack (so the words
+      // arrive backwards) and it never applies the register alignment cc1 applies to a P-word
+      // argument. Measured against cc1: `g8(1..8, struct{1,2,3,4})` put 03 04 below 01 02, and
+      // `b2(int, struct w2)` used w1,w2 where cc1 uses w2,w3.
+      return ABIArgInfo::getDirect(Coerce, /*Offset=*/0, /*Padding=*/nullptr,
+                                   /*CanBeFlattened=*/false);
     }
 
     if (const auto *ED = Ty->getAsEnumDecl())
@@ -100,6 +107,38 @@ public:
 
   RValue EmitVAArg(CodeGenFunction &CGF, Address VAListAddr, QualType Ty,
                    AggValueSlot Slot) const override {
+    // ⛔ trellis session 99: an AGGREGATE cannot go through the generic emitter at all.
+    // EmitVAArgInstr asserts `isDirect() && !getCoerceToType()`, and classifyArgumentType above
+    // returns getDirect(<N x i16>) for every by-value struct (session 86) -- so every struct
+    // va_arg ABORTED the front end. Sixteen of GCC's torture suite's compile failures were this.
+    //
+    // MEASURED FROM cc1 (steps/varargs/agg.c): the list steps DOWN by the size rounded up to a
+    // word and the object sits AT the new pointer -- the SAME rule the scalars obey, with the
+    // aggregate travelling in the list BY VALUE. An odd-sized struct is padded at the HIGH end,
+    // so its first byte is at the LOW address of its slot, which falls out of taking the new
+    // pointer as the object's address.
+    //
+    // ⚠ The scalar path below is deliberately untouched: it is correct, its output is pinned by
+    // steps/varargs/types-compare.sh, and routing it through this arithmetic instead would make
+    // the backend's own LowerVAARG dead and rewrite every fixture in this port.
+    if (isAggregateTypeForABI(Ty)) {
+      CharUnits SlotSize = CharUnits::fromQuantity(2);
+      TypeInfoChars TI = getContext().getTypeInfoInChars(Ty);
+      CharUnits Step = TI.Width.alignTo(SlotSize);
+
+      Address Ap = VAListAddr;
+      if (Ap.getElementType() != CGF.Int8PtrTy)
+        Ap = Ap.withElementType(CGF.Int8PtrTy);
+      llvm::Value *Cur = CGF.Builder.CreateLoad(Ap, "ap.cur");
+      Address CurAddr(Cur, CGF.Int8Ty, SlotSize);
+      Address NextAddr = CGF.Builder.CreateConstInBoundsByteGEP(
+          CurAddr, CharUnits::fromQuantity(-Step.getQuantity()), "ap.next");
+      llvm::Value *Next = NextAddr.emitRawPointer(CGF);
+      CGF.Builder.CreateStore(Next, Ap);
+
+      Address Obj(Next, CGF.ConvertTypeForMem(Ty), TI.Align);
+      return CGF.EmitLoadOfAnyValue(CGF.MakeAddrLValue(Obj, Ty), Slot);
+    }
     return CGF.EmitLoadOfAnyValue(
         CGF.MakeAddrLValue(
             EmitVAArgInstr(CGF, VAListAddr, Ty, classifyArgumentType(Ty)), Ty),

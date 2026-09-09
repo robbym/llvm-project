@@ -441,7 +441,13 @@ static const MCPhysReg ArgRegs8[8] = {DSPIC::R12B, DSPIC::R13B, DSPIC::R14B,
 
 // The lowest free run of Parts registers aligned to Parts, or -1.
 static int lowestFreeRun(unsigned Used, unsigned Parts) {
-  for (unsigned I = 0; I + Parts <= 8; I += Parts) {
+  // ⛔ trellis session 99: the step is the ALIGNMENT, and it is P only when P is a power of two.
+  // Session 85 measured this rule at P in {1,2,4} -- every one a power of two -- and wrote it down
+  // as "aligned to P", which is right there and wrong everywhere else. Measured from cc1 at P=1..6
+  // (steps/varargs/aggreg.c): after one int, a 2-word argument takes w2,w3 and a 4-word argument
+  // takes w4..w7 (aligned), while a 3-word takes w1,w2,w3 and a 5-word takes w1..w5 (not).
+  unsigned Step = llvm::isPowerOf2_32(Parts) ? Parts : 1;
+  for (unsigned I = 0; I + Parts <= 8; I += Step) {
     unsigned Mask = ((1u << Parts) - 1) << I;
     if ((Used & Mask) == 0)
       return I;
@@ -487,9 +493,14 @@ static void AnalyzeArguments(CCState &State,
       report_fatal_error("dspic: a byval argument has no lowering (L1c; cc1 "
                          "passes a struct by value word by word in registers)",
                          /*gen_crash_diag=*/false);
-    if (Parts != 1 && Parts != 2 && Parts != 4)
-      report_fatal_error("dspic: an argument of " + Twine(Parts) +
-                         " words has no measured convention",
+    // ⛔ trellis session 99: P is no longer restricted to {1,2,4}. It was, because clang
+    // flattened every by-value struct into one-word arguments and nothing wider than a `long`
+    // ever reached here as one group -- so the restriction described the FLATTENING, not the
+    // convention. cc1's own answer is measured at P=1..6 in steps/varargs/aggreg.c; a struct too
+    // wide for the eight argument registers takes the stack, which lowestFreeRun already says by
+    // returning -1.
+    if (Parts == 0)
+      report_fatal_error("dspic: an argument of no words",
                          /*gen_crash_diag=*/false);
     // the last named argument and everything after it are stack arguments, whatever is free
     int Run = Plans.size() >= FirstStackGroup ? -1 : lowestFreeRun(Used, Parts);
