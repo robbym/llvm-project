@@ -59,6 +59,12 @@ public:
   eliminateCallFramePseudoInstr(MachineFunction &MF, MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator I) const override;
 
+  // trellis session 98: a PSV-managing handler that saves nothing still needs one saved GPR to
+  // use as the setup scratch. Without this, PEI never calls spillCalleeSavedRegisters for it
+  // and the handler silently gets no page management at all -- measured on `isr_bare`.
+  void determineCalleeSaves(MachineFunction &MF, BitVector &SavedRegs,
+                            RegScavenger *RS) const override;
+
   bool spillCalleeSavedRegisters(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator MI,
                                  ArrayRef<CalleeSavedInfo> CSI,

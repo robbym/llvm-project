@@ -184,6 +184,10 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
     // fix, reintroduced one level down. `used` keeps the out-of-line body.
     M.addUsedGlobal(F);
   }
+  // trellis session 98: only the SUPPRESSION travels. The save is the default for a handler
+  // that says nothing, so `auto_psv` needs no string -- it asks for what it would get anyway.
+  if (FD->hasAttr<DSPICNoAutoPsvAttr>())
+    F->addFnAttr("dspic-no-auto-psv");
   const auto *IA = FD->getAttr<DSPICInterruptAttr>();
   if (!IA)
     return;

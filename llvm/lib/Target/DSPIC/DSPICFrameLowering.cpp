@@ -163,6 +163,15 @@ static bool isCalleeSavedPop(const MachineInstr &MI) {
 
 // Prologue: the callee-saved pushes are already at the block's head (PEI inserted them
 // through spillCalleeSavedRegisters); `lnk #locals` follows them.
+// trellis session 98: does this handler manage the PSV page registers?
+// cc1's rule, measured: every interrupt handler that does not carry `no_auto_psv`. A non-ISR never
+// does. ⚠ `auto_psv` needs no test -- it asks for the default, so its absence and its presence are
+// the same answer; only the suppression is carried as a string.
+static bool isrManagesPSV(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  return F.hasFnAttribute("interrupt") && !F.hasFnAttribute("dspic-no-auto-psv");
+}
+
 void DSPICFrameLowering::emitPrologue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
   assert(&MF.front() == &MBB && "Shrink-wrapping not yet supported");
@@ -308,12 +317,28 @@ planCalleeSaves(ArrayRef<CalleeSavedInfo> CSI,
   });
 }
 
+// trellis session 98: guarantee a scratch for the PSV setup.
+// ⛔ PEI CALLS spillCalleeSavedRegisters ONLY WHEN THERE IS SOMETHING TO SAVE. A handler that
+// clobbers no callee-saved register has an empty CSI, the hook is never reached, and the page
+// management silently does not happen -- measured on a handler with an empty body, which emitted a
+// bare `retfie`. cc1 has the same problem and solves it the same way: its `isr_plain` PUSHES w8
+// purely to have a scratch. Reserving one here puts us on the path PEI already drives.
+void DSPICFrameLowering::determineCalleeSaves(MachineFunction &MF, BitVector &SavedRegs,
+                                              RegScavenger *RS) const {
+  TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
+  if (isrManagesPSV(MF) && SavedRegs.none())
+    SavedRegs.set(DSPIC::R12);
+}
+
 bool DSPICFrameLowering::spillCalleeSavedRegisters(
     MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
     ArrayRef<CalleeSavedInfo> CSI, const TargetRegisterInfo *TRI) const {
   MachineFunction &MF = *MBB.getParent();
   bool SaveRC = isrSavesRCount(MF);
-  if (CSI.empty() && !SaveRC)
+  // trellis session 98: a handler that manages PSV must reach this code even when it saves no
+  // GPR and no RCOUNT -- cc1's `isr_plain` is exactly that shape.
+  bool ManagePSV = isrManagesPSV(MF);
+  if (CSI.empty() && !SaveRC && !ManagePSV)
     return false;
 
   DebugLoc DL;
@@ -344,6 +369,29 @@ bool DSPICFrameLowering::spillCalleeSavedRegisters(
           .setMIFlag(MachineInstr::FrameSetup);
     }
   }
+  if (ManagePSV) {
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::PUSHDSRPAG)).setMIFlag(MachineInstr::FrameSetup);
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::PUSHDSWPAG)).setMIFlag(MachineInstr::FrameSetup);
+    // ⚠ THE SCRATCH REGISTER, and clobbering one the interrupted code owns is SILENT corruption.
+    // Where the handler already saves a GPR, the first one is on the stack by now and is free.
+    // Where it saves none we push one and pop it back before the body -- exactly what cc1 does in
+    // `isr_plain` (`push w8 ... mov.w [--w15],w8`). There is no third option: "w0 is probably
+    // free" is not a reason, and mutant MP4 is built on that sentence.
+    Register Scratch = CSI.empty() ? Register(DSPIC::R12) : Register(CSI[0].getReg());
+    bool Borrowed = CSI.empty();
+    if (Borrowed) {
+      MBB.addLiveIn(Scratch);
+      BuildMI(MBB, MI, DL, TII.get(DSPIC::PUSH16r))
+          .addReg(Scratch, RegState::Kill)
+          .setMIFlag(MachineInstr::FrameSetup);
+    }
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::SETPSVPAGE))
+        .addReg(Scratch, RegState::Define | RegState::Dead)
+        .setMIFlag(MachineInstr::FrameSetup);
+    if (Borrowed)
+      BuildMI(MBB, MI, DL, TII.get(DSPIC::POP16r), Scratch)
+          .setMIFlag(MachineInstr::FrameSetup);
+  }
   return true;
 }
 
@@ -352,7 +400,7 @@ bool DSPICFrameLowering::restoreCalleeSavedRegisters(
     MutableArrayRef<CalleeSavedInfo> CSI, const TargetRegisterInfo *TRI) const {
   MachineFunction &MF = *MBB.getParent();
   bool SaveRC = isrSavesRCount(MF);
-  if (CSI.empty() && !SaveRC)
+  if (CSI.empty() && !SaveRC && !isrManagesPSV(MF))
     return false;
 
   DebugLoc DL;
@@ -360,6 +408,13 @@ bool DSPICFrameLowering::restoreCalleeSavedRegisters(
     DL = MI->getDebugLoc();
 
   const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+
+  // trellis session 98: the page registers come back FIRST -- before the GPR pops -- which is
+  // cc1's order and the reverse of the push side.
+  if (isrManagesPSV(MF)) {
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::POPDSWPAG)).setMIFlag(MachineInstr::FrameDestroy);
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::POPDSRPAG)).setMIFlag(MachineInstr::FrameDestroy);
+  }
 
   SmallVector<std::pair<MCPhysReg, MCPhysReg>, 4> Plan;
   planCalleeSaves(CSI, Plan);

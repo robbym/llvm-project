@@ -1080,6 +1080,27 @@ def REPEATdiv : DSPICFrameInst<(outs), (ins), 2, "repeat\t#__TARGET_DIVIDE_CYCLE
 // L1d RCOUNT (trellis session 88): save/restore the hardware repeat counter in an ISR that
 // could be interrupted mid-repeat. _RCOUNT is the device SFR (an external symbol); the forms
 // are `push f`/`pop f` with a fixed operand, so no operand is modelled.
+// trellis session 98: the managed-PSV ISR model. `push f`/`pop f` on the two page registers, and
+// the setup block that points DSRPAG at the const page. See steps/isrpsv/psv-edit.py.
+let Defs = [SP], Uses = [SP], mayStore = 1, isCodeGenOnly = 1 in {
+  def PUSHDSRPAG : DSPICFrameInst<(outs), (ins), 2, "push\t_DSRPAG">;
+  def PUSHDSWPAG : DSPICFrameInst<(outs), (ins), 2, "push\t_DSWPAG">;
+}
+let Defs = [SP], Uses = [SP], mayLoad = 1, isCodeGenOnly = 1 in {
+  def POPDSRPAG  : DSPICFrameInst<(outs), (ins), 2, "pop\t_DSRPAG">;
+  def POPDSWPAG  : DSPICFrameInst<(outs), (ins), 2, "pop\t_DSWPAG">;
+}
+// ⛔ FIVE WORDS: mov.w #1,$s (1) + mov $s,_DSWPAG (1) + mov #__const_psvpage,$s (TWO -- a 16-bit
+// symbol immediate) + movpag $s,DSRPAG (1). The DSWPAG constant is 1, read off cc1 and identical
+// in all three of its handlers.
+let isCodeGenOnly = 1 in
+// ⚠ $s is an OUTPUT, not an input: the pseudo WRITES the scratch and the value is dead after
+// the movpag. Declared as `(ins ...)` first, the machine verifier refused it -- "Explicit
+// operand marked as def" -- which is the verifier doing exactly its job on a model that did
+// not match the machine.
+def SETPSVPAGE : DSPICFrameInst<(outs GR16:$s), (ins), 10,
+  "mov.w\t#1,$s\n\tmov\t$s,_DSWPAG\n\tmov\t#__const_psvpage,$s\n\tmovpag\t$s,DSRPAG">;
+
 let Defs = [SP], Uses = [SP], mayStore = 1, isCodeGenOnly = 1 in
 def PUSHRCOUNT : DSPICFrameInst<(outs), (ins), 2, "push\t_RCOUNT">;
 let Defs = [SP], Uses = [SP], mayLoad = 1, isCodeGenOnly = 1 in

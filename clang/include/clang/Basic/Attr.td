@@ -2328,6 +2328,24 @@ def DSPICUserInit : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Documentation = [Undocumented];
   let SimpleHandler = 1;
 }
+// trellis session 98: the dsPIC PSV attributes. `auto_psv` asks for the page-register
+// save/set/restore in an interrupt handler (which is also the default when neither is written);
+// `no_auto_psv` suppresses it. Carried to the backend as "dspic-no-auto-psv"; the DEFAULT needs no
+// attribute string, so only the suppression travels.
+// ⚠ On a non-ISR both are accepted and inert, as in cc1 -- the model is an ISR property.
+def DSPICAutoPsv : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"auto_psv">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def DSPICNoAutoPsv : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"no_auto_psv">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def : MutualExclusions<[DSPICAutoPsv, DSPICNoAutoPsv]>;
 def DSPICPersistent : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"persistent">];
   let Subjects = SubjectList<[Var]>;
