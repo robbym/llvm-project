@@ -4124,6 +4124,12 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
                    ? EmitScalarOrConstFoldImmArg(ICEArguments, 2, E)
                    : llvm::ConstantInt::get(Int32Ty, 3);
     Value *Data = llvm::ConstantInt::get(Int32Ty, 1);
+    // trellis session 99: this is the FIXME four lines above, and on a 16-bit-`int` target it is
+    // not cosmetic -- llvm.prefetch declares i32, EmitScalarOrConstFoldImmArg emits the C `int`,
+    // and `__builtin_prefetch(p, 0, 0)` aborted CallInst::init while `__builtin_prefetch(p)`,
+    // whose defaults are built with Int32Ty just above, compiled fine.
+    RW = Builder.CreateZExtOrTrunc(RW, Int32Ty);
+    Locality = Builder.CreateZExtOrTrunc(Locality, Int32Ty);
     Function *F = CGM.getIntrinsic(Intrinsic::prefetch, Address->getType());
     Builder.CreateCall(F, {Address, RW, Locality, Data});
     return RValue::get(nullptr);
@@ -5135,6 +5141,10 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
   case Builtin::BI__builtin_return_address: {
     Value *Depth = ConstantEmitter(*this).emitAbstract(E->getArg(0),
                                                    getContext().UnsignedIntTy);
+    // trellis session 99: llvm.returnaddress declares i32, and `unsigned int` is SIXTEEN BITS on
+    // a 16-bit target -- so this aborted CallInst::init on dspic, msp430 and avr alike (measured,
+    // 3 builtins x 3 targets, 9 of 9). The argument is an ICE, so the cast folds to a constant.
+    Depth = Builder.CreateZExtOrTrunc(Depth, Int32Ty);
     Function *F =
         CGM.getIntrinsic(Intrinsic::returnaddress, {CGM.ProgramPtrTy});
     return RValue::get(Builder.CreateCall(F, Depth));
@@ -5147,6 +5157,9 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
   case Builtin::BI__builtin_frame_address: {
     Value *Depth = ConstantEmitter(*this).emitAbstract(E->getArg(0),
                                                    getContext().UnsignedIntTy);
+    // trellis session 99: same as __builtin_return_address above -- llvm.frameaddress declares
+    // i32 and this emitted the C `unsigned int`, which is 16 bits here.
+    Depth = Builder.CreateZExtOrTrunc(Depth, Int32Ty);
     Function *F = CGM.getIntrinsic(Intrinsic::frameaddress, AllocaInt8PtrTy);
     return RValue::get(Builder.CreateCall(F, Depth));
   }
