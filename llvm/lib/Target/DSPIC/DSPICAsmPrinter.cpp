@@ -37,6 +37,7 @@
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"  // trellis session 99: the NOBITS arm below
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/Compiler.h"
@@ -208,6 +209,37 @@ void DSPICAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
         if (CDA->isCString())
           ConfigPragmas.push_back(CDA->getAsCString().str());
     return;
+  }
+  // trellis session 99: a zero initialiser in a NOBITS section is RESERVED, not written. The
+  // pic30 assembler answers `.short 0` under `.section .nbss,...,@nobits` with "Initial values
+  // are not supported in bss section '.nbss'" -- 36 times in one bl_fw build -- and cc1 writes
+  // `.space`. LLVM already does the right thing for an aggregate zero (emitGlobalConstant sends
+  // a ConstantAggregateZero to emitZeros), so only SCALARS take the typed path and only they are
+  // wrong here. ⚠ The assembler still advances the location counter, so this is cosmetic TODAY,
+  // measured symbol by symbol -- but it is a directive the assembler says it does not support,
+  // and a non-zero value on that path would be dropped in silence.
+  if (GV->hasInitializer() && GV->getInitializer()->isNullValue() &&
+      !GV->hasCommonLinkage() && !GV->isThreadLocal()) {
+    MCSection *S = getObjFileLowering().SectionForGlobal(GV, TM);
+    if (S && S->isBssSection()) {
+      // ⚠ The ORDER and the metadata are AsmPrinter's own, deliberately: the first version of
+      // this arm emitted `.globl` before switching section and dropped `.type ,@object`
+      // altogether, so the only intended difference from the standard path -- `.space` in place
+      // of a typed zero -- came with two unintended ones.
+      MCSymbol *Sym = getSymbol(GV);
+      const DataLayout &DL = GV->getDataLayout();
+      uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
+      Align Alignment = getGVAlignment(GV, DL);
+      emitVisibility(Sym, GV->getVisibility(), !GV->isDeclaration());
+      OutStreamer->switchSection(S);
+      OutStreamer->emitSymbolAttribute(Sym, MCSA_ELF_TypeObject);
+      emitLinkage(GV, Sym);
+      emitAlignment(Alignment, GV);
+      OutStreamer->emitLabel(Sym);
+      OutStreamer->emitZeros(Size ? Size : 1);
+      OutStreamer->emitELFSize(Sym, MCConstantExpr::create(Size, OutContext));
+      return;
+    }
   }
   AsmPrinter::emitGlobalVariable(GV);
 }
