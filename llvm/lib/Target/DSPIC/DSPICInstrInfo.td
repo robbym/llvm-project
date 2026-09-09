@@ -1844,6 +1844,20 @@ let AddedComplexity = 20 in {
   def NEG16fW : FileToW16<"neg">;
   def COM16fW : FileToW16<"com">;
   def INC8fW  : FileToW8<"inc.b">;
+  // trellis session 99: the shift and rotate members of the same class. No isel pattern for the
+  // same reason as the rest of class (b'); DSPICPeephole::fuseFileALU forms them after
+  // allocation. ⚠ `sl.w` is absent DELIBERATELY: shl-by-one reaches a memory-operand shift, not
+  // the load-then-shift shape the fusion matches, so the def would be dead. rlc/rrc are absent
+  // because they rotate through the CARRY and no C expression can name an incoming carry.
+  def SL8fWr   : FileToW8<"sl.b">;
+  def LSR8fWr  : FileToW8<"lsr.b">;
+  def ASR8fWr  : FileToW8<"asr.b">;
+  def LSR16fWr : FileToW16<"lsr.w">;
+  def ASR16fWr : FileToW16<"asr.w">;
+  def RLNC16fWr : FileToW16<"rlnc.w">;
+  def RRNC16fWr : FileToW16<"rrnc.w">;
+  def RLNC8fWr  : FileToW8<"rlnc.b">;
+  def RRNC8fWr  : FileToW8<"rrnc.b">;
   def : Pat<(inc1f  (i16 (load faddr:$f))), (COPY_TO_REGCLASS (INC16fW faddr:$f), GR16)>;
   def : Pat<(dec1f  (i16 (load faddr:$f))), (COPY_TO_REGCLASS (DEC16fW faddr:$f), GR16)>;
   def : Pat<(negf   (i16 (load faddr:$f))), (COPY_TO_REGCLASS (NEG16fW faddr:$f), GR16)>;

@@ -407,6 +407,27 @@ bool DSPICPeepholeImpl::fuseByteFile(MachineBasicBlock &MBB) {
 // `sub Wb,Ws,Wd` is Wb - Ws, so `sub w0,[w1],w0` is w0 - g; the file form computing w0 - g is
 // `subr f,WREG`, because `subr f,WREG` is WREG - f. The assembler takes either spelling and
 // cannot tell them apart -- session 84's lesson, and mutant MW1 swaps exactly this.
+// trellis session 99: the SHIFT and ROTATE half of the same family. These consume a different
+// shape from the binary ops -- a LOAD of the near file symbol into w0 followed by a one-operand
+// shift, rather than a materialize followed by a memory-operand ALU op -- so they are a second
+// table and a second matcher, and the two never overlap.
+static unsigned fileWREGShift(unsigned Op) {
+  switch (Op) {
+  case DSPIC::LSR16r1:  return DSPIC::LSR16fWr;
+  case DSPIC::ASR16r1:  return DSPIC::ASR16fWr;
+  case DSPIC::RLNC16r:  return DSPIC::RLNC16fWr;
+  case DSPIC::RRNC16r:  return DSPIC::RRNC16fWr;
+  case DSPIC::SL8r1:    return DSPIC::SL8fWr;
+  case DSPIC::LSR8r1:   return DSPIC::LSR8fWr;
+  case DSPIC::ASR8r1:   return DSPIC::ASR8fWr;
+  case DSPIC::RLNC8r:   return DSPIC::RLNC8fWr;
+  case DSPIC::RRNC8r:   return DSPIC::RRNC8fWr;
+  // ⚠ SL16r1 is absent on purpose: shl-by-one never reaches this shape (it takes a
+  // memory-operand shift), so a row here would be dead. Mutant MS4 adds it and must find nothing.
+  default:              return 0;
+  }
+}
+
 static unsigned fileWREGForm(unsigned Op) {
   switch (Op) {
   case DSPIC::ADDM16rn:  return DSPIC::ADD16fWr;
@@ -433,6 +454,42 @@ bool DSPICPeepholeImpl::fuseFileALU(MachineBasicBlock &MBB) {
     if (J == MBB.end())
       break;
     // I: MOV16ri wA, <near global>      J: OP wD, wB, [wA]   with wD == wB == w0
+    // trellis session 99, the shift/rotate shape: a LOAD of the symbol into w0 (the word load
+    // through the $sr no-base sentinel, or session 90's direct byte move) followed by a
+    // one-operand shift w0 -> w0 that kills it.
+    if (unsigned Sh = fileWREGShift(J->getOpcode())) {
+      bool WordLoad = I->getOpcode() == DSPIC::MOV16rm && I->getNumOperands() >= 3 &&
+                      I->getOperand(1).isReg() && I->getOperand(1).getReg() == DSPIC::SR &&
+                      (I->getOperand(2).isGlobal() || I->getOperand(2).isSymbol()) &&
+                      isNearFileGlobal(I->getOperand(2));
+      bool ByteLoad = I->getOpcode() == DSPIC::MOV8fW && I->getNumOperands() >= 3 &&
+                      (I->getOperand(2).isGlobal() || I->getOperand(2).isSymbol()) &&
+                      isNearFileGlobal(I->getOperand(2));
+      if ((WordLoad || ByteLoad) && I->getOperand(0).isReg() && J->getNumOperands() >= 2 &&
+          J->getOperand(0).isReg() && J->getOperand(1).isReg()) {
+        Register Ld = I->getOperand(0).getReg();
+        Register Sd = J->getOperand(0).getReg();
+        Register Ss = J->getOperand(1).getReg();
+        // the loaded value must BE the shift's source, must DIE there, and both it and the
+        // result must live in w0 -- the file form writes WREG and nothing else.
+        if (Ss == Ld && J->getOperand(1).isKill() && wNumber(Sd) == 0 && wNumber(Ss) == 0) {
+          BuildMI(MBB, *J, J->getDebugLoc(), TII->get(Sh), Sd)
+              .addReg(DSPIC::SR)
+              .add(I->getOperand(2));
+          auto K = std::next(J);
+          I->eraseFromParent();
+          J->eraseFromParent();
+          I = K;
+          ++NumFileALU;
+          Changed = true;
+          continue;
+        }
+      }
+    }
+    // ⛔ THE BINARY SHAPE'S REJECTION COMES AFTER THIS ARM, and the first version of this edit
+    // put the arm after it -- which discards every load-shaped pair, because the shift shape
+    // begins with a LOAD (MOV16rm / MOV8fW) and not a MOV16ri. Nothing fused, and the comment
+    // added beside it asserted the ordering it did not have.
     if (I->getOpcode() != DSPIC::MOV16ri || !I->getOperand(0).isReg() ||
         !(I->getOperand(1).isGlobal() || I->getOperand(1).isSymbol()) ||
         !isNearFileGlobal(I->getOperand(1))) {
