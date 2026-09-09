@@ -2297,9 +2297,18 @@ def DSPICSpace : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
 // trellis session 98: the dsPIC `sfr` attribute. The device header declares 2,900 special
 // function registers with it, and in the vendor compiler it ALSO MARKS THE OBJECT NEAR --
 // pic30.c:4923 says so in those words, and pic30.c builds its own SFR refs with
-// PIC30_NEAR_FLAG. Carried to the backend as the "near" global attribute by
-// CodeGen/Targets/DSPIC.cpp, which is the whole of its effect here: the -msfr-warn
-// diagnostics and cc1's validity check are NOT implemented, deliberately.
+// PIC30_NEAR_FLAG.
+// ⛔ ITS EFFECT IS EXCLUSIONARY, AND THE "near" IT LOWERS IS INERT. Nothing reads a GLOBAL
+// "near": the only readers are F->hasFnAttribute("near") (DSPICISelLowering.cpp:634,
+// DSPICInstrInfo.td:384), both Function-scoped, and the global path reads only the ABSENCE
+// of "far" (isNearFileSymbol). MEASURED: the same module with and without the attribute on
+// the global emits identical code. What the arm does is take the `if` and so SKIP the data
+// model's `else`, which is what would have marked the object "far". Mutant MS4 deletes the
+// addAttribute and must LIVE.
+// ⚠ The string is kept because it records the intent at the site and matches what DSPICNear
+// lowers -- but it does no work, and this comment exists because the first version of this
+// declaration said it did. Found by the refutation pass.
+// The -msfr-warn diagnostics and cc1's validity check are NOT implemented, deliberately.
 // ⚠ It takes an optional argument in cc1 (min 0, max 1); ours accepts the bare form only,
 // which is the only form the device headers use (checked: 2,900 of 2,900).
 def DSPICSfr : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
