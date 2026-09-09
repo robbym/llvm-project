@@ -173,6 +173,17 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
     F->addFnAttr("near");
   if (GV->isDeclaration())
     return;
+  // trellis session 98: `user_init` rides as its own fn-attribute; DSPICAsmPrinter emits the
+  // `.user_init` fragment that the linker and the C runtime turn into a call before main.
+  if (FD->hasAttr<DSPICUserInitAttr>()) {
+    F->addFnAttr("dspic-user-init");
+    // ⛔ AND IT MUST SURVIVE. A user_init function is reachable ONLY through the linker's
+    // `.user_init` section; nothing in the translation unit need call it. Without this, our clang
+    // INLINED the fixture's `static` one away entirely and emitted no fragment at all -- measured,
+    // 0 mentions in our output against 5 in cc1's. That is the very failure this change exists to
+    // fix, reintroduced one level down. `used` keeps the out-of-line body.
+    M.addUsedGlobal(F);
+  }
   const auto *IA = FD->getAttr<DSPICInterruptAttr>();
   if (!IA)
     return;

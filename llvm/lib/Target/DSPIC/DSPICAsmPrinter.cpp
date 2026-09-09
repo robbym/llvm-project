@@ -96,6 +96,8 @@ static cl::opt<std::string> DSPICConfigDB(
     /// L1b: print the frame's accounting as a comment, so a report's frame size is a
     /// line the compiler printed (trellis standing rule 12).
     void emitFunctionBodyStart() override;
+    // trellis session 98: the `.user_init` fragment, see the definition below
+    void emitUserInitFragment(const MachineFunction &MF);
     // the config-words row: the `#pragma config` markers, collected here and emitted as words
     std::vector<std::string> ConfigPragmas;
     void emitGlobalVariable(const GlobalVariable *GV) override;
@@ -334,6 +336,31 @@ void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
   }
 }
 
+// trellis session 98: the `.user_init` fragment for a function marked
+// __attribute__((user_init)). cc1's rule, pic30.c:26151-26156:
+//
+//     .pushsection .user_init,code,keep
+//     <rcall|call> _<name>
+//     .popsection
+//
+// ⛔ THE MNEMONIC IS THE CODE MODEL'S, measured from cc1 at both models. It is taken from the
+// port's OWN call-reach rule rather than re-derived: `far` forces the long form under any model,
+// `near` keeps the short one under any model, and the model decides the rest -- the same sentence
+// DSPICISelLowering::LowerCall works from. Mutant MU1 hardcodes `rcall` and must die at
+// -mlarge-code.
+void DSPICAsmPrinter::emitUserInitFragment(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  if (!F.hasFnAttribute("dspic-user-init"))
+    return;
+  bool Large = (MF.getSubtarget<DSPICSubtarget>().isLargeCode() &&
+                !F.hasFnAttribute("near")) ||
+               F.hasFnAttribute("far");
+  OutStreamer->emitRawText(StringRef("\t.pushsection .user_init,code,keep"));
+  OutStreamer->emitRawText(Twine("\t") + (Large ? "call" : "rcall") + " " +
+                           getSymbol(&F)->getName());
+  OutStreamer->emitRawText(StringRef("\t.popsection"));
+}
+
 void DSPICAsmPrinter::emitFunctionBodyStart() {
   const MachineFrameInfo &MFI = MF->getFrameInfo();
   const auto *FuncInfo = MF->getInfo<DSPICMachineFunctionInfo>();
@@ -419,6 +446,10 @@ void DSPICAsmPrinter::EmitInterruptVectorSection(MachineFunction &ISR) {
 }
 
 bool DSPICAsmPrinter::runOnMachineFunction(MachineFunction &MF) {
+  // ⛔ BEFORE AsmPrinter::runOnMachineFunction, which emits the function's own
+  // `.global`/`.type`/label: that is where cc1 puts the fragment (its output has the pushsection
+  // block at line 4 and the label at line 12).
+  emitUserInitFragment(MF);
   // L1d (trellis session 88): an ISR needs NO vector-table entry here -- its body goes in
   // `.isr.isr.text` (the TLOF) and the linker wires the vector from the symbol name, exactly
   // as cc1 does (it emits no table). The old EmitInterruptVectorSection is retired.

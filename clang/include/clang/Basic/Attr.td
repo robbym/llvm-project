@@ -2317,6 +2317,17 @@ def DSPICSfr : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Documentation = [Undocumented];
   let SimpleHandler = 1;
 }
+// trellis session 98: the dsPIC `user_init` attribute. cc1 emits a `.user_init,code,keep`
+// fragment holding a call to the function; the pic30 linker turns the presence of any such section
+// into `__has_user_init = 1` and `__user_init`, and the C runtime calls it before main.
+// Carried to the backend as the "dspic-user-init" fn-attribute and emitted by DSPICAsmPrinter.
+// ⚠ cc1 also requires a void() signature (pic30_validate_void_fn); ours does not check that yet.
+def DSPICUserInit : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"user_init">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
 def DSPICPersistent : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"persistent">];
   let Subjects = SubjectList<[Var]>;
