@@ -595,10 +595,25 @@ def def8 : PatLeaf<(i8 GR8:$src), [{
          N->getOpcode() != ISD::CopyFromReg;
 }]>;
 
-// In the case of a 8-bit def that is known to implicitly zero-extend,
-// we can use a SUBREG_TO_REG.
-def : Pat<(i16 (zext def8:$src)),
-          (SUBREG_TO_REG GR8:$src, subreg_8bit)>;
+// ⛔ trellis session 99: THE PATTERN THAT WAS HERE WAS AN MSP430 FACT, AND IT MISCOMPILED.
+// It read:
+//     // In the case of a 8-bit def that is known to implicitly zero-extend,
+//     // we can use a SUBREG_TO_REG.
+//     def : Pat<(i16 (zext def8:$src)), (SUBREG_TO_REG GR8:$src, subreg_8bit)>;
+// SUBREG_TO_REG's contract is that the high bits are ALREADY ZERO. On MSP430 they are: a byte
+// instruction clears the upper byte of its destination, which is what the comment above `def8`
+// still says. ⛔ ON dsPIC A BYTE INSTRUCTION LEAVES THE UPPER BYTE ALONE, so this deleted an
+// extension the program needed and let whatever was in the high half reach the result.
+//
+// Found by EXECUTION, not by reading: steps/exec/shiftexec X5 read 0xC040 where C says 0x0040 --
+// a byte-returning callee's result widened to int. Reduced in steps/byteext, where the radius is
+// exactly this pattern's admission rule: a CopyFromReg is excluded (so a call result used
+// directly was always correct) and a byte ALU or shift result is not (so those were always wrong).
+//
+// ⚠ NOT REPLACED BY A LONGER EXCLUSION LIST. There is no opcode set on this machine for which the
+// claim holds; `ze` is what zero-extends, and where a high half is genuinely known zero the DAG's
+// own known-bits machinery drops the redundant extension without the target asserting a falsehood.
+// `def8` itself survives for its other user, but nothing may read it as a zero-extension promise.
 
 def MOV8mc  : I8mc<0b0100,
                    (outs), (ins memdst:$dst, cg8imm:$imm),
