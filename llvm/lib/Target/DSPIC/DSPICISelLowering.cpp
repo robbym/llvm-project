@@ -2362,6 +2362,21 @@ DSPICTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   }
 
   // L1f-d increment 3: the widening multiply, its pair fixed at w0:w1.
+  // trellis session 101: the literal twins go through the same arm; only the operand differs.
+  // ⛔ The SIGNED literal form is `mul.su`, not `mul.ss` -- a lit5 operand is unsigned by the
+  // instruction's definition, which is why cc1 emits `mul.su w0,#3,w0` for `(long)a * 3`.
+  if (Opc == DSPIC::SMULLOHI16i || Opc == DSPIC::UMULLOHI16i) {
+    unsigned MulOpc = Opc == DSPIC::SMULLOHI16i ? DSPIC::MULSUlit : DSPIC::MULUUlit;
+    BuildMI(*BB, MI, dl, TII.get(MulOpc))
+        .addReg(MI.getOperand(2).getReg())
+        .addImm(MI.getOperand(3).getImm());
+    BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), MI.getOperand(0).getReg())
+        .addReg(DSPIC::R12);
+    BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), MI.getOperand(1).getReg())
+        .addReg(DSPIC::R13);
+    MI.eraseFromParent();
+    return BB;
+  }
   if (Opc == DSPIC::SMULLOHI16 || Opc == DSPIC::UMULLOHI16) {
     unsigned MulOpc = Opc == DSPIC::SMULLOHI16 ? DSPIC::MULSSpair : DSPIC::MULUUpair;
     BuildMI(*BB, MI, dl, TII.get(MulOpc))

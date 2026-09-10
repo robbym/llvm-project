@@ -1152,12 +1152,28 @@ let isCodeGenOnly = 1, usesCustomInserter = 1, Defs = [SR] in {
 let isCodeGenOnly = 1, Defs = [R12, R13, SR] in {
   def MULSSpair : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "mul.ss\t$a,$b,w0">;
   def MULUUpair : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "mul.uu\t$a,$b,w0">;
+  // trellis session 101: the same product against a 5-bit LITERAL, saving the materialisation.
+  // ⛔ THE SIGNED CASE IS `mul.su`, NOT `mul.ss`, AND THAT IS NOT A TYPO. A lit5 operand is
+  // unsigned by the instruction's definition, so a signed multiplicand against a literal is
+  // signed-times-unsigned; cc1 emits `mul.su w0,#3,w0` for `(long)a * 3`. Using `mul.ss` here
+  // assembles clean and produces a wrong product whenever the register operand has bit 15 set --
+  // mutant M3 in steps/isaops/.
+  def MULSUlit  : DSPICFrameInst<(outs), (ins GR16:$a, i16imm:$b), 2, "mul.su\t$a,$b,w0">;
+  def MULUUlit  : DSPICFrameInst<(outs), (ins GR16:$a, i16imm:$b), 2, "mul.uu\t$a,$b,w0">;
 }
 let isCodeGenOnly = 1, usesCustomInserter = 1, Defs = [SR] in {
   def SMULLOHI16 : Pseudo<(outs GR16:$lo, GR16:$hi), (ins GR16:$a, GR16:$b), "# SMULLOHI16",
                           [(set GR16:$lo, GR16:$hi, (smullohi GR16:$a, GR16:$b))]>;
   def UMULLOHI16 : Pseudo<(outs GR16:$lo, GR16:$hi), (ins GR16:$a, GR16:$b), "# UMULLOHI16",
                           [(set GR16:$lo, GR16:$hi, (umullohi GR16:$a, GR16:$b))]>;
+  // the literal twins. AddedComplexity so they win over the register form once the constant is
+  // small enough to be an operand; lit5imm16 is the same predicate the three-operand ALU forms use.
+  let AddedComplexity = 10 in {
+  def SMULLOHI16i : Pseudo<(outs GR16:$lo, GR16:$hi), (ins GR16:$a, i16imm:$b), "# SMULLOHI16i",
+                          [(set GR16:$lo, GR16:$hi, (smullohi GR16:$a, lit5imm16:$b))]>;
+  def UMULLOHI16i : Pseudo<(outs GR16:$lo, GR16:$hi), (ins GR16:$a, i16imm:$b), "# UMULLOHI16i",
+                          [(set GR16:$lo, GR16:$hi, (umullohi GR16:$a, lit5imm16:$b))]>;
+  }
 }
 
 
@@ -2017,6 +2033,13 @@ let AddedComplexity = 20 in {
   def ADD8fW   : FileBinW8<"add.b">;
   def AND8fW   : FileBinW8<"and.b">;
   def SUB8fW   : FileBinW8<"sub.b">;
+  // trellis session 101: the three members class (c) had at word width and not at byte width.
+  // `gb |= x` was `mov #_gb,w1 ; ior.b w0,[w1],[w1]` against cc1's one-word `ior.b _gb`.
+  // ⚠ The mnemonic must be the BYTE one: `ior.w` on a byte place assembles and writes two bytes
+  // past the end of the global (mutant M2 -- the assembler is a control for forms, not widths).
+  def IOR8fW   : FileBinW8<"ior.b">;
+  def XOR8fW   : FileBinW8<"xor.b">;
+  def SUBR8fW  : FileBinW8<"subr.b">;   // W0 - f, written back to f
   // f = f op W0 -- the value wrapped into GR16_W0 by COPY_TO_REGCLASS (short-lived, RA fix)
   def : Pat<(store (add (i16 (load faddr:$f)), GR16:$w), faddr:$f), (ADD16fW  faddr:$f, (COPY_TO_REGCLASS GR16:$w, GR16_W0))>;
   def : Pat<(store (and (i16 (load faddr:$f)), GR16:$w), faddr:$f), (AND16fW  faddr:$f, (COPY_TO_REGCLASS GR16:$w, GR16_W0))>;
@@ -2027,6 +2050,9 @@ let AddedComplexity = 20 in {
   def : Pat<(store (add (i8 (load faddr:$f)), GR8:$w), faddr:$f), (ADD8fW faddr:$f, (COPY_TO_REGCLASS GR8:$w, GR8_W0))>;
   def : Pat<(store (and (i8 (load faddr:$f)), GR8:$w), faddr:$f), (AND8fW faddr:$f, (COPY_TO_REGCLASS GR8:$w, GR8_W0))>;
   def : Pat<(store (sub (i8 (load faddr:$f)), GR8:$w), faddr:$f), (SUB8fW faddr:$f, (COPY_TO_REGCLASS GR8:$w, GR8_W0))>;
+  def : Pat<(store (or  (i8 (load faddr:$f)), GR8:$w), faddr:$f), (IOR8fW  faddr:$f, (COPY_TO_REGCLASS GR8:$w, GR8_W0))>;
+  def : Pat<(store (xor (i8 (load faddr:$f)), GR8:$w), faddr:$f), (XOR8fW  faddr:$f, (COPY_TO_REGCLASS GR8:$w, GR8_W0))>;
+  def : Pat<(store (sub GR8:$w, (i8 (load faddr:$f))), faddr:$f), (SUBR8fW faddr:$f, (COPY_TO_REGCLASS GR8:$w, GR8_W0))>;
 }
 
 // (d) the compares against a file place: cp0.w f (f vs 0), cp.w f (W0 - f). No dest.
