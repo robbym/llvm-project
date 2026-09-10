@@ -482,6 +482,16 @@ namespace clang {
     };
   }
 
+  /// dsPIC33 builtins (trellis session 103): the table read/write instructions.
+  namespace DSPIC {
+  enum {
+    LastTIBuiltin = clang::Builtin::FirstTSBuiltin - 1,
+#define BUILTIN(ID, TYPE, ATTRS) BI##ID,
+#include "clang/Basic/BuiltinsDSPIC.def"
+    LastTSBuiltin
+  };
+  } // namespace DSPIC
+
   /// AVR builtins
   namespace AVR {
   enum {
@@ -497,7 +507,8 @@ namespace clang {
        PPC::LastTSBuiltin, NVPTX::LastTSBuiltin, AMDGPU::LastTSBuiltin,
        X86::LastTSBuiltin, VE::LastTSBuiltin, RISCV::LastTSBuiltin,
        Hexagon::LastTSBuiltin, Mips::LastTSBuiltin, XCore::LastTSBuiltin,
-       SystemZ::LastTSBuiltin, WebAssembly::LastTSBuiltin, AVR::LastTSBuiltin});
+       SystemZ::LastTSBuiltin, WebAssembly::LastTSBuiltin, AVR::LastTSBuiltin,
+       DSPIC::LastTSBuiltin});
 
 } // end namespace clang.
 

@@ -772,6 +772,47 @@ let isCodeGenOnly = 1, usesCustomInserter = 1, Uses = [SR] in
   def FLAG2BOOL16 : Pseudo<(outs GR16:$d), (ins i16imm:$k), "# FLAG2BOOL16",
                            [(set GR16:$d, (DSPICf2b imm:$k))]>;
 
+// ── trellis session 103: THE TABLE INSTRUCTIONS. The effective program address is TBLPAG:Ws.
+// `tblrdl` reads bits 15:0 of the program word; `tblrdh` reads bits 23:16 into the low byte of the
+// destination and zero into its high byte. The writes target the flash write LATCHES, which the
+// NVM controller commits -- and which are themselves readable by a table read at TBLPAG 0xFA,
+// which is what bl_fw's `mov #250,w0 ; mov.w w0,_TBLPAG` is doing.
+//
+// ⛔ hasSideEffects ON ALL OF THEM, DELIBERATELY. They replace an `__asm__ volatile`; the page
+// comes from TBLPAG, a memory-mapped SFR these instructions do not name, so a reorderable read
+// could be hoisted above the `mov.w wN,_TBLPAG` that selects its page. The prediction this buys is
+// that both firmwares come out BYTE-IDENTICAL, which is checkable; a faster model is a later row.
+//
+// ⚠ The spelling is cc1's `.w`, not the shim's bare mnemonic -- the two assemble to the same
+// encoding, so the .s differs and the .hex must not. This backend's own convention (no space after
+// the comma) is kept over cc1's.
+let hasSideEffects = 1 in {
+  let mayLoad = 1 in {
+  def TBLRDL16 : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$p), 2, "tblrdl.w\t[$p],$rd">;
+  def TBLRDH16 : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$p), 2, "tblrdh.w\t[$p],$rd">;
+  }
+  let mayStore = 1 in {
+  def TBLWTL16 : DSPICFrameInst<(outs), (ins GR16:$rs, GR16:$p), 2, "tblwtl.w\t$rs,[$p]">;
+  def TBLWTH16 : DSPICFrameInst<(outs), (ins GR16:$rs, GR16:$p), 2, "tblwth.w\t$rs,[$p]">;
+  // the MEMORY source, which is the row's one measured size opportunity: cc1 emits
+  // `tblwtl.w [w0], [w3]` where the shim's `"r"` constraint forced a `mov` first.
+  let mayLoad = 1 in {
+  def TBLWTL16mn : DSPICFrameInst<(outs), (ins GR16:$src, GR16:$p), 2, "tblwtl.w\t[$src],[$p]">;
+  def TBLWTH16mn : DSPICFrameInst<(outs), (ins GR16:$src, GR16:$p), 2, "tblwth.w\t[$src],[$p]">;
+  }
+  }
+}
+// The intrinsic's argument order is the VENDOR's -- (offset, value) -- and the instruction prints
+// them the other way round. The swap is here, and mutant MT3 undoes it.
+def : Pat<(int_dspic_tblrdl GR16:$p), (TBLRDL16 GR16:$p)>;
+def : Pat<(int_dspic_tblrdh GR16:$p), (TBLRDH16 GR16:$p)>;
+def : Pat<(int_dspic_tblwtl GR16:$p, GR16:$v), (TBLWTL16 GR16:$v, GR16:$p)>;
+def : Pat<(int_dspic_tblwth GR16:$p, GR16:$v), (TBLWTH16 GR16:$v, GR16:$p)>;
+let AddedComplexity = 12 in {
+def : Pat<(int_dspic_tblwtl GR16:$p, (i16 (load GR16:$src))), (TBLWTL16mn GR16:$src, GR16:$p)>;
+def : Pat<(int_dspic_tblwth GR16:$p, (i16 (load GR16:$src))), (TBLWTH16mn GR16:$src, GR16:$p)>;
+}
+
 def NOP  : InstAlias<"nop",  (MOV16rc CG, 0)>;
 def CLR8r   : InstAlias<"clr.b\t$dst",  (MOV8rc    GR8:$dst,     0)>;
 def CLR16r  : InstAlias<"clr\t$dst",    (MOV16rc   GR16:$dst,    0)>;

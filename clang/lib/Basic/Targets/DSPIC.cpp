@@ -13,10 +13,32 @@
 //===----------------------------------------------------------------------===//
 
 #include "DSPIC.h"
+#include "clang/Basic/Builtins.h"
 #include "clang/Basic/MacroBuilder.h"
+#include "clang/Basic/TargetBuiltins.h"
 
 using namespace clang;
 using namespace clang::targets;
+
+// trellis session 103: the table read/write builtins, the AVR `.def` shape.
+static constexpr int NumBuiltins =
+    clang::DSPIC::LastTSBuiltin - Builtin::FirstTSBuiltin;
+
+static constexpr llvm::StringTable BuiltinStrings =
+    CLANG_BUILTIN_STR_TABLE_START
+#define BUILTIN CLANG_BUILTIN_STR_TABLE
+#include "clang/Basic/BuiltinsDSPIC.def"
+    ;
+
+static constexpr auto BuiltinInfos = Builtin::MakeInfos<NumBuiltins>({
+#define BUILTIN CLANG_BUILTIN_ENTRY
+#include "clang/Basic/BuiltinsDSPIC.def"
+});
+
+llvm::SmallVector<Builtin::InfosShard>
+DSPICTargetInfo::getTargetBuiltins() const {
+  return {{&BuiltinStrings, BuiltinInfos}};
+}
 
 const char *const DSPICTargetInfo::GCCRegNames[] = {
     "w0", "w1", "w2",  "w3",  "w4",  "w5",  "w6",  "w7",

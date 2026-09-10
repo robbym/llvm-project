@@ -73,9 +73,9 @@ public:
   void getTargetDefines(const LangOptions &Opts,
                         MacroBuilder &Builder) const override;
 
-  llvm::SmallVector<Builtin::InfosShard> getTargetBuiltins() const override {
-    return {};
-  }
+  // trellis session 103: the table read/write builtins. Defined in DSPIC.cpp because the
+  // string table and the info array are file-scope constants built from BuiltinsDSPIC.def.
+  llvm::SmallVector<Builtin::InfosShard> getTargetBuiltins() const override;
 
   bool allowsLargerPreferedTypeAlignment() const override { return false; }
 

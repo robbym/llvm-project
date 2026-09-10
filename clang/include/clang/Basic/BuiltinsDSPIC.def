@@ -1,0 +1,34 @@
+//===--- BuiltinsDSPIC.def - dsPIC33 Builtin function database --*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// trellis session 103. The table read/write instructions, which are the only way to reach program
+// memory for WRITING and the way the vendor's compiler reaches it for reading. Before this file
+// they came from a shim header (tools/dspic-llvm/dspic-builtins.h) as `__asm__ volatile` strings,
+// so this compiler had emitted `tblrdl`/`tblrdh` ZERO times -- it copied them.
+//
+// The names are the VENDOR's, not `__builtin_dspic_*`: xc16 and XC-DSC spell them exactly so, real
+// firmware calls them by these names, and a port that renamed them would not compile that firmware.
+//
+// ⛔ `Ui` IS SIXTEEN BITS ON THIS TARGET. Session 99 found three clang builtins in this port handing
+// a 16-bit `int` to an i32 intrinsic parameter; every intrinsic below takes and returns i16.
+//
+// The attribute is "n" (nothrow) and NOT "c" (const): a table read depends on TBLPAG, a
+// memory-mapped SFR the builtin does not name, and a table write changes the flash write latches.
+//
+//===----------------------------------------------------------------------===//
+
+// The effective program address is TBLPAG:offset. tblrdl reads bits 15:0 of the program word;
+// tblrdh reads bits 23:16 into the low byte of the result, zero in the high byte.
+BUILTIN(__builtin_tblrdl, "UiUi", "n")
+BUILTIN(__builtin_tblrdh, "UiUi", "n")
+
+// The writes target the flash write LATCHES, not program memory: the NVM controller commits them.
+BUILTIN(__builtin_tblwtl, "vUiUi", "n")
+BUILTIN(__builtin_tblwth, "vUiUi", "n")
+
+#undef BUILTIN
