@@ -1266,6 +1266,15 @@ let Defs = [SR], Constraints = "$rs = $rd" in {
   def IOR8rl  : DSPICFrameInst<(outs GR8:$rd),  (ins GR8:$rs,  i16imm:$imm), 2, "ior.b\t$imm,$rd">;
   def XOR8rl  : DSPICFrameInst<(outs GR8:$rd),  (ins GR8:$rs,  i16imm:$imm), 2, "xor.b\t$imm,$rd">;
 }
+// trellis session 102: the same two-operand literal forms for the ops that READ the carry.
+// ⛔ Uses=[SR] AS WELL AS Defs=[SR]. The block above is add/sub/and/ior/xor, which write the flags
+// and read none; addc and subb read C where they stand, and without the Uses the scheduler is free
+// to move one away from the instruction that produced its carry -- session 101's SUBBRM16rn
+// carries the same warning, and its mutant is the reason it is spelled out here.
+let Defs = [SR], Uses = [SR], Constraints = "$rs = $rd" in {
+  def ADDC16rl : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs, i16imm:$imm), 2, "addc\t$imm,$rd">;
+  def SUBC16rl : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs, i16imm:$imm), 2, "subb\t$imm,$rd">;
+}
 // the read-modify-write forms: one instruction, one read and one write of the place, at the
 // width of the access that selected it
 let mayLoad = 1, mayStore = 1 in {
@@ -1333,6 +1342,25 @@ def : Pat<(sub GR16:$x, lit10imm16:$i),    (SUB16rl GR16:$x, imm:$i)>;
 def : Pat<(and GR16:$x, lit10and16:$i),    (AND16rl GR16:$x, imm:$i)>;
 def : Pat<(or  GR16:$x, lit10imm16:$i),    (IOR16rl GR16:$x, imm:$i)>;
 def : Pat<(xor GR16:$x, lit10imm16:$i),    (XOR16rl GR16:$x, imm:$i)>;
+// trellis session 102, THE LITERAL CARRY CHAIN. A constant half in 32..1023 is an operand of the
+// TIED two-operand form; without these four it was a `mov` into a register that the untied
+// three-operand lit5 form could not take. lit10imm16 is 32..1023 and lit5imm16 is 0..31, so these
+// never overlap the patterns the Arith multiclass already carries.
+def : Pat<(addc GR16:$x, lit10imm16:$i), (ADD16rl  GR16:$x, imm:$i)>;
+def : Pat<(subc GR16:$x, lit10imm16:$i), (SUB16rl  GR16:$x, imm:$i)>;
+// ⛔ AND THE LITERAL FORMS MUST OUTRANK THE MEMORY-SOURCE ONE, which the written-first expectation
+// is what caught. Session 101 gave `sube` a memory-source form, `subbr Wb,[Ws],Wd` at
+// AddedComplexity 12, for the shape `memory MINUS register`. Once the chain flips, `gl -= 1000`
+// offers it `sube(load _gl+2, 0)` -- and it wins on complexity, materialising the ZERO into a
+// register with a `clr` and the ADDRESS with a `mov`, three words where `subb.w wN,#0,wN` is one.
+// k_gsub came out at 8 words against cc1's 7 and a prediction of 7. A literal never needs a
+// register, so a literal pattern must outrank a form that would put it in one.
+let AddedComplexity = 14 in {
+def : Pat<(adde GR16:$x, lit5imm16:$i),  (ADDC16ri GR16:$x, imm:$i)>;
+def : Pat<(sube GR16:$x, lit5imm16:$i),  (SUBC16ri GR16:$x, imm:$i)>;
+def : Pat<(adde GR16:$x, lit10imm16:$i), (ADDC16rl GR16:$x, imm:$i)>;
+def : Pat<(sube GR16:$x, lit10imm16:$i), (SUBC16rl GR16:$x, imm:$i)>;
+}
 def : Pat<(add GR8:$x, lit8imm8hi:$i), (ADD8rl GR8:$x, (lit8mask imm:$i))>;
 def : Pat<(and GR8:$x, lit8imm8hi:$i), (AND8rl GR8:$x, (lit8mask imm:$i))>;
 def : Pat<(or  GR8:$x, lit8imm8hi:$i), (IOR8rl GR8:$x, (lit8mask imm:$i))>;
@@ -1539,6 +1567,12 @@ let Defs = [SR], AddedComplexity = 12 in {
   // subr Wb,#lit5,Wd: lit - Wb
   def SUBR16ri : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rb, i16imm:$imm), 2, "subr\t$rb,$imm,$rd"> {
     let Pattern = [(set GR16:$rd, (sub lit5imm16:$imm, GR16:$rb))]; }
+  // trellis session 102: the borrow-reading twin. `-a` on 32 bits is sub(0, a), which reaches isel
+  // as subc(0, lo) / sube(0, hi) -- a constant on the LEFT, which no `sub` form takes. Ours spent
+  // a `clr` on a register to hold the zero; cc1 writes `subr w0,#0,w0 ; subbr w1,#0,w1`.
+  let Uses = [SR] in
+  def SUBBR16ri : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rb, i16imm:$imm), 2, "subbr\t$rb,$imm,$rd"> {
+    let Pattern = [(set GR16:$rd, (sube lit5imm16:$imm, GR16:$rb))]; }
   // mulw with a memory source (the destination even, as at L1f-d)
   let mayLoad = 1 in
   def MULWM16rn : DSPICFrameInst<(outs GR16_EVEN:$rd), (ins GR16:$rb, GR16:$p), 2, "mulw.ss\t$rb,[$p],$rd"> {
@@ -1546,6 +1580,10 @@ let Defs = [SR], AddedComplexity = 12 in {
 }
 let AddedComplexity = 12 in
 def : Pat<(store (add GR16:$rb, neglit5imm16:$imm), GR16:$p), (SUBM16rin GR16:$rb, (negimm16 imm:$imm), GR16:$p)>;
+// trellis session 102: the borrow-PRODUCING low half of a 32-bit negate. `subr Wb,#lit5,Wd`
+// already exists, but its pattern is on plain ISD::SUB, which sub(0, a) on 32 bits never reaches:
+// the type legaliser splits it into subc(0, lo) / sube(0, hi) first.
+def : Pat<(subc lit5imm16:$i, GR16:$x), (SUBR16ri GR16:$x, imm:$i)>;
 
 // B. the one-operand family: register to register (untied), from memory, into memory, and
 // on memory. inc/inc2/dec/dec2 outrank the literal add (the same word; cc1's spelling).

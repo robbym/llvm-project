@@ -233,6 +233,10 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   // (session 92, the libcalls row) a commutative op that becomes a runtime routine takes its
   // operands in ARGUMENT order, so the routine's registers are already loaded.
   setTargetDAGCombine({ISD::MUL, ISD::FADD, ISD::FMUL});
+  // trellis session 102: a multi-word constant ADD chain becomes a SUB chain when the NEGATED
+  // constant is the cheaper one to spell. Registered on ADDE because the top of a chain is always
+  // an ADDE -- a lone ADDC has a dead carry and the generic combiner folds it to ADD.
+  setTargetDAGCombine(ISD::ADDE);
 
   setMinFunctionAlignment(Align(2));
   setPrefFunctionAlignment(Align(2));
@@ -1495,7 +1499,118 @@ static SDValue combineCmpThroughAssert(SDNode *N, SelectionDAG &DAG) {
   return DAG.getNode(N->getOpcode(), SDLoc(N), N->getVTList(), Ops);
 }
 
+// trellis session 102: THE LITERAL CARRY CHAIN.
+//
+// LLVM canonicalises `x - C` into `x + (-C)` long before isel, so on this machine the high half of
+// every 32-bit constant subtraction arrives as 0xFFFF: not a literal operand in any form, hence a
+// `setm` into a register and a register-to-register `addc`. cc1 spells the same computation
+// `sub #C,w0 ; subb #0,w1` and pays for no register at all.
+//
+// ⛔ THE CHAIN FLIPS WHOLE OR NOT AT ALL. dsPIC's C is the carry-out for add/addc and the
+// NOT-borrow for sub/subb; a chain whose low half is a `sub` and whose high half is an `addc`
+// reads the same bit with the opposite meaning. So this walks the whole ADDC->ADDE...->ADDE chain,
+// requires a constant addend at EVERY level, and rewrites all of it or none.
+//
+// ⛔ AND PROFITABILITY IS COUNTED, NOT GUESSED. A half is free if it is an operand -- 0..31 in the
+// untied three-operand form, 32..1023 in the tied two-operand one -- and otherwise costs one word
+// to materialise, shared between levels that want the same value (which is why the cost is over
+// the DISTINCT unrepresentable halves: `a - 1` really is one `setm` for both halves today). The
+// flip fires only when the negation is STRICTLY cheaper, so `a + 70000` -- whose low half is not
+// a literal, whose high half (1) is, and whose negation has neither -- stays an add chain and
+// stays one word smaller than cc1. carrylit.c's k_add70k is that control.
+static SDValue combineCarryChainConstant(SDNode *N,
+                                         TargetLowering::DAGCombinerInfo &DCI) {
+  SelectionDAG &DAG = DCI.DAG;
+  if (N->getValueType(0) != MVT::i16)
+    return SDValue();
+  // Only from the TOP of the chain: a live carry-out means somebody else reads this chain's flag
+  // and the rewrite would change what they read.
+  if (!SDValue(N, 1).use_empty())
+    return SDValue();
+
+  SmallVector<SDValue, 4> Vals;   // the non-constant addend, high to low
+  SmallVector<uint64_t, 4> Ks;    // the constant addend, high to low
+  SmallVector<SDNode *, 4> Nodes; // high to low
+  for (SDNode *Cur = N;;) {
+    unsigned Opc = Cur->getOpcode();
+    if ((Opc != ISD::ADDE && Opc != ISD::ADDC) || Cur->getValueType(0) != MVT::i16)
+      return SDValue();
+    SDValue A = Cur->getOperand(0), B = Cur->getOperand(1);
+    if (!isa<ConstantSDNode>(B)) {
+      if (!isa<ConstantSDNode>(A))
+        return SDValue();
+      std::swap(A, B);
+    }
+    Vals.push_back(A);
+    Ks.push_back(cast<ConstantSDNode>(B)->getZExtValue() & 0xffff);
+    Nodes.push_back(Cur);
+    if (Opc == ISD::ADDC)
+      break;
+    SDValue Carry = Cur->getOperand(2);
+    // the carry must come from the level below and be that level's ONLY carry reader
+    if (Carry.getResNo() != 1 || !Carry.hasOneUse() || Nodes.size() > 4)
+      return SDValue();
+    Cur = Carry.getNode();
+  }
+  std::reverse(Vals.begin(), Vals.end());
+  std::reverse(Ks.begin(), Ks.end());
+  std::reverse(Nodes.begin(), Nodes.end());
+  unsigned NL = Nodes.size();
+  if (NL < 2)
+    return SDValue();
+
+  // the negation, half by half: ~K + 1 across the whole width
+  SmallVector<uint64_t, 4> Ns(NL);
+  unsigned Carry = 1;
+  for (unsigned I = 0; I != NL; ++I) {
+    unsigned V = ((~Ks[I]) & 0xffff) + Carry;
+    Ns[I] = V & 0xffff;
+    Carry = V >> 16;
+  }
+  // DISTINCT unrepresentable halves: two levels wanting the same value share one `mov`/`setm`,
+  // which is exactly what `a - 1` does today (one `setm.w w2`, read by the add AND the addc).
+  // Spelled as a scan rather than a set because the chain is at most four levels and this file
+  // does not include SmallSet.
+  auto Cost = [](ArrayRef<uint64_t> C) {
+    unsigned Words = 0;
+    for (unsigned I = 0; I != C.size(); ++I) {
+      if (C[I] < 1024)
+        continue;
+      bool Seen = false;
+      for (unsigned J = 0; J != I; ++J)
+        Seen |= (C[J] == C[I]);
+      if (!Seen)
+        ++Words;
+    }
+    return Words;
+  };
+  if (Cost(Ns) >= Cost(Ks))
+    return SDValue();
+
+  SDLoc DL(N);
+  SDVTList VTs = DAG.getVTList(MVT::i16, MVT::Glue);
+  SmallVector<SDValue, 4> New;
+  SDValue Cur = DAG.getNode(ISD::SUBC, DL, VTs, Vals[0],
+                            DAG.getConstant(Ns[0], DL, MVT::i16));
+  New.push_back(Cur);
+  for (unsigned I = 1; I != NL; ++I) {
+    Cur = DAG.getNode(ISD::SUBE, DL, VTs, Vals[I],
+                      DAG.getConstant(Ns[I], DL, MVT::i16), Cur.getValue(1));
+    New.push_back(Cur);
+  }
+  // Replace the VALUE of every level below the top; the top is returned, so the combiner replaces
+  // it. Only the values are replaced: the old nodes' glue links stay among themselves, they lose
+  // every value user, and they are dead by the time the combiner runs its DCE.
+  for (unsigned I = 0; I + 1 != NL; ++I) {
+    DAG.ReplaceAllUsesOfValueWith(SDValue(Nodes[I], 0), New[I]);
+    DCI.AddToWorklist(Nodes[I]);
+  }
+  return New[NL - 1];
+}
+
 SDValue DSPICTargetLowering::PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) const {
+  if (N->getOpcode() == ISD::ADDE)
+    return combineCarryChainConstant(N, DCI);
   if (N->getOpcode() == DSPICISD::CMP || N->getOpcode() == DSPICISD::CMPB)
     return combineCmpThroughAssert(N, DCI.DAG);
   if (N->getOpcode() == ISD::MUL || N->getOpcode() == ISD::FADD || N->getOpcode() == ISD::FMUL)
