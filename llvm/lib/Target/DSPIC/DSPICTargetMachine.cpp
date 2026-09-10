@@ -348,4 +348,9 @@ void DSPICPassConfig::addPreEmitPass() {
   // Must run branch selection immediately preceding the asm printer.
   addPass(createDSPICPeepholeLegacyPass());
   addPass(createDSPICBranchSelectLegacyPass());
+  // trellis session 103: the compare fusion runs AFTER the branch selector, not before. It needs
+  // settled block offsets to know whether a 6-bit displacement reaches, and it is safe there
+  // because fusing only removes words -- every distance the selector already judged can shrink
+  // and none can grow.
+  addPass(createDSPICCmpFuseLegacyPass());
 }

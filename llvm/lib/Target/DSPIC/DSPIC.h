@@ -75,6 +75,18 @@ public:
 
 FunctionPass *createDSPICPeepholeLegacyPass();
 
+/// The compare fusion (cp + bra -> cpbeq/cpbne/cpblt) -- trellis session 103. A SEPARATE pass
+/// from the peephole above because it must run AFTER the branch selector: it needs settled block
+/// offsets to know whether the 6-bit displacement reaches, and running after is safe precisely
+/// because fusing only ever REMOVES words, so no distance the selector already judged can grow.
+class DSPICCmpFusePass : public RequiredPassInfoMixin<DSPICCmpFusePass> {
+public:
+  PreservedAnalyses run(MachineFunction &MF,
+                        MachineFunctionAnalysisManager &MFAM);
+};
+
+FunctionPass *createDSPICCmpFuseLegacyPass();
+
 void initializeDSPICAsmPrinterPass(PassRegistry &);
 void initializeDSPICDAGToDAGISelLegacyPass(PassRegistry &);
 

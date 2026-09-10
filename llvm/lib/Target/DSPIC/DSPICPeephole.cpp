@@ -29,6 +29,7 @@
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachinePassManager.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
+#include "llvm/Support/Debug.h" // trellis session 103: dbgs(), for -dspic-cmp-fuse-why
 #include "llvm/IR/Analysis.h"
 
 using namespace llvm;
@@ -578,6 +579,261 @@ bool DSPICPeepholeImpl::runOnMachineFunction(MachineFunction &MF) {
     Changed |= fuseRetlw(MBB);
   }
   return Changed;
+}
+
+//===----------------------------------------------------------------------===//
+// The compare fusion (trellis session 103): `cp Wb,Wn` + `bra cc,L` -> one instruction.
+//
+// Runs AFTER the branch selector so block offsets are settled. See DSPIC.h and
+// tools/dspic-llvm/steps/cmpfuse/cmpfuse-edit.py for the four measured facts it rests on; the
+// two that decide the code below are:
+//   - the fused forms WRITE NO FLAGS (measured), so SR must be dead after the branch;
+//   - the displacement is a signed 6-bit WORD field the LINKER checks, and it is numerically
+//     equal to the original branch's own displacement.
+//===----------------------------------------------------------------------===//
+
+static cl::opt<bool> CmpFuse("dspic-cmp-fuse", cl::Hidden, cl::init(false),
+    cl::desc("Fuse a register compare and the branch after it into cpbeq/cpbne/cpblt/cpbgt"));
+
+// ⛔ WHY WAS A SITE REFUSED? Session 94's -dspic-remat-why is the precedent, and this one earned
+// its keep the same way: a fixture built specifically to exercise the DISPLACEMENT guard did not
+// fuse, the range check was removed by a mutant and it STILL did not fuse, and three explanations
+// were reasoned out in a row without one of them being right. A pass with four guards has to be
+// able to say which one fired, or every refusal looks like every other refusal.
+static cl::opt<bool> CmpFuseWhy("dspic-cmp-fuse-why", cl::Hidden, cl::init(false),
+    cl::desc("Print, per candidate compare+branch site, why the fusion was or was not made"));
+
+static void why(const MachineBasicBlock &MBB, const char *What, int Detail = 0) {
+  if (!CmpFuseWhy)
+    return;
+  dbgs() << "cmp-fuse: " << MBB.getParent()->getName() << " bb." << MBB.getNumber() << ": "
+         << What;
+  if (Detail)
+    dbgs() << " (" << Detail << ")";
+  dbgs() << "\n";
+}
+
+STATISTIC(NumCmpFuse, "Number of compare+branch pairs fused into cpb forms");
+
+namespace {
+class DSPICCmpFuseImpl {
+  MachineFunction *MF = nullptr;
+  const DSPICInstrInfo *TII = nullptr;
+  const TargetRegisterInfo *TRI = nullptr;
+  SmallVector<int, 16> Off;
+
+  unsigned measure();
+
+public:
+  bool runOnMachineFunction(MachineFunction &MF);
+};
+
+class DSPICCmpFuseLegacyPass : public MachineFunctionPass {
+public:
+  static char ID;
+  DSPICCmpFuseLegacyPass() : MachineFunctionPass(ID) {}
+  bool runOnMachineFunction(MachineFunction &MF) override {
+    return DSPICCmpFuseImpl().runOnMachineFunction(MF);
+  }
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().setNoVRegs();
+  }
+  StringRef getPassName() const override { return "DSPIC Compare Fusion"; }
+};
+char DSPICCmpFuseLegacyPass::ID = 0;
+} // namespace
+
+// ⛔ MAY SR BE READ, starting at the top of this block, before something redefines it?
+//
+// This does NOT consult block live-in lists. Whether SR appears in a live-in set at pre-emit time
+// is a property of what earlier passes chose to maintain, and a fusion that is wrong when that
+// bookkeeping is stale is wrong SILENTLY -- the flags simply are not there any more. So the
+// question is answered by WALKING: each successor is scanned from its first instruction, and the
+// first instruction that reads SR refuses the fusion while the first that redefines it settles
+// that path. Anything the walk cannot settle -- a budget exhausted, a block with no successors
+// that is not a return -- refuses. Conservative in every direction that matters.
+// ⛔ AN EXPLICIT SR OPERAND IS NOT A FLAG READ -- IT IS AN ADDRESSING SENTINEL, AND READING IT AS
+// ONE MADE THIS PASS REFUSE EVERY COMPARE FOLLOWED BY A NEAR-GLOBAL LOAD.
+//
+// A near-global load is `%1:gr16 = MOV16rm $sr, @g16`, where $sr in the BASE slot is SelectAddr's
+// "no base register" sentinel. Session 94 hit the same operand from the other side and needed an
+// isIgnorableUse override for it (DSPICInstrInfo.cpp:176). Here, taking
+// MI.readsRegister(DSPIC::SR) literally refused far_eq in steps/cmpfuse/farbranch.c -- a site
+// whose whole purpose was to exercise the DISPLACEMENT guard -- and it survived a mutant that
+// removed the displacement check, because a different guard was doing the refusing.
+// ⚠ THREE EXPLANATIONS WERE REASONED OUT BEFORE THIS ONE AND ALL THREE WERE WRONG;
+// -dspic-cmp-fuse-why answered it in a single run. That is what the knob is for.
+//
+// The discriminator is principled rather than a special case for one opcode: every instruction in
+// DSPICInstrInfo.td that genuinely reads the flags declares `Uses = [SR]`, which makes the operand
+// IMPLICIT, and NO instruction lists SR in an `ins` list at all. So an explicit SR use is always
+// the sentinel, and an implicit one is always a real read.
+static bool readsFlags(const MachineInstr &MI) {
+  for (const MachineOperand &MO : MI.operands())
+    if (MO.isReg() && MO.isUse() && MO.getReg() == DSPIC::SR && MO.isImplicit())
+      return true;
+  return false;
+}
+
+static bool srMayBeRead(MachineBasicBlock *Start, const TargetRegisterInfo *TRI) {
+  SmallPtrSet<MachineBasicBlock *, 8> Seen;
+  SmallVector<MachineBasicBlock *, 8> Work;
+  Work.push_back(Start);
+  unsigned Budget = 64;
+  while (!Work.empty()) {
+    MachineBasicBlock *B = Work.pop_back_val();
+    if (!Seen.insert(B).second)
+      continue;
+    if (Budget-- == 0)
+      return true;
+    bool Settled = false;
+    for (MachineInstr &MI : *B) {
+      // inline assembly is opaque: it may read the flags without saying so.
+      if (MI.isInlineAsm() || readsFlags(MI))
+        return true;
+      if (MI.definesRegister(DSPIC::SR, TRI)) {
+        Settled = true;
+        break;
+      }
+    }
+    if (Settled)
+      continue;
+    if (B->succ_empty()) {
+      // a block that returns observes no flag; anything else that simply stops is unknown.
+      if (!B->isReturnBlock())
+        return true;
+      continue;
+    }
+    for (MachineBasicBlock *S : B->successors())
+      Work.push_back(S);
+  }
+  return false;
+}
+
+unsigned DSPICCmpFuseImpl::measure() {
+  MF->RenumberBlocks();
+  Off.assign(MF->getNumBlockIDs(), 0);
+  unsigned Total = 0;
+  for (MachineBasicBlock &MBB : *MF) {
+    Off[MBB.getNumber()] = Total;
+    for (MachineInstr &MI : MBB)
+      Total += TII->getInstSizeInBytes(MI);
+  }
+  return Total;
+}
+
+bool DSPICCmpFuseImpl::runOnMachineFunction(MachineFunction &mf) {
+  if (!CmpFuse)
+    return false;
+  MF = &mf;
+  TII = static_cast<const DSPICInstrInfo *>(MF->getSubtarget().getInstrInfo());
+  TRI = MF->getSubtarget().getRegisterInfo();
+  measure();
+
+  SmallVector<std::pair<MachineInstr *, MachineInstr *>, 8> Work;
+  SmallVector<unsigned, 8> Opc;
+
+  for (MachineBasicBlock &MBB : *MF) {
+    if (MBB.size() < 2)
+      continue;
+    MachineInstr *Br = &MBB.back();
+    if (Br->getOpcode() != DSPIC::JCC)
+      continue;
+    MachineInstr *Cmp = &*std::prev(Br->getIterator());
+    bool Byte;
+    if (Cmp->getOpcode() == DSPIC::CMP16rr)
+      Byte = false;
+    else if (Cmp->getOpcode() == DSPIC::CMP8rr)
+      Byte = true;
+    else
+      continue;
+
+    // the condition. ⛔ ONLY FOUR MAP. The unsigned conditions (COND_HS/COND_LO, printed `c`/`nc`
+    // and spelled geu/ltu by our own printer) have NO cpb form in the ISA, and COND_GE has none
+    // either -- cpb offers only > and <, and "branch if not less" is not among them; inverting it
+    // means swapping the successors, which is a layout change and not a peephole. Both are
+    // refused here BY NAME so a later session does not close the gap by reaching for cpblt.
+    unsigned CC = Br->getOperand(1).getImm();
+    unsigned Fused;
+    switch (CC) {
+    case DSPICCC::COND_E:  Fused = Byte ? DSPIC::CPBEQ8 : DSPIC::CPBEQ16; break;
+    case DSPICCC::COND_NE: Fused = Byte ? DSPIC::CPBNE8 : DSPIC::CPBNE16; break;
+    case DSPICCC::COND_L:  Fused = Byte ? DSPIC::CPBLT8 : DSPIC::CPBLT16; break;
+    default:
+      // COND_HS, COND_LO: unsigned, no form. COND_GE, COND_N: no direct form.
+      why(MBB, "REFUSED: condition has no cpb form", (int)CC);
+      continue;
+    }
+
+    // ⛔ SR MUST BE DEAD AFTER THE BRANCH -- the one guard this row cannot do without. The
+    // compare defines the flags and the branch consumes them; the fused form defines NOTHING
+    // (measured, steps/exec/cmpprobe.c), so a later reader would see whatever came before.
+    bool MayRead = false;
+    for (MachineBasicBlock *S : MBB.successors())
+      if (srMayBeRead(S, TRI))
+        MayRead = true;
+    if (MayRead) {
+      why(MBB, "REFUSED: SR may be read after the branch");
+      continue;
+    }
+
+    // ⛔ THE ASSEMBLER REFUSES A cpb THAT FOLLOWS A `repeat` -- F_CANNOT_FOLLOW_REPEAT in the
+    // vendor's own opcode table (pic30-opc.c:6209), diagnosed BY NAME in tc-pic30.c:9937. Our own
+    // repeats are fused two-line pseudos (the divide, the block copy) so nothing can land between
+    // them, and the compare is never the repeated instruction -- but an inline-asm `repeat` is
+    // opaque, and the guard costs one comparison against a build failure on real firmware.
+    if (Cmp != &MBB.front()) {
+      MachineInstr &Prev = *std::prev(Cmp->getIterator());
+      if (Prev.isInlineAsm() || Prev.getOpcode() == DSPIC::REPEATdiv) {
+        why(MBB, "REFUSED: the compare follows inline asm or a repeat");
+        continue;
+      }
+    }
+
+    // the displacement, in WORDS, of the original branch -- which is the fused form's own.
+    MachineBasicBlock *Dest = Br->getOperand(0).getMBB();
+    int End = Off[MBB.getNumber()];
+    for (MachineInstr &MI : MBB)
+      End += TII->getInstSizeInBytes(MI);
+    int Bytes = Off[Dest->getNumber()] - End;
+    // ⚠ FUSION ONLY SHRINKS, so a distance in reach now is in reach after every other fusion in
+    // this function; no fixed point is needed. Measured bounds: +31 links, +32 is refused by the
+    // linker (steps/cmpfuse/as-range2.sh).
+    int Words = Bytes / 2;
+    if (Words < -32 || Words > 31) {
+      why(MBB, "REFUSED: displacement out of the 6-bit reach, words", Words);
+      continue;
+    }
+    why(MBB, "FUSED, displacement words", Words);
+
+    Work.push_back({Cmp, Br});
+    Opc.push_back(Fused);
+  }
+
+  if (Work.empty())
+    return false;
+  for (unsigned i = 0; i != Work.size(); ++i) {
+    MachineInstr *Cmp = Work[i].first, *Br = Work[i].second;
+    BuildMI(*Br->getParent(), *Cmp, Br->getDebugLoc(), TII->get(Opc[i]))
+        .add(Cmp->getOperand(0))
+        .add(Cmp->getOperand(1))
+        .addMBB(Br->getOperand(0).getMBB());
+    Cmp->eraseFromParent();
+    Br->eraseFromParent();
+    ++NumCmpFuse;
+  }
+  return true;
+}
+
+FunctionPass *llvm::createDSPICCmpFuseLegacyPass() {
+  return new DSPICCmpFuseLegacyPass();
+}
+
+PreservedAnalyses DSPICCmpFusePass::run(MachineFunction &MF,
+                                        MachineFunctionAnalysisManager &MFAM) {
+  if (!DSPICCmpFuseImpl().runOnMachineFunction(MF))
+    return PreservedAnalyses::all();
+  return getMachineFunctionPassPreservedAnalyses();
 }
 
 PreservedAnalyses DSPICPeepholePass::run(MachineFunction &MF,

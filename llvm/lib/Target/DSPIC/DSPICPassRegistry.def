@@ -26,5 +26,6 @@ MODULE_PASS("dspic-asm-printer-end", DSPICAsmPrinterEndPass())
 MACHINE_FUNCTION_PASS("dspic-asm-printer", DSPICAsmPrinterPass())
 MACHINE_FUNCTION_PASS("dspic-isel", DSPICISelDAGToDAGPass(*this, getOptLevel()))
 MACHINE_FUNCTION_PASS("dspic-peephole", DSPICPeepholePass())
+MACHINE_FUNCTION_PASS("dspic-cmp-fuse", DSPICCmpFusePass())
 MACHINE_FUNCTION_PASS("dspic-branch-select", DSPICBranchSelectPass())
 #undef MACHINE_FUNCTION_PASS

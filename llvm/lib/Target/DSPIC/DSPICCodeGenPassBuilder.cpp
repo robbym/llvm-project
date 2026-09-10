@@ -56,6 +56,8 @@ Error DSPICCodeGenPassBuilder::addInstSelector(PassManagerWrapper &PMW) {
 void DSPICCodeGenPassBuilder::addPreEmitPass(PassManagerWrapper &PMW) {
   addMachineFunctionPass(DSPICPeepholePass(), PMW);
   addMachineFunctionPass(DSPICBranchSelectPass(), PMW);
+  // trellis session 103: after the branch selector -- see DSPICTargetMachine.cpp for why.
+  addMachineFunctionPass(DSPICCmpFusePass(), PMW);
 }
 
 void DSPICCodeGenPassBuilder::addAsmPrinterBegin(PassManagerWrapper &PMW) {

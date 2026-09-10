@@ -1360,6 +1360,33 @@ let hasSideEffects = 1, isTerminator = 1 in {
   def BTSS8f   : DSPICFrameInst<(outs), (ins memsrc:$f, i16imm:$k), 2, "btss.b\t$f,$k">;
   }
 }
+// trellis session 103: the compare-and-branch forms. `cp Wb,Wn` + `bra cc,L` in one word.
+//
+// ⛔ NO Defs AND NO Uses OF SR, AND THAT IS MEASURED, NOT ASSUMED. steps/exec/cmpprobe.c on the
+// device model reads f_cpbne = f_cpbgt = 0 where a plain `cp` in the identical harness reads 1:
+// these instructions leave the status flags exactly as they found them. Since the CMP16rr they
+// replace carries `Defs = [SR]`, the fusion REMOVES a flag definition, and DSPICCmpFuse refuses
+// any site where SR is live out of the branch.
+//
+// The operands are the compare's own, in the compare's own order: `cpblt $a,$b,L` branches when
+// $a < $b SIGNED, measured with 0x8000 against 0x0001 (the pair whose signed and unsigned
+// orderings disagree). ⛔ THE ISA HAS NO UNSIGNED TWIN -- there is deliberately no CPBLTU here.
+// The `.b` forms compare the LOW BYTE only (0x1234 against 0xff34 branches; measured).
+//
+// isTerminator without isBranch, on the BTSC precedent above: the block already carries both
+// successors from the JCC this replaces, and analyzeBranch declining ("a terminator that isn't a
+// branch") is what keeps the verifier from demanding a branch target for the second successor.
+let hasSideEffects = 0, isTerminator = 1 in {
+  def CPBEQ16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b, jmptarget:$dst), 2, "cpbeq\t$a,$b,$dst">;
+  def CPBNE16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b, jmptarget:$dst), 2, "cpbne\t$a,$b,$dst">;
+  def CPBLT16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b, jmptarget:$dst), 2, "cpblt\t$a,$b,$dst">;
+  def CPBGT16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b, jmptarget:$dst), 2, "cpbgt\t$a,$b,$dst">;
+  def CPBEQ8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b,  jmptarget:$dst), 2, "cpbeq.b\t$a,$b,$dst">;
+  def CPBNE8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b,  jmptarget:$dst), 2, "cpbne.b\t$a,$b,$dst">;
+  def CPBLT8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b,  jmptarget:$dst), 2, "cpblt.b\t$a,$b,$dst">;
+  def CPBGT8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b,  jmptarget:$dst), 2, "cpbgt.b\t$a,$b,$dst">;
+}
+
 // a bit field as a value, and the find-first-one pair
 let Defs = [SR] in {
   def BFEXT16rr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs, i16imm:$k, i16imm:$n), 2, "bfext\t$k,$n,$rs,$rd">;
