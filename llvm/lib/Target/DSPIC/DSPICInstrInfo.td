@@ -1834,12 +1834,31 @@ let isCodeGenOnly = 1 in {
 def SDT_DSPICBfins : SDTypeProfile<1, 4, [SDTCisVT<0, i16>, SDTCisVT<1, i16>, SDTCisVT<2, i16>,
                                           SDTCisVT<3, i16>, SDTCisVT<4, i16>]>;
 def DSPICbfins : SDNode<"DSPICISD::BFINS", SDT_DSPICBfins>;
+// trellis session 101: the literal source of BFINSL is an UNSIGNED 8-bit field of the instruction.
+// The value reaching here is already `C >> k` -- the field's contents, right-justified -- so the
+// test is on that, not on the original constant.
+def bfinsimm8 : PatLeaf<(imm), [{
+  return !N->getAPIntValue().isNegative() && N->getZExtValue() <= 255;
+}]>;
 
 let AddedComplexity = 25 in {
   def BFINS16rr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$old, GR16:$v, i16imm:$k, i16imm:$n),
                                  4, "bfins\t$k,$n,$v,$rd"> {
     let Constraints = "$old = $rd";
     let Pattern = [(set GR16:$rd, (DSPICbfins GR16:$old, GR16:$v, timm:$k, timm:$n))];
+  }
+  // trellis session 101: the LITERAL-source form, BFINSL, for a register destination. The ISA
+  // gives BFINSL the `P_SRC_REG` destination class -- a register or an indirect, and NOT a file
+  // register -- so a near global still materialises its value first, exactly as cc1 does
+  // (`mov #9,w0 ; bfins #4,#5,w0,_bk`). ⚠ AddedComplexity ABOVE the enclosing 25 so a constant
+  // that fits eight bits takes this form instead of being put in a register.
+  // ⚠ cc1 does NOT take this one: it keeps and/ior for `(x & ~0x1F0) | 0x90` in a register, three
+  // words, where `bfins #4,#5,#9,w0` is two.
+  let AddedComplexity = 30 in
+  def BFINSL16ri : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$old, i16imm:$v, i16imm:$k, i16imm:$n),
+                                  4, "bfins\t$k,$n,$v,$rd"> {
+    let Constraints = "$old = $rd";
+    let Pattern = [(set GR16:$rd, (DSPICbfins GR16:$old, bfinsimm8:$v, timm:$k, timm:$n))];
   }
   let mayLoad = 1, mayStore = 1 in {
   def BFINS16fr : DSPICFrameInst<(outs), (ins memdst:$f, GR16:$v, i16imm:$k, i16imm:$n),
@@ -1849,6 +1868,14 @@ let AddedComplexity = 25 in {
   def BFINS16nr : DSPICFrameInst<(outs), (ins GR16:$p, GR16:$v, i16imm:$k, i16imm:$n),
                                  4, "bfins\t$k,$n,$v,[$p]"> {
     let Pattern = [(store (DSPICbfins (i16 (load GR16:$p)), GR16:$v, timm:$k, timm:$n), GR16:$p)];
+  }
+  // trellis session 101: and with an INDIRECT destination, which is where the row pays most --
+  // `p->mid = 9` is ONE word here against four for the and/ior pair.
+  let AddedComplexity = 30 in
+  def BFINSL16ni : DSPICFrameInst<(outs), (ins GR16:$p, i16imm:$v, i16imm:$k, i16imm:$n),
+                                  4, "bfins\t$k,$n,$v,[$p]"> {
+    let Pattern = [(store (DSPICbfins (i16 (load GR16:$p)), bfinsimm8:$v, timm:$k, timm:$n),
+                          GR16:$p)];
   }
   }
 }

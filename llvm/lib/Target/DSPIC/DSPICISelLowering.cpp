@@ -1080,6 +1080,22 @@ static SDValue combineBitfieldInsert(SDNode *N, SelectionDAG &DAG) {
       if (!SC || SC->getZExtValue() != k)
         return SDValue();
       V = B.getOperand(0);
+    } else if (auto *VC = dyn_cast<ConstantSDNode>(B)) {
+      // ⛔ trellis session 101: a bit-field assigned a CONSTANT. With a constant value the whole
+      // right side has folded to a bare constant by the time this combine runs, so the AND and
+      // SHL arms above can never see it, and session 88 recorded the case as the one bfins row
+      // this port did not cover.
+      //
+      // ⛔ THE CONDITION IS THAT THE CONSTANT HAS NO BITS OUTSIDE THE FIELD. If it has any, this
+      // `or` also sets bits the mask cleared -- it is not a bit-field insert, and making one of it
+      // DROPS those bits, silently and at every optimisation level. `k_bad` in
+      // prints/l1f/cc1/bfk.c is the control (0x0210 against the field 0x01F0) and mutant M2 is
+      // this test removed.
+      uint16_t C = (uint16_t)VC->getZExtValue();
+      if (C & (uint16_t)~field)
+        return SDValue();
+      // Once that holds, C >> k fits n bits by construction; a range check here would be ceremony.
+      V = DAG.getConstant(C >> k, SDLoc(N), MVT::i16);
     } else {
       return SDValue();
     }
