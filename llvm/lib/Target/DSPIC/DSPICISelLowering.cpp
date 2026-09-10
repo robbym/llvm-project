@@ -1308,6 +1308,7 @@ void DSPICTargetLowering::computeKnownBitsForTargetNode(const SDValue Op, KnownB
                                                         const SelectionDAG &DAG,
                                                         unsigned Depth) const {
   Known.resetAll();
+  unsigned R = Op.getResNo();
   switch (Op.getOpcode()) {
   case DSPICISD::FLAG2BOOL:
     // `clr ; bsw ; [btg #0]`: a 0/1 word
@@ -1319,8 +1320,108 @@ void DSPICTargetLowering::computeKnownBitsForTargetNode(const SDValue Op, KnownB
     Known = KT.intersectWith(KF);
     break;
   }
+  // ── trellis session 101: the details that were missing. Each is read off the node's SELECTION
+  // PATTERN in DSPICInstrInfo.td, which is the authority on operand and result order.
+  case DSPICISD::PSVLD8Z:
+    // A BYTE read through the PSV window whose i16 result is ZERO-extended by the windowed
+    // instruction itself (session 90: `mov.b [w],w` does not zero the high byte, so the read
+    // carries the `ze`). The top eight bits are therefore zero by construction.
+    Known.Zero.setBitsFrom(8);
+    break;
+  case DSPICISD::SHL32_1: {
+    // (outs lo2, hi2), (ins lo, hi): {lo2,hi2} = {lo,hi} << 1.
+    KnownBits Lo = DAG.computeKnownBits(Op.getOperand(0), Depth + 1);
+    KnownBits Hi = DAG.computeKnownBits(Op.getOperand(1), Depth + 1);
+    KnownBits One(16);
+    One.One = APInt(16, 1); One.Zero = ~APInt(16, 1);
+    KnownBits Fifteen(16);
+    Fifteen.One = APInt(16, 15); Fifteen.Zero = ~APInt(16, 15);
+    if (R == 0)
+      Known = KnownBits::shl(Lo, One);              // lo2 = lo << 1
+    else
+      Known = KnownBits::shl(Hi, One) |             // hi2 = (hi << 1) | (lo >> 15)
+              KnownBits::lshr(Lo, Fifteen);
+    break;
+  }
+  case DSPICISD::SRL32_1:
+  case DSPICISD::SRA32_1: {
+    // (outs lo2, hi2), (ins lo, hi): {lo2,hi2} = {lo,hi} >> 1, logical or arithmetic in the HIGH
+    // half only -- the low half's incoming bit is the high half's bit 0 either way.
+    KnownBits Lo = DAG.computeKnownBits(Op.getOperand(0), Depth + 1);
+    KnownBits Hi = DAG.computeKnownBits(Op.getOperand(1), Depth + 1);
+    KnownBits One(16);
+    One.One = APInt(16, 1); One.Zero = ~APInt(16, 1);
+    KnownBits Fifteen(16);
+    Fifteen.One = APInt(16, 15); Fifteen.Zero = ~APInt(16, 15);
+    if (R == 0)
+      Known = KnownBits::lshr(Lo, One) |            // lo2 = (lo >> 1) | (hi << 15)
+              KnownBits::shl(Hi, Fifteen);
+    else
+      Known = Op.getOpcode() == DSPICISD::SRL32_1   // hi2 = hi >> 1, logical or arithmetic
+                  ? KnownBits::lshr(Hi, One)
+                  : KnownBits::ashr(Hi, One);
+    break;
+  }
+  case DSPICISD::BFINS: {
+    // (base, v, k, n): (base & ~field) | ((v << k) & field), field = ((1<<n)-1) << k. Outside the
+    // field the result's bits are BASE's; inside they are (v << k)'s. Session 88 built this node
+    // only for a shape it had validated, so the mask arithmetic here is a restatement of that.
+    auto *CK = dyn_cast<ConstantSDNode>(Op.getOperand(2));
+    auto *CN = dyn_cast<ConstantSDNode>(Op.getOperand(3));
+    if (!CK || !CN)
+      break;
+    unsigned k = CK->getZExtValue(), n = CN->getZExtValue();
+    if (n == 0 || k + n > 16)
+      break;
+    APInt Field = APInt::getBitsSet(16, k, k + n);
+    KnownBits Base = DAG.computeKnownBits(Op.getOperand(0), Depth + 1);
+    KnownBits V = DAG.computeKnownBits(Op.getOperand(1), Depth + 1);
+    KnownBits Shifted(16);
+    KnownBits Kk(16);
+    Kk.One = APInt(16, k); Kk.Zero = ~APInt(16, k);
+    Shifted = KnownBits::shl(V, Kk);
+    Known.Zero = (Base.Zero & ~Field) | (Shifted.Zero & Field);
+    Known.One = (Base.One & ~Field) | (Shifted.One & Field);
+    break;
+  }
+  case DSPICISD::UDIVREM: {
+    // (outs q, r), (ins n, d). LLVM's own helpers, so no hand-rolled bound is trusted here.
+    KnownBits N = DAG.computeKnownBits(Op.getOperand(0), Depth + 1);
+    KnownBits Dv = DAG.computeKnownBits(Op.getOperand(1), Depth + 1);
+    Known = R == 0 ? KnownBits::udiv(N, Dv) : KnownBits::urem(N, Dv);
+    break;
+  }
   default:
     break;
+  }
+}
+
+// trellis session 101: this did not exist. The two nodes whose result has a known sign-bit run,
+// plus the select, which can only promise what its weaker arm promises.
+unsigned DSPICTargetLowering::ComputeNumSignBitsForTargetNode(SDValue Op,
+                                                             const APInt &DemandedElts,
+                                                             const SelectionDAG &DAG,
+                                                             unsigned Depth) const {
+  switch (Op.getOpcode()) {
+  case DSPICISD::PSVLD8S:
+    // A byte read through the PSV window, SIGN-extended by the windowed instruction: bits 15..7
+    // are copies of bit 7. Nine bits.
+    return 9;
+  case DSPICISD::SRA32_1:
+    // (outs lo2, hi2), (ins lo, hi). Only the HIGH result is an arithmetic shift; the low result
+    // takes its top bit from the high operand's bit 0 and promises nothing.
+    if (Op.getResNo() == 1) {
+      unsigned S = DAG.ComputeNumSignBits(Op.getOperand(1), Depth + 1);
+      return std::min(S + 1, 16u);
+    }
+    return 1;
+  case DSPICISD::SELECT_CC: {
+    unsigned T = DAG.ComputeNumSignBits(Op.getOperand(0), Depth + 1);
+    unsigned F = DAG.ComputeNumSignBits(Op.getOperand(1), Depth + 1);
+    return std::min(T, F);
+  }
+  default:
+    return 1;
   }
 }
 

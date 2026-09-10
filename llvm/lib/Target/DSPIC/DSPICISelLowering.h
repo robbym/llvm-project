@@ -164,6 +164,12 @@ namespace llvm {
     void computeKnownBitsForTargetNode(const SDValue Op, KnownBits &Known,
                                        const APInt &DemandedElts, const SelectionDAG &DAG,
                                        unsigned Depth = 0) const override;
+    // trellis session 101: this override did not exist, so every target node promised one sign
+    // bit. PSVLD8S and the arithmetic 32-bit shift do better, and the select can promise what its
+    // weaker arm does.
+    unsigned ComputeNumSignBitsForTargetNode(SDValue Op, const APInt &DemandedElts,
+                                             const SelectionDAG &DAG,
+                                             unsigned Depth = 0) const override;
     // Session 90 (the data model): no load/store expansion of a program-memory block copy, and
     // a program-memory global in an asm "i" operand stays the symbol (an i16 target address).
     bool findOptimalMemOpLowering(LLVMContext &Context, std::vector<EVT> &MemOps,
