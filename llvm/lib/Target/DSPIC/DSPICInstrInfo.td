@@ -1441,6 +1441,30 @@ multiclass MemALU<string asmw, string asmb, SDPatternOperator node> {
   }
   }
 }
+// ── trellis session 101: `subbr` WITH A MEMORY SOURCE -- the one carry/borrow form that buys a
+// codegen row. `subbr Wb,Ws,Wd` is Ws - Wb - borrow: memory MINUS register, the shape
+// `subb Wb,[Ws],Wd` cannot express and the reason cc1 emits subbr only against `[wN]`. This port
+// had emitted the mnemonic zero times before this def.
+//
+// ⛔ Defs AND Uses. MemALU declares Defs=[SR] with no Uses -- right for add/and/ior/xor, a silent
+// miscompile here: without Uses=[SR] the scheduler may move this away from the `sub` that produced
+// the borrow. The register form already says so (`defm SUBC : Arith<..., sube, 0, [SR]>`), and the
+// Arith multiclass's own comment is "ONLY for the ops that do not READ the flags". Mutant M2 in
+// steps/carry/ removes the Uses.
+//
+// ⚠ The addc/subb memory-source twins were implemented, MEASURED and dropped: `P_SRC_REG` already
+// admits an indirect operand, so ADDC_W/SUBB_W were covered from the register form and those defs
+// bought no row -- while costing stn3255 12 bytes, because `[Wn]` has no displacement and a 32-bit
+// high word at +2 must have its address materialised to fold. See the header of this script.
+// ⚠ The memory-DESTINATION form is absent because a glued node cannot fold both ends through this
+// pattern shape (ScheduleDAGSDNodes' "Node already inserted!"), not because the machine lacks it.
+let Defs = [SR], Uses = [SR], AddedComplexity = 12, mayLoad = 1 in {
+  def SUBBRM16rn : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rb, GR16:$p), 2, "subbr\t$rb,[$p],$rd"> {
+    let Pattern = [(set GR16:$rd, (sube (i16 (load GR16:$p)), GR16:$rb))]; }
+  def SUBBRM8rn  : DSPICFrameInst<(outs GR8:$rd), (ins GR8:$rb, GR16:$p), 2, "subbr.b\t$rb,[$p],$rd"> {
+    let Pattern = [(set GR8:$rd, (sube (i8 (load GR16:$p)), GR8:$rb))]; }
+}
+
 let AddedComplexity = 12 in {
 defm ADDM : MemALU<"add.w", "add.b", add>;
 defm ANDM : MemALU<"and.w", "and.b", and>;
