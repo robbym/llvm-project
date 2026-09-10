@@ -1396,6 +1396,14 @@ def inc1f8 : PatFrag<(ops node:$x), (add node:$x, (i8 1))>;
 def dec1f8 : PatFrag<(ops node:$x), (add node:$x, (i8 -1))>;
 def negf8  : PatFrag<(ops node:$x), (sub (i8 0), node:$x)>;
 def comf8  : PatFrag<(ops node:$x), (xor node:$x, (i8 -1))>;
+// trellis session 101: the fragments class (a) was missing. inc2/dec2 at byte width, and the two
+// rotate-by-one directions, which arrive as NATIVE rotl/rotr nodes at both widths. The shift-by-one
+// fragments are NOT duplicated at byte width -- see steps/filerm/filerm-edit.py: i8 SRL is not
+// promoted here, so lsr1ff/asr1ff/sl1f serve both widths as they stand.
+def inc2f8  : PatFrag<(ops node:$x), (add node:$x, (i8 2))>;
+def dec2f8  : PatFrag<(ops node:$x), (add node:$x, (i8 -2))>;
+def rotl1f  : PatFrag<(ops node:$x), (rotl node:$x, (i16 1))>;
+def rotr1f  : PatFrag<(ops node:$x), (rotr node:$x, (i16 1))>;
 
 // A. the two-input ALU ops with a memory operand. Source: `op Wb,[Wn],Wd` (untied); the
 // post-increment/decrement source forms carry the pointer's writeback and are selected in
@@ -1868,6 +1876,30 @@ let AddedComplexity = 20 in {
   def INC8f   : FileU8<"inc.b",   inc1f8>;
   def DEC8f   : FileU8<"dec.b",   dec1f8>;
   def COM8f   : FileU8<"com.b",   comf8>;
+  // ── trellis session 101: class (a)'s missing members. ────────────────────────────────────────
+  // The byte twins of the word members above, plus `neg` and the two rotates, which were absent at
+  // BOTH widths. Same pattern shape, same AddedComplexity; measured against cc1 on byteops.c,
+  // where `g >>= 1` cost four words to cc1's one.
+  def INC28f  : FileU8<"inc2.b",  inc2f8>;
+  def DEC28f  : FileU8<"dec2.b",  dec2f8>;
+  def NEG16f  : FileU16<"neg.w",  negf>;
+  def NEG8f   : FileU8<"neg.b",   negf8>;
+  def RLNC16f : FileU16<"rlnc.w", rotl1f>;
+  def RRNC16f : FileU16<"rrnc.w", rotr1f>;
+  def RLNC8f  : FileU8<"rlnc.b",  rotl1f>;
+  def RRNC8f  : FileU8<"rrnc.b",  rotr1f>;
+  // ⛔ THE BYTE SHIFTS TAKE THE PLAIN i8 NODE, AND THE FIRST VERSION OF THIS ROW GOT THAT WRONG.
+  // Reasoning from the register patterns at DSPICInstrInfo.td:1183-1185, which are written
+  //     (i8 (trunc (srl (i16 (zext GR8:$x)), (i16 1))))
+  // I wrote the file patterns in that widened shape, and they matched NOTHING: the defs existed,
+  // TableGen accepted them, the build was clean, and `lsr.b _g` never appeared. Dumping the DAG
+  // (-mllvm -debug-only=isel) settles it in one command -- i8 SRL is NOT promoted here:
+  //     t7: i8 = srl t4, Constant:i16<1>
+  // so the shift-by-one fragments already in this file serve both widths unchanged, the amount
+  // being i16 in each. That is mutant M2: the widened shape, which assembles and is inert.
+  def SL18f   : FileU8<"sl.b",    sl1f>;
+  def LSR8f   : FileU8<"lsr.b",   lsr1ff>;
+  def ASR8f   : FileU8<"asr.b",   asr1ff>;
   // clr / setm write a constant to the place -- no load
   let mayStore = 1 in {
   def CLR16f  : DSPICFrameInst<(outs), (ins memdst:$f), 2, "clr.w\t$f"> {
