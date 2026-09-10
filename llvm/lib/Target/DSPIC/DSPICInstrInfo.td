@@ -1125,8 +1125,8 @@ def PUSHRCOUNT : DSPICFrameInst<(outs), (ins), 2, "push\t_RCOUNT">;
 let Defs = [SP], Uses = [SP], mayLoad = 1, isCodeGenOnly = 1 in
 def POPRCOUNT  : DSPICFrameInst<(outs), (ins), 2, "pop\t_RCOUNT">;
 let isCodeGenOnly = 1, Defs = [R12, R13, SR], Uses = [R12] in {
-  def DIVUW : DSPICFrameInst<(outs), (ins GR16:$d), 2, "div.uw\tw0,$d">;
-  def DIVSW : DSPICFrameInst<(outs), (ins GR16:$d), 2, "div.sw\tw0,$d">;
+  def DIVUW : DSPICFrameInst<(outs), (ins GR16_DIV:$d), 2, "div.uw\tw0,$d">;
+  def DIVSW : DSPICFrameInst<(outs), (ins GR16_DIV:$d), 2, "div.sw\tw0,$d">;
   // ⛔ trellis session 99: the `repeat` and the divide it drives are ONE instruction of two asm
   // lines (Size 4), exactly as the block-copy forms below are and for exactly the same reason --
   // so that NO PASS can get between them. They were two instructions until now, and the
@@ -1134,16 +1134,16 @@ let isCodeGenOnly = 1, Defs = [R12, R13, SR], Uses = [R12] in {
   // `mov #2,w0 ; repeat` with the `div.uw` left behind in the caller, which the assembler
   // refused with "'return' cannot follow a REPEAT". An outlined region ending in anything the
   // assembler accepts would have divided wrongly in silence.
-  def DIVUWrep : DSPICFrameInst<(outs), (ins GR16:$d), 4,
+  def DIVUWrep : DSPICFrameInst<(outs), (ins GR16_DIV:$d), 4,
                                 "repeat\t#__TARGET_DIVIDE_CYCLES\n\tdiv.uw\tw0,$d">;
-  def DIVSWrep : DSPICFrameInst<(outs), (ins GR16:$d), 4,
+  def DIVSWrep : DSPICFrameInst<(outs), (ins GR16_DIV:$d), 4,
                                 "repeat\t#__TARGET_DIVIDE_CYCLES\n\tdiv.sw\tw0,$d">;
 }
 let isCodeGenOnly = 1, usesCustomInserter = 1, Defs = [SR] in {
-  def UDIVREM16 : Pseudo<(outs GR16:$q, GR16:$r), (ins GR16:$n, GR16:$d), "# UDIVREM16",
-                         [(set GR16:$q, GR16:$r, (DSPICudivrem GR16:$n, GR16:$d))]>;
-  def SDIVREM16 : Pseudo<(outs GR16:$q, GR16:$r), (ins GR16:$n, GR16:$d), "# SDIVREM16",
-                         [(set GR16:$q, GR16:$r, (DSPICsdivrem GR16:$n, GR16:$d))]>;
+  def UDIVREM16 : Pseudo<(outs GR16:$q, GR16:$r), (ins GR16:$n, GR16_DIV:$d), "# UDIVREM16",
+                         [(set GR16:$q, GR16:$r, (DSPICudivrem GR16:$n, GR16_DIV:$d))]>;
+  def SDIVREM16 : Pseudo<(outs GR16:$q, GR16:$r), (ins GR16:$n, GR16_DIV:$d), "# SDIVREM16",
+                         [(set GR16:$q, GR16:$r, (DSPICsdivrem GR16:$n, GR16_DIV:$d))]>;
 }
 
 // L1f-d increment 3 (trellis session 86): the widening i16xi16->i32 multiply. `mul.ss`/`mul.uu`

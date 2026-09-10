@@ -115,6 +115,19 @@ def GR16_TC : RegisterClass<"DSPIC", [i16], 16,
 // trellis L1f-d, session 86). w14 (fp) and w15 (sp) are reserved and excluded.
 def GR16_EVEN : RegisterClass<"DSPIC", [i16], 16, (add R12, R14, R11, W6, R10, R8, R6)>;
 
+// trellis session 101: the DIVISOR of the 16-bit hardware divide -- w2..w14, never w1. The divide
+// writes W1 -- ultimately the remainder -- FROM THE FIRST CYCLE of its repeat loop, so a divisor in
+// W1 is read corrupted. ⛔ MEASURED on the device model, not inferred from the vendor's constraint
+// (steps/torture/divprobe.c, inline asm, no allocator involved): 1000/7 unsigned gives q=65423
+// r=65527 with the divisor in w1 against q=142 r=6 in w2; 50/-5 signed gives q=-7 r=-4 against
+// q=-10 r=0. The assembler ACCEPTS `div.sw w0,w1` silently, so it is no oracle here. The vendor's
+// constraints.md: "`b' is the class of divide support registers (W1)" and "`e' is the class of
+// non-divide support general registers (W2..W14)"; its divmodhi4_clobber_16 (and the unsigned twin)
+// takes the divisor as `pic30_ereg_operand "e"` and the dividend as "r". GCC torture 20030128-1
+// (50 / -5 with the divisor allocated to w1) aborted on the simulator for exactly this.
+def GR16_DIV : RegisterClass<"DSPIC", [i16], 16,
+  (add R14, R15, R11, W5, W6, W7, R10, R9, R8, R7, R6, R5, R4)>;
+
 // W0 alone, as a byte: the only register a byte DIRECT move reaches (`mov.b f,WREG` /
 // `mov.b WREG,f`; probe7: `mov.b _x,w1` refused). Trellis L1f-g/h, session 87.
 def GR8_W0 : RegisterClass<"DSPIC", [i8], 8, (add R12B)>;
