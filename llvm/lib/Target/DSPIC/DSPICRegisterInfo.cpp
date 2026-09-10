@@ -147,11 +147,35 @@ bool DSPICRegisterInfo::shouldCoalesce(MachineInstr *MI, const TargetRegisterCla
                                        LiveIntervals &LIS) const {
   if (!NewRC || NewRC->getNumRegs() > 1)
     return true;
+  // The one register this class can ever hold.
+  MCRegister Only = NewRC->getRegister(0);
   for (const MachineOperand &MO : MI->operands()) {
     if (!MO.isReg() || !MO.getReg().isVirtual() || !LIS.hasInterval(MO.getReg()))
       continue;
-    if (!LIS.intervalIsInOneMBB(LIS.getInterval(MO.getReg())))
+    const LiveInterval &VI = LIS.getInterval(MO.getReg());
+    if (!LIS.intervalIsInOneMBB(VI))
       return false;
+    // ⛔ trellis session 101: the block test above is not enough, and `string-opt-5` is the
+    // witness -- our compiler REFUSED it ("ran out of registers") where the vendor's compiles it,
+    // on a conflict entirely inside one block:
+    //     %154:gr16_w0 = INC16fW $sr, @y   ; the result is forced into W0
+    //     $r12 = MOV16ri @buf              ; $r12 IS W0, claimed for a call argument
+    //     $r14 = COPY %154                 ; while %154 can live nowhere but W0
+    // Ask the question the allocator will later fail on: does this value's interval overlap the
+    // live range of the single register its class permits? If so the join creates a conflict that
+    // cannot be evicted or split, because the class has no second register to move to.
+    // ⚠ RESTRICTED ON PURPOSE (the operator's standing rule): where W0 is NOT otherwise claimed
+    // across the interval, the join still happens and the emitted code is unchanged.
+    for (MCRegUnit Unit : regunits(Only)) {
+      // ⛔ getRegUnit, NOT getCachedRegUnit. The cached form was tried first and the whole check
+      // was INERT: string-opt-5 still failed, because the coalescer has not necessarily queried
+      // W0's unit range by the time it asks the target about this join, and a null cache read
+      // silently means "no conflict". getRegUnit computes it on demand. ⚠ That the inert version
+      // BUILT and CHANGED NOTHING is the reason this file's expectation named "the check may be
+      // inert" as a way to be wrong before either version ran.
+      if (VI.overlaps(LIS.getRegUnit(Unit)))
+        return false;
+    }
   }
   return true;
 }
