@@ -749,18 +749,27 @@ void CGRecordLowering::accumulateBases() {
 /// Enforcing the width restriction can be disabled using
 /// -fno-aapcs-bitfield-width.
 void CGRecordLowering::computeVolatileBitfields() {
-  if (!CodeGenUtils::isAAPCS(Context.getTargetInfo()) ||
-      !Types.getCodeGenOpts().AAPCSBitfieldWidth)
+  // trellis session 109 (post-close): the dsPIC `strict_bitfield` attribute asks for exactly the
+  // AAPCS volatile rule -- access at the DECLARED type's width -- so the same computation serves
+  // it, per FIELD (the attribute's), never for every bit-field (the default is the operator's
+  // question). steps/frontend/sb-edit.py.
+  const bool DSPIC =
+      Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic;
+  if (!DSPIC && (!CodeGenUtils::isAAPCS(Context.getTargetInfo()) ||
+                 !Types.getCodeGenOpts().AAPCSBitfieldWidth))
     return;
 
   for (auto &I : BitFields) {
     const FieldDecl *Field = I.first;
     CGBitFieldInfo &Info = I.second;
+    if (DSPIC && !Field->hasAttr<DSPICStrictBitfieldAttr>())
+      continue;
     llvm::Type *ResLTy = Types.ConvertTypeForMem(Field->getType());
     // If the record alignment is less than the type width, we can't enforce a
     // aligned load, bail out.
     if ((uint64_t)(Context.toBits(Layout.getAlignment())) <
-        ResLTy->getPrimitiveSizeInBits())
+        (DSPIC ? std::min<uint64_t>(ResLTy->getPrimitiveSizeInBits(), 16)
+               : ResLTy->getPrimitiveSizeInBits()))
       continue;
     // CGRecordLowering::setBitFieldInfo() pre-adjusts the bit-field offsets
     // for big-endian targets, but it assumes a container of width

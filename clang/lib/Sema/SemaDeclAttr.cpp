@@ -6948,13 +6948,17 @@ static void handleDSPICScratchRegAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
 }
 
 // strict_bitfield: a member attribute (cc1 warns "ignoring ... applied to non-member" otherwise).
-// ⛔ ANNOUNCED, not implemented: the access-unit rule it asks for is CGRecordLowering's, COSTED.
+// trellis session 109 (post-close), the operator's ruling -- "we need to respect strict_bitfield.
+// A lot of people depend on the layout that they write down": the field is accessed at its
+// DECLARED type's width. Realised by CGRecordLowering::computeVolatileBitfields (clang's own AAPCS
+// rule, opened for this triple per field -- steps/frontend/sb-edit.py); this handler only records
+// the attribute.
 static void handleDSPICStrictBitfieldAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   if (!isa<FieldDecl>(D)) {
     S.Diag(AL.getLoc(), diag::warn_dspic_strict_bitfield_nonmember) << cast<NamedDecl>(D);
     return;
   }
-  S.Diag(AL.getLoc(), diag::warn_dspic_strict_bitfield);
+  D->addAttr(::new (S.Context) DSPICStrictBitfieldAttr(S.Context, AL));
 }
 
 // ⛔ REFUSED: the spelling is known and the answer is an error that names what the attribute

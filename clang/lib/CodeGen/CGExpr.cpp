@@ -2662,7 +2662,8 @@ RValue CodeGenFunction::EmitLoadOfBitfieldLValue(LValue LV,
 
   bool UseVolatile = LV.isVolatileQualified() &&
                      Info.VolatileStorageSize != 0 &&
-                     CodeGenUtils::isAAPCS(CGM.getTarget());
+                     (CodeGenUtils::isAAPCS(CGM.getTarget()) ||
+                      CGM.getTarget().getTriple().getArch() == llvm::Triple::dspic);
   const unsigned Offset = UseVolatile ? Info.VolatileOffset : Info.Offset;
   const unsigned StorageSize =
       UseVolatile ? Info.VolatileStorageSize : Info.StorageSize;
@@ -3063,8 +3064,10 @@ void CodeGenFunction::EmitStoreThroughBitfieldLValue(RValue Src, LValue Dst,
   llvm::Value *MaskedVal = SrcVal;
 
   const bool UseVolatile =
-      CGM.getCodeGenOpts().AAPCSBitfieldWidth && Dst.isVolatileQualified() &&
-      Info.VolatileStorageSize != 0 && CodeGenUtils::isAAPCS(CGM.getTarget());
+      Dst.isVolatileQualified() && Info.VolatileStorageSize != 0 &&
+      ((CGM.getCodeGenOpts().AAPCSBitfieldWidth &&
+        CodeGenUtils::isAAPCS(CGM.getTarget())) ||
+       CGM.getTarget().getTriple().getArch() == llvm::Triple::dspic);
   const unsigned StorageSize =
       UseVolatile ? Info.VolatileStorageSize : Info.StorageSize;
   const unsigned Offset = UseVolatile ? Info.VolatileOffset : Info.Offset;
@@ -5813,8 +5816,9 @@ LValue CodeGenFunction::EmitLValueForField(LValue base, const FieldDecl *field,
     const CGRecordLayout &RL =
         CGM.getTypes().getCGRecordLayout(field->getParent());
     const CGBitFieldInfo &Info = RL.getBitFieldInfo(field);
-    const bool UseVolatile = CodeGenUtils::isAAPCS(CGM.getTarget()) &&
-                             CGM.getCodeGenOpts().AAPCSBitfieldWidth &&
+    const bool UseVolatile = ((CodeGenUtils::isAAPCS(CGM.getTarget()) &&
+                              CGM.getCodeGenOpts().AAPCSBitfieldWidth) ||
+                             CGM.getTarget().getTriple().getArch() == llvm::Triple::dspic) &&
                              Info.VolatileStorageSize != 0 &&
                              field->getType()
                                  .withCVRQualifiers(base.getVRQualifiers())

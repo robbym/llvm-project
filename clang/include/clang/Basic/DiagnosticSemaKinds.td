@@ -14398,9 +14398,6 @@ def warn_dspic_deprecated_definition : Warning<
   "%0 definition has been deprecated: %1">;
 def warn_dspic_scratch_reg : Warning<
   "the scratch_reg attribute is not usable (the vendor compiler says the same and ignores it)">;
-def warn_dspic_strict_bitfield : Warning<
-  "dsPIC 'strict_bitfield' is not implemented: the access unit is this compiler's storage unit, "
-  "not the declared width; the attribute is ignored">;
 def warn_dspic_strict_bitfield_nonmember : Warning<
   "ignoring 'strict_bitfield' attribute applied to non-member %0">;
 def err_dspic_attr_refused : Error<

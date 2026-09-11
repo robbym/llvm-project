@@ -2523,9 +2523,9 @@ def DSPICDeprecatedDefinition : InheritableAttr, TargetSpecificAttr<TargetDSPIC>
 }
 // `scratch_reg(N)`: "The scratch_reg attribute is not usable!" and ignored -- in cc1 (pic30.c
 // 20856). Ours says the same and does not add the attribute. `strict_bitfield`: a FIELD attribute
-// (access at the declared width, pic30_strict_volatile_bitfield); ours ANNOUNCES that it is not
-// implemented and ignores it -- COSTED at CGRecordLowering's run-splitting (FRONTEND.expected.first
-// D6), and it touches overlays.md's width promise, which is the operator's question.
+// -- access at the DECLARED type's width (pic30_strict_volatile_bitfield); trellis session 109
+// post-close, the operator's ruling: RESPECTED, through CGRecordLowering::computeVolatileBitfields
+// (clang's AAPCS volatile-container rule, opened for this triple per field; sb-edit.py).
 def DSPICScratchReg : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"scratch_reg">];
   let Args = [UnsignedArgument<"Reg">];
