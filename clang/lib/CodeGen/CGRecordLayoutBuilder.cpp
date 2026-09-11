@@ -749,10 +749,13 @@ void CGRecordLowering::accumulateBases() {
 /// Enforcing the width restriction can be disabled using
 /// -fno-aapcs-bitfield-width.
 void CGRecordLowering::computeVolatileBitfields() {
-  // trellis session 109 (post-close): the dsPIC `strict_bitfield` attribute asks for exactly the
-  // AAPCS volatile rule -- access at the DECLARED type's width -- so the same computation serves
-  // it, per FIELD (the attribute's), never for every bit-field (the default is the operator's
-  // question). steps/frontend/sb-edit.py.
+  // trellis session 109 (post-close): on the dsPIC EVERY volatile bit-field is accessed at its
+  // DECLARED type's width -- the operator's ruling ("1": GCC's -fstrict-volatile-bitfields
+  // semantics, what ARM's ABI mandates, what cc1's `strict_bitfield` gives per field), taken as
+  // the C-side default rather than a language question. The AAPCS computation serves it whole:
+  // the container is computed for every bit-field here, and CGExpr takes it only when the
+  // ACCESS is volatile. The attribute is thereby subsumed on this target -- still parsed and
+  // recorded, its behaviour the default's. steps/frontend/sb-edit.py.
   const bool DSPIC =
       Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic;
   if (!DSPIC && (!CodeGenUtils::isAAPCS(Context.getTargetInfo()) ||
@@ -762,8 +765,6 @@ void CGRecordLowering::computeVolatileBitfields() {
   for (auto &I : BitFields) {
     const FieldDecl *Field = I.first;
     CGBitFieldInfo &Info = I.second;
-    if (DSPIC && !Field->hasAttr<DSPICStrictBitfieldAttr>())
-      continue;
     llvm::Type *ResLTy = Types.ConvertTypeForMem(Field->getType());
     // If the record alignment is less than the type width, we can't enforce a
     // aligned load, bail out.
