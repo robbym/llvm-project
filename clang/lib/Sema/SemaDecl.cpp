@@ -15466,6 +15466,23 @@ void Sema::FinalizeDeclaration(Decl *ThisDecl) {
   if (!VD)
     return;
 
+  // trellis session 109: dsPIC definition-site rules, once every attribute of the declaration is
+  // present. deprecated_definition warns at the DEFINITION (cc1 at emission: "'X' definition has
+  // been deprecated: m"); fillupper on anything but a program-memory object warns and is dropped
+  // (cc1: "Ignoring fillupper attribute applied to 'X'").
+  if (VD->isThisDeclarationADefinition() == VarDecl::Definition)
+    if (const auto *DD = VD->getAttr<DSPICDeprecatedDefinitionAttr>())
+      Diag(VD->getLocation(), diag::warn_dspic_deprecated_definition) << VD << DD->getMessage();
+  if (VD->hasAttr<DSPICFillupperAttr>()) {
+    const auto *SA = VD->getAttr<DSPICSpaceAttr>();
+    bool Prog = (SA && SA->getSpace()->isStr("prog")) ||
+                VD->getType().getAddressSpace() == LangAS::FirstTargetAddressSpace;
+    if (!Prog) {
+      Diag(VD->getLocation(), diag::warn_dspic_fillupper_ignored) << VD;
+      VD->dropAttr<DSPICFillupperAttr>();
+    }
+  }
+
   // Emit any deferred warnings for the variable's initializer, even if the
   // variable is invalid
   AnalysisWarnings.issueWarningsForRegisteredVarDecl(VD);
@@ -16846,6 +16863,12 @@ Decl *Sema::ActOnFinishFunctionBody(Decl *dcl, Stmt *Body, bool IsInstantiation,
 
   if (FSI->UsesFPIntrin && FD && !FD->hasAttr<StrictFPAttr>())
     FD->addAttr(StrictFPAttr::CreateImplicit(Context));
+
+  // trellis session 109: dsPIC deprecated_definition on a FUNCTION warns at its definition
+  // (cc1 fn.cc1.log: "'f_depdef' definition has been deprecated: use f_new").
+  if (FD && Body)
+    if (const auto *DD = FD->getAttr<DSPICDeprecatedDefinitionAttr>())
+      Diag(FD->getLocation(), diag::warn_dspic_deprecated_definition) << FD << DD->getMessage();
 
   SourceLocation AnalysisLoc;
   if (Body)

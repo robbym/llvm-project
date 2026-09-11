@@ -2214,7 +2214,14 @@ def DSPICInterrupt : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   // trellis session 96 (follow-up 13): the OPTIONAL `preprologue("...")` sub-argument, parsed by
   // Parser::ParseDSPICInterruptAttribute because `preprologue(STRING)` is not an expression and
   // the common argument parser would read it as a call to an undeclared function.
-  let Args = [StringArgument<"Preprologue", 1>];
+  // trellis session 109: the WHOLE sub-argument grammar -- shadow, auto_psv, no_auto_psv,
+  // save(vars...), irq(N), altirq(N), preprologue("...") -- parsed by ParseDSPICInterruptAttribute
+  // as a flat list (a kind identifier followed by its expressions). ⛔ A custom-parsed attribute
+  // skips Sema's argument-count check (SemaAttr.cpp: `if (A.hasCustomParsing()) return false;`),
+  // so this record's Args do not constrain the other targets' `interrupt`. The save list is
+  // stored here; shadow / no_auto_psv / irq / altirq are created as IMPLICIT bare attributes by
+  // the handler so that CodeGen has ONE reader per fact whatever the spelling.
+  let Args = [StringArgument<"Preprologue", 1>, VariadicExprArgument<"Save">];
   let Subjects = SubjectList<[Function]>;
   let ParseKind = "Interrupt";
   let Documentation = [Undocumented];
@@ -2313,9 +2320,12 @@ def DSPICSpace : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
 // which is the only form the device headers use (checked: 2,900 of 2,900).
 def DSPICSfr : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"sfr">];
+  // trellis session 109: the optional ADDRESS form. cc1 emits `.equ _sym,ADDR` for it and requires
+  // extern storage ("sfr attribute requires extern storage class" on a definition) -- measured,
+  // prints/l1f/frontend/ask/var.cc1.s and err-sfr-bad.cc1.log. Carried as "dspic-sfr-address".
+  let Args = [UnsignedArgument<"Addr", 1>];
   let Subjects = SubjectList<[Var]>;
   let Documentation = [Undocumented];
-  let SimpleHandler = 1;
 }
 // trellis session 98: the dsPIC `user_init` attribute. cc1 emits a `.user_init,code,keep`
 // fragment holding a call to the function; the pic30 linker turns the presence of any such section
@@ -2326,7 +2336,7 @@ def DSPICUserInit : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"user_init">];
   let Subjects = SubjectList<[Function]>;
   let Documentation = [Undocumented];
-  let SimpleHandler = 1;
+  // trellis session 109: handleDSPICUserInitAttr checks cc1's void(void) rule.
 }
 // trellis session 98: the dsPIC PSV attributes. `auto_psv` asks for the page-register
 // save/set/restore in an interrupt handler (which is also the default when neither is written);
@@ -2355,14 +2365,214 @@ def DSPICPersistent : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
 def DSPICAddress : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"address">];
   let Args = [UnsignedArgument<"Addr">];
-  let Subjects = SubjectList<[Var]>;
+  // trellis session 109: a FUNCTION too -- cc1 places it in its own `address(N),code` section
+  // (prints/l1f/frontend/ask/fn.cc1.s, f_addr).
+  let Subjects = SubjectList<[Var, Function]>;
   let Documentation = [Undocumented];
 }
 def DSPICNoload : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"noload">];
+  // trellis session 109: a FUNCTION too (cc1: `code,noload`, fn.cc1.s f_noload).
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+
+// trellis session 109: THE FRONT END -- every row of pic30_attribute_table accounted for.
+// The oracle is cc1 on steps/frontend/ask/*.c (prints/l1f/frontend/ask/); the predictions are
+// steps/frontend/FRONTEND.expected.first; the audit is steps/reach/attr-audit.py.
+//
+// --- A. the ISR family -------------------------------------------------------------------------
+// `shadow`: push.s FIRST / pop.s LAST in the handler, w0..w3 never pushed (cc1 isr.cc1.s T1..T3);
+// no push.s at all when none of w0..w3 needs saving (T4). Spelled bare (`interrupt, shadow` --
+// the device header's _ISRFAST) or as the modifier `interrupt(shadow)`; the modifier form creates
+// this record implicitly. Carried as "dspic-shadow".
+def DSPICShadow : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"shadow">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+// `save(a, b)`: each named GLOBAL's words are pushed after the PSV setup, in REVERSE list order,
+// through the scratch register (`mov #_g,wS ; mov.w [wS++],[w15++]` per word) and restored before
+// the PSV pops (`mov #_g+2*(n-1),wS ; mov.w [--w15],[wS--]`) -- measured, isr.cc1.s T5/T6/T8.
+// ⛔ cc1 8.3.1 refuses `save(arr[1])` although pic30.c carries an ARRAY_REF branch (measured,
+// err-save-array.cc1.log): whole global variables only, here too. Carried as "dspic-save"=names.
+def DSPICSave : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"save">];
+  let Args = [VariadicExprArgument<"Vars">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+}
+// `irq(N)` / `altirq(N)`: the handler is ALSO exported under `__Interrupt<N>` / `__AltInterrupt<N>`
+// -- a second global label at the function head, before the preprologue (isr.cc1.s my_handler_52,
+// my_alt_52, my_everything). N in 45..53 (pic30.c MIN_IRQ_ID..MAX_IRQ_ID), an error outside it.
+// ⛔ Written BARE on a function they are an ERROR in cc1 ("invalid attribute 'irq' ignored",
+// err-isr-attrs-plain.cc1.log); the explicit spelling's handler refuses, the interrupt handler
+// creates them implicitly. Carried as "dspic-irq" / "dspic-altirq".
+def DSPICIrq : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"irq">];
+  let Args = [UnsignedArgument<"Number">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+}
+def DSPICAltIrq : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"altirq">];
+  let Args = [UnsignedArgument<"Number">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+}
+// `context`: the interrupt runs on an alternate register set the hardware switches to, so the
+// handler saves NO working register (cc1 isr.cc1.s _INT0Interrupt: RCOUNT and the PSV pages only,
+// w0 used unsaved). ⚠ Ours keeps ONE push -- the PSV/RCOUNT blocks live in PEI's callee-save
+// hooks, which run only for a non-empty save set (FRONTEND.expected.first I8). `nocontext` is the
+// ordinary save, accepted anywhere (pic30.c 21468). Carried as "dspic-context".
+def DSPICContext : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"context">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def DSPICNoContext : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"nocontext">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def : MutualExclusions<[DSPICContext, DSPICNoContext]>;
+//
+// --- B. placement -----------------------------------------------------------------------------
+// Each is one pic30 section attribute the TLOF appends, on a PER-OBJECT section (cc1's `*_hash`
+// names; ours are `<base>.<symbol>`). Measured: var.cc1.s / fn.cc1.s.
+//   keep        `,keep` -- survives --gc-sections. Functions and data.
+//   page        `,page` -- may not cross a page; ⛔ cc1 places it WITHOUT `near` (far).
+//   reverse(N)  `,reverse(N)` -- the END address aligned; ⛔ also far.
+//   unordered   its own section with the DEFAULT attributes (`data,near`): what "may move
+//               relative to its neighbours" means to the linker.
+//   priority(N) `,priority(0xNNNN),keep`; 1..65535 (0 and >65535 warn and are ignored, cc1's
+//               text); a priority FUNCTION must be void(void).
+//   fillupper(V) `.fillupper 0xNN` before a program-memory object and `.fillupper 0x00` after;
+//               on a data object cc1 warns and ignores.
+def DSPICKeep : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"keep">];
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def DSPICPage : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"page">];
   let Subjects = SubjectList<[Var]>;
   let Documentation = [Undocumented];
   let SimpleHandler = 1;
+}
+def DSPICReverse : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"reverse">];
+  let Args = [UnsignedArgument<"Align">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+}
+def DSPICUnordered : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"unordered">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def DSPICPriority : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"priority">];
+  let Args = [UnsignedArgument<"Level">];
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+}
+def DSPICFillupper : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"fillupper">];
+  let Args = [UnsignedArgument<"Value">];
+  let Subjects = SubjectList<[Var]>;
+  let Documentation = [Undocumented];
+}
+//
+// --- C. diagnostics --------------------------------------------------------------------------
+// The vendor's own sentences (var.cc1.log, fn.cc1.log, err-target_error.cc1.log):
+//   unsafe                 at a USE:        "'X' access is not safe to use within C" (warning)
+//   unsupported("m")       at a USE:        "'X' is unsupported: m" (warning)
+//   target_error("m")      at a USE:        "'X' : m" (ERROR)
+//   deprecated_definition("m") at the DEFINITION: "'X' definition has been deprecated: m"
+// The device header applies `unsafe` to 22 SFRs (WREG0..); a declaration alone is silent.
+def DSPICUnsafe : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"unsafe">];
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+  let SimpleHandler = 1;
+}
+def DSPICUnsupported : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"unsupported">];
+  let Args = [StringArgument<"Message">];
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+}
+def DSPICTargetError : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"target_error">];
+  let Args = [StringArgument<"Message">];
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+}
+def DSPICDeprecatedDefinition : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"deprecated_definition">];
+  let Args = [StringArgument<"Message">];
+  let Subjects = SubjectList<[Var, Function]>;
+  let Documentation = [Undocumented];
+}
+// `scratch_reg(N)`: "The scratch_reg attribute is not usable!" and ignored -- in cc1 (pic30.c
+// 20856). Ours says the same and does not add the attribute. `strict_bitfield`: a FIELD attribute
+// (access at the declared width, pic30_strict_volatile_bitfield); ours ANNOUNCES that it is not
+// implemented and ignores it -- COSTED at CGRecordLowering's run-splitting (FRONTEND.expected.first
+// D6), and it touches overlays.md's width promise, which is the operator's question.
+def DSPICScratchReg : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"scratch_reg">];
+  let Args = [UnsignedArgument<"Reg">];
+  let Documentation = [Undocumented];
+}
+def DSPICStrictBitfield : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"strict_bitfield">];
+  let Documentation = [Undocumented];
+}
+//
+// --- D. refusals -----------------------------------------------------------------------------
+// ⛔ REFUSED, never silent: clang knows the spelling and the handler is an ERROR naming the vendor
+// semantics and this port's reason (handleDSPICRefusedAttr). Each is COSTED in attr-audit.py.
+//   eds              extended data space -- the paged access model (`__eds__`) is not modelled
+//   boot / secure    CodeGuard segments -- `.boot*`/`.secure*` sections, the access-entry table,
+//                    `__bootconst_psvpage` prologues (fn.cc1.s f_boot): a linker feature this port
+//                    has never exercised
+//   shared           co-resident applications
+//   preserved/update the linker's --preserved= restart model
+//   xcdsc_obfuscate  symbol renaming (fn.cc1.s: `__JrN0T`)
+//   round(mode)      fixed-point rounding -- no _Fract here; ⛔ and cc1 8.3.1 REFUSES ITS OWN FOUR
+//                    DOCUMENTED MODES (err-round-modes.cc1.log: "'fastest' undeclared here")
+//   ramfunc          cc1: "ramfunc attribute is not supported on this target" (the 32-bit ISA only)
+// ⚠ TWO records, not one: a GCC<> spelling flattens to three (GNU, [[gnu::]] C++11, [[gnu::]]
+// C23) and ClangAttrEmitter asserts below 15 per record -- six names in one record is 18, and the
+// first build of this row died in clang-tblgen on exactly that.
+// ⚠ `shared` is NOT here: its GNU spelling is CUDA's `__shared__` (CUDAShared, this file), and
+// two records may not own one spelling. On the dsPIC triple ProcessDeclAttribute routes
+// AT_CUDAShared to handleDSPICRefusedAttr before the language-option check (SemaDeclAttr.cpp).
+def DSPICRefused : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"eds">, GCC<"preserved">];
+  let Documentation = [Undocumented];
+}
+def DSPICRefusedB : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"update">, GCC<"xcdsc_obfuscate">, GCC<"ramfunc">];
+  let Documentation = [Undocumented];
+}
+def DSPICRefusedSegment : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"boot">, GCC<"secure">];
+  let Args = [VariadicExprArgument<"Slot">];
+  let Documentation = [Undocumented];
+}
+def DSPICRound : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"round">];
+  let Args = [IdentifierArgument<"Mode">];
+  let Subjects = SubjectList<[Function]>;
+  let Documentation = [Undocumented];
 }
 
 def MipsLongCall : InheritableAttr, TargetSpecificAttr<TargetAnyMips> {

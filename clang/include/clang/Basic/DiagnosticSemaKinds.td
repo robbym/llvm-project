@@ -14360,6 +14360,50 @@ def err_cuda_device_kernel_launch_require_rdc
 // space() would put the object in the wrong memory, so it is an error that names what it got.
 def err_dspic_space_unimplemented : Error<
   "dsPIC memory space '%0' is not implemented; "
-  "'prog', 'psv' and 'data' are">;
+  "'prog', 'psv', 'data', 'auto_psv', 'xmemory', 'ymemory' and 'dma' are">;
+// trellis session 109: the front end. The vendor's own sentences where it has them (banked in
+// prints/l1f/frontend/ask/*.cc1.log), this port's where it refuses.
+def err_dspic_space_unsupported : Error<
+  "space(%0) not supported on this target">;
+def err_dspic_space_subargs : Error<
+  "space(%0) requires sub-arguments, which this compiler does not implement">;
+def err_dspic_interrupt_modifier_unknown : Error<
+  "interrupt modifier '%0' unknown">;
+def err_dspic_interrupt_vector_range : Error<
+  "%select{interrupt|alternate interrupt}0 vector number %1 is not valid (45..53)">;
+def err_dspic_save_operand : Error<
+  "dsPIC 'save' takes whole global variables; the argument at position %0 is not one">;
+def err_dspic_irq_bare : Error<
+  "dsPIC '%0' is an 'interrupt' modifier: write interrupt(%0(N))">;
+def err_dspic_interrupt_signature : Error<
+  "interrupt functions must %select{return void|not take parameters}0">;
+def err_dspic_user_init_signature : Error<
+  "user_init functions must %select{return void|not take parameters}0">;
+def err_dspic_priority_signature : Error<
+  "priority functions must %select{return void|not take parameters}0">;
+def warn_dspic_priority_range : Warning<
+  "invalid priority argument for %0: priority %select{== 0|> 65535}1 is not permitted, "
+  "ignoring attribute">;
+def err_dspic_sfr_extern : Error<
+  "sfr attribute requires extern storage class">;
+def warn_dspic_fillupper_ignored : Warning<
+  "ignoring fillupper attribute applied to %0: it is not a program-memory object">;
+def warn_dspic_unsafe_use : Warning<
+  "%0 access is not safe to use within C">;
+def warn_dspic_unsupported_use : Warning<
+  "%0 is unsupported: %1">;
+def err_dspic_target_error_use : Error<
+  "%0 : %1">;
+def warn_dspic_deprecated_definition : Warning<
+  "%0 definition has been deprecated: %1">;
+def warn_dspic_scratch_reg : Warning<
+  "the scratch_reg attribute is not usable (the vendor compiler says the same and ignores it)">;
+def warn_dspic_strict_bitfield : Warning<
+  "dsPIC 'strict_bitfield' is not implemented: the access unit is this compiler's storage unit, "
+  "not the declared width; the attribute is ignored">;
+def warn_dspic_strict_bitfield_nonmember : Warning<
+  "ignoring 'strict_bitfield' attribute applied to non-member %0">;
+def err_dspic_attr_refused : Error<
+  "dsPIC '%0' is not provided by this compiler: %1">;
 
 } // end of sema component.

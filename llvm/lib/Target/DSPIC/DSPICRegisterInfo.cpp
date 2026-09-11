@@ -68,9 +68,27 @@ DSPICRegisterInfo::getCalleeSavedRegs(const MachineFunction *MF) const {
     DSPIC::R4,                                        // w14 (session 94: an ISR that uses it saves it)
     0
   };
-  return ((F->getCallingConv() == CallingConv::MSP430_INTR ||
-           F->hasFnAttribute("interrupt")) ?
-          CalleeSavedRegsIntr : CalleeSavedRegs);
+  // trellis session 109: a `shadow` handler keeps w0..w3 by push.s/pop.s (the frame lowering),
+  // so they leave its callee-saved list -- PEI then never pushes them; a `context` handler runs on
+  // the hardware's alternate register set and saves NO working register (cc1 _INT0Interrupt) --
+  // ⚠ except that PEI drives the RCOUNT/PSV/save blocks only through a non-empty save set, so
+  // ONE register (w0) stays in the list and costs one push/pop: FRONTEND.expected.first I8.
+  static const MCPhysReg CalleeSavedRegsShadow[] = {
+    DSPIC::R11, DSPIC::W5,  DSPIC::W6,  DSPIC::W7,   // w4..w7
+    DSPIC::R10, DSPIC::R9,  DSPIC::R8,               // w8..w10
+    DSPIC::R7,  DSPIC::R6,  DSPIC::R5,               // w11..w13
+    DSPIC::R4,
+    0
+  };
+  static const MCPhysReg CalleeSavedRegsContext[] = { DSPIC::R12, 0 };
+  if (F->hasFnAttribute("interrupt")) {
+    if (F->hasFnAttribute("dspic-context"))
+      return CalleeSavedRegsContext;
+    if (F->hasFnAttribute("dspic-shadow"))
+      return CalleeSavedRegsShadow;
+    return CalleeSavedRegsIntr;
+  }
+  return (F->getCallingConv() == CallingConv::MSP430_INTR ? CalleeSavedRegsIntr : CalleeSavedRegs);
 }
 
 // Session 93 (the SESSION 93 PREP's item 1; the fixture is prints/l1f/cc1/csr.c). The flag is the

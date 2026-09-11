@@ -1648,8 +1648,8 @@ def ext_bit_int : Extension<
 // one we were given, rather than ignoring it, is the operator's standing rule -- an ignored
 // `irq(n)` would silently move an ISR's vector.
 def err_dspic_interrupt_argument : Error<
-  "dsPIC 'interrupt' attribute argument '%0' is not implemented; "
-  "only 'preprologue(\"...\")' is">;
+  "dsPIC 'interrupt' attribute argument '%0' is not one of shadow, auto_psv, no_auto_psv, "
+  "save(...), irq(N), altirq(N), preprologue(\"...\")">;
 def err_dspic_interrupt_preprologue_string : Error<
   "dsPIC 'interrupt' attribute's 'preprologue' takes a string literal">;
 

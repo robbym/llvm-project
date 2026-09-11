@@ -1174,6 +1174,23 @@ let Defs = [SP], Uses = [SP], mayStore = 1, isCodeGenOnly = 1 in
 def PUSHRCOUNT : DSPICFrameInst<(outs), (ins), 2, "push\t_RCOUNT">;
 let Defs = [SP], Uses = [SP], mayLoad = 1, isCodeGenOnly = 1 in
 def POPRCOUNT  : DSPICFrameInst<(outs), (ins), 2, "pop\t_RCOUNT">;
+// trellis session 109: the `shadow` handler's fast context save -- `push.s` / `pop.s` swap
+// w0..w3, SR<DC,N,OV,Z,C> and CORCON<IPL3> with their shadows in one word each (DS70000157G).
+// push.s is the FIRST instruction of the handler and pop.s the LAST before retfie (cc1 isr.cc1.s),
+// and neither appears when none of w0..w3 needs saving (T4). The words the handler no longer pushes
+// are w0..w3, which DSPICRegisterInfo drops from the shadow ISR's callee-saved list.
+let isCodeGenOnly = 1, hasSideEffects = 1 in {
+  def PUSHS : DSPICFrameInst<(outs), (ins), 2, "push.s">;
+  def POPS  : DSPICFrameInst<(outs), (ins), 2, "pop.s">;
+}
+// `save(var)`: one WORD of the named global pushed / popped through the scratch register, cc1's
+// exact forms (`mov.w [wS++],[w15++]` / `mov.w [--w15],[wS--]`); the scratch advances, so it is
+// tied in and out. One word each.
+let Defs = [SP], Uses = [SP], mayLoad = 1, mayStore = 1, isCodeGenOnly = 1,
+    Constraints = "$s = $d" in {
+  def SAVEWORD : DSPICFrameInst<(outs GR16:$d), (ins GR16:$s), 2, "mov.w\t[${s}++],[w15++]">;
+  def RESTWORD : DSPICFrameInst<(outs GR16:$d), (ins GR16:$s), 2, "mov.w\t[--w15],[${s}--]">;
+}
 let isCodeGenOnly = 1, Defs = [R12, R13, SR], Uses = [R12] in {
   def DIVUW : DSPICFrameInst<(outs), (ins GR16_DIV:$d), 2, "div.uw\tw0,$d">;
   def DIVSW : DSPICFrameInst<(outs), (ins GR16_DIV:$d), 2, "div.sw\tw0,$d">;

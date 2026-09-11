@@ -1670,9 +1670,9 @@ void Parser::ParseObjCBridgeRelatedAttribute(
 ///   __attribute__((interrupt(preprologue("mov w15,__defIsrFramePtr"))))
 ///
 /// `preprologue(STRING)` is an identifier applied to a string, which the common argument parser
-/// would read as a call to an undeclared function. cc1's other sub-arguments -- irq(n), altirq(n)
-/// and save(...) -- are UNWRITTEN here and are named in the refusal rather than ignored: an
-/// ignored irq(n) would silently move an ISR's vector.
+/// would read as a call to an undeclared function. trellis session 109: the other sub-arguments
+/// -- shadow, auto_psv, no_auto_psv, irq(n), altirq(n) and save(...) -- are parsed here too, into
+/// a flat list; see the body.
 void Parser::ParseDSPICInterruptAttribute(
     IdentifierInfo &AttrName, SourceLocation AttrNameLoc,
     ParsedAttributes &Attrs, SourceLocation *EndLoc, IdentifierInfo *ScopeName,
@@ -1683,8 +1683,14 @@ void Parser::ParseDSPICInterruptAttribute(
     return;
   }
 
+  // trellis session 109: the whole grammar, as a FLAT list the Sema handler walks -- an
+  // IdentifierLoc names the modifier and the expressions that follow it are its arguments
+  // (preprologue: one string; irq/altirq: one integer; save: one or more; the bare words: none).
+  // ⛔ A bare word is accepted at ANY position -- GCC admits one only FIRST (measured:
+  // `interrupt(auto_psv, save(g1), irq(53), shadow, ...)` is "'shadow' undeclared" in cc1),
+  // so this is a superset of the vendor's spelling and nothing is weakened.
   ArgsVector Args;
-  if (Tok.isNot(tok::r_paren)) {
+  while (Tok.isNot(tok::r_paren)) {
     if (Tok.isNot(tok::identifier)) {
       Diag(Tok, diag::err_dspic_interrupt_argument) << PP.getSpelling(Tok);
       SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
@@ -1693,37 +1699,61 @@ void Parser::ParseDSPICInterruptAttribute(
     }
     IdentifierInfo *Kind = Tok.getIdentifierInfo();
     SourceLocation KindLoc = ConsumeToken();
-    if (!Kind->isStr("preprologue")) {
+    bool Bare = Kind->isStr("shadow") || Kind->isStr("auto_psv") ||
+                Kind->isStr("no_auto_psv");
+    bool Call = Kind->isStr("preprologue") || Kind->isStr("irq") ||
+                Kind->isStr("altirq") || Kind->isStr("save");
+    if (!Bare && !Call) {
       Diag(KindLoc, diag::err_dspic_interrupt_argument) << Kind->getName();
       SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
       T.consumeClose();
       return;
     }
-
-    BalancedDelimiterTracker Inner(*this, tok::l_paren);
-    if (Inner.consumeOpen()) {
-      Diag(Tok, diag::err_expected) << tok::l_paren;
-      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
-      T.consumeClose();
-      return;
+    Args.push_back(new (Actions.Context) IdentifierLoc(KindLoc, Kind));
+    if (Call) {
+      BalancedDelimiterTracker Inner(*this, tok::l_paren);
+      if (Inner.consumeOpen()) {
+        Diag(Tok, diag::err_expected) << tok::l_paren;
+        SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+        T.consumeClose();
+        return;
+      }
+      if (Kind->isStr("preprologue")) {
+        if (!isTokenStringLiteral()) {
+          Diag(Tok, diag::err_dspic_interrupt_preprologue_string);
+          SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+          Inner.consumeClose();
+          T.consumeClose();
+          return;
+        }
+        ExprResult Str(ParseStringLiteralExpression());
+        if (Str.isInvalid()) {
+          SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+          Inner.consumeClose();
+          T.consumeClose();
+          return;
+        }
+        Args.push_back(Str.get());
+      } else {
+        // irq(N), altirq(N), save(a, b, ...): assignment-expressions, comma-separated
+        while (true) {
+          ExprResult E(ParseAssignmentExpression());
+          if (E.isInvalid()) {
+            SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
+            Inner.consumeClose();
+            T.consumeClose();
+            return;
+          }
+          Args.push_back(E.get());
+          if (!TryConsumeToken(tok::comma))
+            break;
+        }
+      }
+      if (Inner.consumeClose())
+        return;
     }
-    if (!isTokenStringLiteral()) {
-      Diag(Tok, diag::err_dspic_interrupt_preprologue_string);
-      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
-      Inner.consumeClose();
-      T.consumeClose();
-      return;
-    }
-    ExprResult Str(ParseStringLiteralExpression());
-    if (Str.isInvalid()) {
-      SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch);
-      Inner.consumeClose();
-      T.consumeClose();
-      return;
-    }
-    Args.push_back(Str.get());
-    if (Inner.consumeClose())
-      return;
+    if (!TryConsumeToken(tok::comma))
+      break;
   }
 
   if (T.consumeClose())

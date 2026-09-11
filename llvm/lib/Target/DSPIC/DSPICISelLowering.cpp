@@ -587,6 +587,14 @@ bool DSPICTargetLowering::isEligibleForTailCall(
   const Function &Caller = MF.getFunction();
   const auto *FuncInfo = MF.getInfo<DSPICMachineFunctionInfo>();
 
+  // trellis session 109: an interrupt handler returns by `retfie`, which restores what the
+  // interrupt pushed; a tail call would make the callee's `return` stand in for it -- a wrong
+  // return from every handler whose last statement is a call. Found by the session-109 ISR probe
+  // (_INT0Interrupt, `bra _callee` after the pops); cc1 never sibcalls out of a handler.
+  if (Caller.hasFnAttribute("interrupt") || Caller.getCallingConv() == CallingConv::MSP430_INTR) {
+    Why = "the caller is an interrupt handler, which returns by retfie";
+    return false;
+  }
   auto IsC = [](CallingConv::ID CC) {
     return CC == CallingConv::C || CC == CallingConv::Fast ||
            CC == CallingConv::Tail;

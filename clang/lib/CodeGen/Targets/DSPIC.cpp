@@ -225,6 +225,41 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         GVar->addAttribute("dspic-noload");
       if (const auto *AA = VD->getAttr<DSPICAddressAttr>())
         GVar->addAttribute("dspic-address", std::to_string(AA->getAddr()));
+      // trellis session 109: the placement attributes, each one pic30 section attribute in the
+      // TLOF (DSPICTargetMachine.cpp pic30Attrs), each measured from cc1 (var.cc1.s).
+      if (VD->hasAttr<DSPICKeepAttr>())
+        GVar->addAttribute("dspic-keep");
+      if (VD->hasAttr<DSPICUnorderedAttr>())
+        GVar->addAttribute("dspic-unordered");
+      if (const auto *PA = VD->getAttr<DSPICPriorityAttr>())
+        GVar->addAttribute("dspic-priority", std::to_string(PA->getLevel()));
+      if (const auto *FA = VD->getAttr<DSPICFillupperAttr>())
+        GVar->addAttribute("dspic-fillupper", std::to_string(FA->getValue()));
+      if (const auto *SA = VD->getAttr<DSPICSfrAttr>())
+        if (SA->getAddr() != 0)
+          GVar->addAttribute("dspic-sfr-address", std::to_string(SA->getAddr()));
+      // ⛔ page and space(dma) objects are FAR, whatever the model said, ON THE ASSEMBLER'S
+      // AUTHORITY: both the GPL `as` and the vendor's shipped xc-dsc-as REFUSE `page`+`near`
+      // and `dma`+`near` ("invalid attribute combination", prints/l1f/frontend/as-probe.txt and
+      // the refutation pass's 22 probes) -- cc1 emits `data,page,near` for a scalar page object,
+      // a line its OWN driver cannot assemble, and addresses a dma scalar far
+      // (`mov #_d_s,w0 ; inc.w [w0],[w0]`). ⚠ cc1's CODEGEN treats a page scalar near (`inc _p_s`)
+      // while its section cannot be: ours departs there, COSTED. ⚠ `reverse(N)` is NOT here:
+      // reverse+near assembles and is cc1's own placement for a reverse scalar
+      // (`reverse(64),data,near`); the banked `reverse(64),bss` with no near was a 32-byte array
+      // the aggregate rule places far. Three rounds on this joint -- FRONTEND.expected.first
+      // C8, C10, C11, C13, C14: two of them my own rules read off the wrong object, and the
+      // third my withdrawal of a right one on a form that pins nothing.
+      if (const auto *RA = VD->getAttr<DSPICReverseAttr>())
+        GVar->addAttribute("dspic-reverse", std::to_string(RA->getAlign()));
+      const auto *SpA = VD->getAttr<DSPICSpaceAttr>();
+      bool ForcedFar = VD->hasAttr<DSPICPageAttr>() || (SpA && SpA->getSpace()->isStr("dma"));
+      if (ForcedFar) {
+        GVar->setAttributes(GVar->getAttributes().removeAttribute(GVar->getContext(), "near"));
+        GVar->addAttribute("far");
+        if (VD->hasAttr<DSPICPageAttr>())
+          GVar->addAttribute("dspic-page");
+      }
     }
     return;
   }
@@ -242,6 +277,47 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
     F->addFnAttr("near");
   if (GV->isDeclaration())
     return;
+  // trellis session 109: the function-side facts. Placement (address / noload / keep / priority)
+  // becomes a per-function section with cc1's attributes (fn.cc1.s); the ISR facts are read by
+  // DSPICFrameLowering (shadow, save, context) and DSPICAsmPrinter (irq / altirq).
+  if (const auto *AA = FD->getAttr<DSPICAddressAttr>())
+    F->addFnAttr("dspic-address", std::to_string(AA->getAddr()));
+  if (FD->hasAttr<DSPICNoloadAttr>())
+    F->addFnAttr("dspic-noload");
+  if (FD->hasAttr<DSPICKeepAttr>())
+    F->addFnAttr("dspic-keep");
+  if (const auto *PA = FD->getAttr<DSPICPriorityAttr>())
+    F->addFnAttr("dspic-priority", std::to_string(PA->getLevel()));
+  if (FD->hasAttr<DSPICShadowAttr>())
+    F->addFnAttr("dspic-shadow");
+  if (FD->hasAttr<DSPICContextAttr>())
+    F->addFnAttr("dspic-context");
+  if (const auto *IQ = FD->getAttr<DSPICIrqAttr>())
+    F->addFnAttr("dspic-irq", std::to_string(IQ->getNumber()));
+  if (const auto *IQ = FD->getAttr<DSPICAltIrqAttr>())
+    F->addFnAttr("dspic-altirq", std::to_string(IQ->getNumber()));
+  {
+    // the save list, from the modifier and from the bare attribute alike, as the globals' IR
+    // names in WRITTEN order (the frame lowering reverses, as cc1 does)
+    std::string Names;
+    auto AddVars = [&](ArrayRef<Expr *> Vars) {
+      for (const Expr *E : Vars) {
+        const auto *DRE = dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts());
+        const auto *VD = DRE ? dyn_cast<VarDecl>(DRE->getDecl()) : nullptr;
+        if (!VD)
+          continue;
+        if (!Names.empty())
+          Names += ",";
+        Names += M.getMangledName(GlobalDecl(VD)).str();
+      }
+    };
+    if (const auto *IA = FD->getAttr<DSPICInterruptAttr>())
+      AddVars(ArrayRef<Expr *>(IA->save_begin(), IA->save_size()));
+    if (const auto *SA = FD->getAttr<DSPICSaveAttr>())
+      AddVars(ArrayRef<Expr *>(SA->vars_begin(), SA->vars_size()));
+    if (!Names.empty())
+      F->addFnAttr("dspic-save", Names);
+  }
   // trellis session 98: `user_init` rides as its own fn-attribute; DSPICAsmPrinter emits the
   // `.user_init` fragment that the linker and the C runtime turn into a call before main.
   if (FD->hasAttr<DSPICUserInitAttr>()) {

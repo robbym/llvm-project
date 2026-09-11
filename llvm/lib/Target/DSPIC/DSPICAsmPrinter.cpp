@@ -118,6 +118,8 @@ static cl::opt<bool> DSPICPrintSizes(
     std::vector<std::string> ConfigPragmas;
     void emitGlobalVariable(const GlobalVariable *GV) override;
     void emitEndOfAsmFile(Module &M) override;
+    // trellis session 109: `irq(N)` / `altirq(N)` -- the second global label at the function head
+    void emitFunctionEntryLabel() override;
 
     void EmitInterruptVectorSection(MachineFunction &ISR);
 
@@ -217,7 +219,41 @@ bool DSPICAsmPrinter::PrintAsmMemoryOperand(const MachineInstr *MI,
 // The config-words row (trellis session 92). A `#pragma config NAME = VALUE` reaches the backend
 // as a marker global in section `.dspic.config` whose initializer is "file:line:NAME=VALUE" (the
 // clang handler, ParsePragma.cpp). The markers are collected here and never emitted as data.
+// trellis session 109: `irq(N)` / `altirq(N)`. cc1 (isr.cc1.s my_handler_52):
+//     _my_handler_52:
+//         .global __Interrupt52
+//     __Interrupt52:
+// -- the handler keeps its own exported name and gains the vector's, which the linker script wires
+// by name exactly as it wires `__T1Interrupt`. The label PRECEDES the preprologue (my_everything).
+void DSPICAsmPrinter::emitFunctionEntryLabel() {
+  AsmPrinter::emitFunctionEntryLabel();
+  const Function &F = MF->getFunction();
+  for (const char *Key : {"dspic-irq", "dspic-altirq"})
+    if (F.hasFnAttribute(Key)) {
+      std::string Sym = (StringRef(Key) == "dspic-irq" ? "__Interrupt" : "__AltInterrupt") +
+                        F.getFnAttribute(Key).getValueAsString().str();
+      OutStreamer->emitRawText(Twine("\t.global\t") + Sym);
+      OutStreamer->emitRawText(Twine(Sym) + ":");
+    }
+}
+
 void DSPICAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
+  // trellis session 109: `fillupper(V)` on a program-memory object -- cc1 (var.cc1.s v_fill):
+  //     .section *_hash,code
+  //     .fillupper 0x12
+  //     ... the object ...
+  //     .fillupper 0x00
+  // The directive is emitted INSIDE the object's section, so the section is switched first (the
+  // generic emission then switches to the same one, a no-op). Mutant MP3 drops the closing one.
+  if (GV->hasAttribute("dspic-fillupper")) {
+    OutStreamer->switchSection(getObjFileLowering().SectionForGlobal(GV, TM));
+    OutStreamer->emitRawText(Twine("\t.fillupper 0x") +
+                             Twine::utohexstr(std::stoul(
+                                 GV->getAttribute("dspic-fillupper").getValueAsString().str())));
+    AsmPrinter::emitGlobalVariable(GV);
+    OutStreamer->emitRawText(StringRef("\t.fillupper 0x00"));
+    return;
+  }
   if (GV->hasSection() && GV->getSection() == ".dspic.config") {
     if (GV->hasInitializer())
       if (auto *CDA = dyn_cast<ConstantDataArray>(GV->getInitializer()))
@@ -280,6 +316,12 @@ struct CfgWord {
 // masked in. An unknown setting or value is a fatal error naming the pragma's file:line -- cc1
 // refuses those too, and silence was the defect this row repairs.
 void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
+  // trellis session 109: `sfr(ADDR)` on an extern declaration is an ABSOLUTE symbol -- cc1
+  // (var.cc1.s): `.equ _v_sfr_at,512`. A declaration emits nothing else, so this is where it goes.
+  for (const GlobalVariable &GV : M.globals())
+    if (GV.hasAttribute("dspic-sfr-address"))
+      OutStreamer->emitRawText(Twine("\t.equ\t") + getSymbol(&GV)->getName() + "," +
+                               GV.getAttribute("dspic-sfr-address").getValueAsString());
   if (ConfigPragmas.empty())
     return;
   if (DSPICConfigDB.empty())

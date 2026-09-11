@@ -6680,7 +6680,21 @@ static void handleDSPICSpaceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     return;
   }
   IdentifierInfo *Space = AL.getArgAsIdent(0)->getIdentifierInfo();
-  if (!Space->isStr("prog") && !Space->isStr("psv") && !Space->isStr("data")) {
+  // trellis session 109: every argument of the vendor's handler, each with cc1's own answer
+  // measured (prints/l1f/frontend/ask/space-*.cc1.log): dataflash and eedata are "not supported
+  // on this target"; external and pmp "require sub-arguments" (never implemented here); the rest
+  // are accepted and become section attributes in the TLOF.
+  if (Space->isStr("dataflash") || Space->isStr("eedata")) {
+    S.Diag(AL.getLoc(), diag::err_dspic_space_unsupported) << Space->getName();
+    return;
+  }
+  if (Space->isStr("external") || Space->isStr("pmp")) {
+    S.Diag(AL.getLoc(), diag::err_dspic_space_subargs) << Space->getName();
+    return;
+  }
+  if (!Space->isStr("prog") && !Space->isStr("psv") && !Space->isStr("data") &&
+      !Space->isStr("auto_psv") && !Space->isStr("xmemory") && !Space->isStr("ymemory") &&
+      !Space->isStr("dma")) {
     S.Diag(AL.getLoc(), diag::err_dspic_space_unimplemented) << Space->getName();
     return;
   }
@@ -6719,6 +6733,252 @@ static void handleLongOrShortCallAttr(Sema &S, Decl *D, const ParsedAttr &AL, bo
     D->addAttr(::new (S.Context) MipsShortCallAttr(S.Context, AL));
 }
 
+// ==================================================================================================
+// trellis session 109: THE FRONT END -- every row of pic30_attribute_table accounted for.
+// Oracle: cc1 on steps/frontend/ask/*.c (prints/l1f/frontend/ask/); predictions:
+// steps/frontend/FRONTEND.expected.first. Each handler names the vendor's rule it realises.
+// ==================================================================================================
+
+// cc1: "interrupt functions must return void" / "must not take parameters" (pic30_validate_void_fn),
+// the same for user_init and priority. Returns false and diagnoses when the signature is wrong.
+static bool checkDSPICVoidFn(Sema &S, Decl *D, const ParsedAttr &AL, unsigned DiagID) {
+  const auto *FD = dyn_cast<FunctionDecl>(D);
+  if (!FD)
+    return true;
+  if (!FD->getReturnType()->isVoidType()) {
+    S.Diag(AL.getLoc(), DiagID) << 0;
+    return false;
+  }
+  if (FD->getNumParams() != 0) {
+    S.Diag(AL.getLoc(), DiagID) << 1;
+    return false;
+  }
+  return true;
+}
+
+// `save`'s operands: whole GLOBAL variables (static storage), cc1 8.3.1's own limit measured
+// (err-save-array.cc1.log). Collects the DeclRefExprs; diagnoses anything else by position.
+static bool collectDSPICSaveVars(Sema &S, const ParsedAttr &AL, unsigned First, unsigned Last,
+                                 SmallVectorImpl<Expr *> &Out) {
+  for (unsigned I = First; I < Last; ++I) {
+    Expr *E = AL.isArgExpr(I) ? AL.getArgAsExpr(I) : nullptr;
+    const auto *DRE = E ? dyn_cast<DeclRefExpr>(E->IgnoreParenImpCasts()) : nullptr;
+    const auto *VD = DRE ? dyn_cast<VarDecl>(DRE->getDecl()) : nullptr;
+    if (!VD || !VD->hasGlobalStorage()) {
+      S.Diag(E ? E->getExprLoc() : AL.getLoc(), diag::err_dspic_save_operand) << (I - First + 1);
+      return false;
+    }
+    Out.push_back(E);
+  }
+  return true;
+}
+
+static bool checkDSPICVector(Sema &S, SourceLocation Loc, Expr *E, bool Alt, uint32_t &N) {
+  std::optional<llvm::APSInt> V = E ? E->getIntegerConstantExpr(S.Context) : std::nullopt;
+  // pic30.c: MIN_IRQ_ID 45 .. MAX_IRQ_ID 53 -- measured as the vendor's errors on 44, 54, 60.
+  if (!V || V->getSExtValue() < 45 || V->getSExtValue() > 53) {
+    S.Diag(Loc, diag::err_dspic_interrupt_vector_range)
+        << (Alt ? 1 : 0) << (V ? int(V->getSExtValue()) : -1);
+    return false;
+  }
+  N = V->getZExtValue();
+  return true;
+}
+
+static void handleDSPICInterruptList(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!checkDSPICVoidFn(S, D, AL, diag::err_dspic_interrupt_signature))
+    return;
+  StringRef Preprologue;
+  SmallVector<Expr *, 4> Save;
+  bool Shadow = false, NoAutoPsv = false;
+  int Irq = -1, AltIrq = -1;
+  unsigned I = 0, N = AL.getNumArgs();
+  while (I < N) {
+    if (!AL.isArgIdent(I)) {
+      S.Diag(AL.getLoc(), diag::err_dspic_interrupt_modifier_unknown) << "?";
+      return;
+    }
+    const IdentifierInfo *Kind = AL.getArgAsIdent(I)->getIdentifierInfo();
+    SourceLocation KindLoc = AL.getArgAsIdent(I)->getLoc();
+    ++I;
+    // the expressions belonging to this kind run to the next identifier
+    unsigned J = I;
+    while (J < N && !AL.isArgIdent(J))
+      ++J;
+    if (Kind->isStr("shadow")) {
+      Shadow = true;
+    } else if (Kind->isStr("no_auto_psv")) {
+      NoAutoPsv = true;
+    } else if (Kind->isStr("auto_psv")) {
+      // the default; nothing to carry (session 98)
+    } else if (Kind->isStr("preprologue")) {
+      if (J - I != 1 || !S.checkStringLiteralArgumentAttr(AL, I, Preprologue))
+        return;
+    } else if (Kind->isStr("irq") || Kind->isStr("altirq")) {
+      uint32_t V = 0;
+      bool Alt = Kind->isStr("altirq");
+      if (J - I != 1 ||
+          !checkDSPICVector(S, KindLoc, AL.isArgExpr(I) ? AL.getArgAsExpr(I) : nullptr, Alt, V))
+        return;
+      (Alt ? AltIrq : Irq) = int(V);
+    } else if (Kind->isStr("save")) {
+      if (J == I) {
+        S.Diag(KindLoc, diag::err_dspic_save_operand) << 1;
+        return;
+      }
+      if (!collectDSPICSaveVars(S, AL, I, J, Save))
+        return;
+    } else {
+      S.Diag(KindLoc, diag::err_dspic_interrupt_modifier_unknown) << Kind->getName();
+      return;
+    }
+    I = J;
+  }
+  D->addAttr(::new (S.Context)
+                 DSPICInterruptAttr(S.Context, AL, Preprologue, Save.data(), Save.size()));
+  if (Shadow && !D->hasAttr<DSPICShadowAttr>())
+    D->addAttr(DSPICShadowAttr::CreateImplicit(S.Context, AL.getRange()));
+  if (NoAutoPsv && !D->hasAttr<DSPICNoAutoPsvAttr>())
+    D->addAttr(DSPICNoAutoPsvAttr::CreateImplicit(S.Context, AL.getRange()));
+  if (Irq >= 0)
+    D->addAttr(DSPICIrqAttr::CreateImplicit(S.Context, Irq, AL.getRange()));
+  if (AltIrq >= 0)
+    D->addAttr(DSPICAltIrqAttr::CreateImplicit(S.Context, AltIrq, AL.getRange()));
+}
+
+// the bare `save(a, b)` attribute: the same operands, the same record as the modifier's list
+static void handleDSPICSaveAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkAtLeastNumArgs(S, 1))
+    return;
+  SmallVector<Expr *, 4> Save;
+  if (!collectDSPICSaveVars(S, AL, 0, AL.getNumArgs(), Save))
+    return;
+  D->addAttr(::new (S.Context) DSPICSaveAttr(S.Context, AL, Save.data(), Save.size()));
+}
+
+// bare irq(N)/altirq(N): an error in cc1 too ("invalid attribute 'irq' ignored")
+static void handleDSPICIrqBareAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  S.Diag(AL.getLoc(), diag::err_dspic_irq_bare) << AL.getAttrName()->getName();
+}
+
+static void handleDSPICUserInitAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!checkDSPICVoidFn(S, D, AL, diag::err_dspic_user_init_signature))
+    return;
+  D->addAttr(::new (S.Context) DSPICUserInitAttr(S.Context, AL));
+}
+
+// sfr(ADDR): cc1 emits `.equ _sym,ADDR` and requires extern storage; the bare form is session 98's.
+static void handleDSPICSfrAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkAtMostNumArgs(S, 1))
+    return;
+  uint32_t Addr = 0;
+  if (AL.getNumArgs() == 1) {
+    if (!S.checkUInt32Argument(AL, AL.getArgAsExpr(0), Addr))
+      return;
+    const auto *VD = dyn_cast<VarDecl>(D);
+    if (!VD || !VD->hasExternalStorage() || VD->hasInit()) {
+      S.Diag(AL.getLoc(), diag::err_dspic_sfr_extern);
+      return;
+    }
+  }
+  D->addAttr(::new (S.Context) DSPICSfrAttr(S.Context, AL, Addr));
+}
+
+// priority(N): 1..65535; 0 and above warn and are IGNORED (cc1's two warnings, err-priority-bad);
+// a priority function is void(void) (cc1's error).
+static void handleDSPICPriorityAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkExactlyNumArgs(S, 1))
+    return;
+  uint32_t Level = 0;
+  if (!S.checkUInt32Argument(AL, AL.getArgAsExpr(0), Level))
+    return;
+  if (Level == 0 || Level > 0xFFFF) {
+    S.Diag(AL.getLoc(), diag::warn_dspic_priority_range)
+        << cast<NamedDecl>(D) << (Level == 0 ? 0 : 1);
+    return;
+  }
+  if (!checkDSPICVoidFn(S, D, AL, diag::err_dspic_priority_signature))
+    return;
+  D->addAttr(::new (S.Context) DSPICPriorityAttr(S.Context, AL, Level));
+}
+
+static void handleDSPICUnsignedArgAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkExactlyNumArgs(S, 1))
+    return;
+  uint32_t V = 0;
+  if (!S.checkUInt32Argument(AL, AL.getArgAsExpr(0), V))
+    return;
+  switch (AL.getKind()) {
+  case ParsedAttr::AT_DSPICReverse:
+    D->addAttr(::new (S.Context) DSPICReverseAttr(S.Context, AL, V));
+    break;
+  case ParsedAttr::AT_DSPICFillupper:
+    D->addAttr(::new (S.Context) DSPICFillupperAttr(S.Context, AL, V));
+    break;
+  default:
+    break;
+  }
+}
+
+static void handleDSPICStringArgAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!AL.checkExactlyNumArgs(S, 1))
+    return;
+  StringRef Msg;
+  if (!S.checkStringLiteralArgumentAttr(AL, 0, Msg))
+    return;
+  switch (AL.getKind()) {
+  case ParsedAttr::AT_DSPICUnsupported:
+    D->addAttr(::new (S.Context) DSPICUnsupportedAttr(S.Context, AL, Msg));
+    break;
+  case ParsedAttr::AT_DSPICTargetError:
+    D->addAttr(::new (S.Context) DSPICTargetErrorAttr(S.Context, AL, Msg));
+    break;
+  case ParsedAttr::AT_DSPICDeprecatedDefinition:
+    D->addAttr(::new (S.Context) DSPICDeprecatedDefinitionAttr(S.Context, AL, Msg));
+    break;
+  default:
+    break;
+  }
+}
+
+// cc1: "The scratch_reg attribute is not usable!" -- warned and ignored there, warned and not
+// added here. REFUSED with the vendor's own sentence.
+static void handleDSPICScratchRegAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  S.Diag(AL.getLoc(), diag::warn_dspic_scratch_reg);
+}
+
+// strict_bitfield: a member attribute (cc1 warns "ignoring ... applied to non-member" otherwise).
+// ⛔ ANNOUNCED, not implemented: the access-unit rule it asks for is CGRecordLowering's, COSTED.
+static void handleDSPICStrictBitfieldAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (!isa<FieldDecl>(D)) {
+    S.Diag(AL.getLoc(), diag::warn_dspic_strict_bitfield_nonmember) << cast<NamedDecl>(D);
+    return;
+  }
+  S.Diag(AL.getLoc(), diag::warn_dspic_strict_bitfield);
+}
+
+// ⛔ REFUSED: the spelling is known and the answer is an error that names what the attribute
+// means and why this port does not provide it. The price of each is in attr-audit.py.
+static void handleDSPICRefusedAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  StringRef Name = AL.getAttrName()->getName();
+  if (Name.starts_with("__") && Name.ends_with("__"))
+    Name = Name.drop_front(2).drop_back(2);
+  const char *Why =
+      Name == "eds"       ? "extended data space is not modelled (the paged access model)"
+    : Name == "boot"      ? "CodeGuard boot/secure segments are not modelled"
+    : Name == "secure"    ? "CodeGuard boot/secure segments are not modelled"
+    : Name == "shared"    ? "co-resident applications are not modelled"
+    : Name == "preserved" ? "the linker's --preserved= restart model is not modelled"
+    : Name == "update"    ? "the linker's --preserved= restart model is not modelled"
+    : Name == "xcdsc_obfuscate" ? "symbol obfuscation is not provided"
+    : Name == "round"     ? "fixed-point rounding modes are not provided (and xc-dsc 4.00's own "
+                            "compiler refuses its four documented modes)"
+    : Name == "ramfunc"   ? "not supported on this target (the vendor compiler refuses it on "
+                            "the 16-bit ISA too)"
+                          : "not implemented";
+  S.Diag(AL.getLoc(), diag::err_dspic_attr_refused) << Name << Why;
+}
+
 static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // Dispatch the interrupt attribute based on the current target.
   switch (S.Context.getTargetInfo().getTriple().getArch()) {
@@ -6747,18 +7007,11 @@ static void handleInterruptAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
           << AL << AL.isRegularKeywordAttribute() << ExpectedFunctionOrMethod;
       break;
     }
-    // trellis session 96 (follow-up 13): zero arguments, or exactly one `preprologue` string
-    // that Parser::ParseDSPICInterruptAttribute has already reduced to a string literal.
-    if (!AL.checkAtMostNumArgs(S, 1))
-      break;
-    {
-      StringRef Preprologue;
-      if (AL.getNumArgs() == 1 &&
-          !S.checkStringLiteralArgumentAttr(AL, 0, Preprologue))
-        break;
-      D->addAttr(::new (S.Context)
-                     DSPICInterruptAttr(S.Context, AL, Preprologue));
-    }
+    // trellis session 109: the flat list Parser::ParseDSPICInterruptAttribute built -- a kind
+    // identifier, then that kind's expressions. shadow / no_auto_psv / irq / altirq become
+    // IMPLICIT bare attributes (one CodeGen reader per fact); the save list rides on the record.
+    // ⛔ And cc1's signature rule (err-isr-sig-bad.cc1.log): void, no parameters.
+    handleDSPICInterruptList(S, D, AL);
     break;
   case llvm::Triple::riscv32:
   case llvm::Triple::riscv64:
@@ -7678,6 +7931,15 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     }
   }
 
+  // trellis session 109: on dsPIC `shared` is the vendor's co-resident attribute (pic30.c),
+  // spelled like CUDA's `__shared__`; REFUSED with the vendor semantics named rather than left
+  // to CUDA's language-option check.
+  if (AL.getKind() == ParsedAttr::AT_CUDAShared &&
+      S.Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic) {
+    handleDSPICRefusedAttr(S, D, AL);
+    return;
+  }
+
   // Check if argument population must delayed to after template instantiation.
   bool MustDelayArgs = MustDelayAttributeArguments(AL);
 
@@ -8014,6 +8276,44 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_DSPICAddress:
     handleDSPICAddressAttr(S, D, AL);
+    break;
+  // trellis session 109
+  case ParsedAttr::AT_DSPICSave:
+    handleDSPICSaveAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICIrq:
+  case ParsedAttr::AT_DSPICAltIrq:
+    handleDSPICIrqBareAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICUserInit:
+    handleDSPICUserInitAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICSfr:
+    handleDSPICSfrAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICPriority:
+    handleDSPICPriorityAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICReverse:
+  case ParsedAttr::AT_DSPICFillupper:
+    handleDSPICUnsignedArgAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICUnsupported:
+  case ParsedAttr::AT_DSPICTargetError:
+  case ParsedAttr::AT_DSPICDeprecatedDefinition:
+    handleDSPICStringArgAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICScratchReg:
+    handleDSPICScratchRegAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICStrictBitfield:
+    handleDSPICStrictBitfieldAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICRefused:
+  case ParsedAttr::AT_DSPICRefusedB:
+  case ParsedAttr::AT_DSPICRefusedSegment:
+  case ParsedAttr::AT_DSPICRound:
+    handleDSPICRefusedAttr(S, D, AL);
     break;
   case ParsedAttr::AT_Naked:
     handleNakedAttr(S, D, AL);

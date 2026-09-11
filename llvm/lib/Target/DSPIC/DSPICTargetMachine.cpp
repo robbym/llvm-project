@@ -94,9 +94,42 @@ public:
   // DSPICTargetAsmStreamer::changeSection prints them verbatim, because `persist`, `noload` and
   // `psv` have no ELF flag and the assembler's name-based inference does not cover the names
   // this firmware uses. ⛔ `persist` REPLACES `data`/`bss` in cc1's output; it is not appended.
+  // trellis session 109: `priority(N)` is `,priority(0xNNNN),keep` on both kinds (var.cc1.s
+  // v_prio, fn.cc1.s f_prio) -- four hex digits, and it implies keep.
+  static std::string pic30Priority(const GlobalObject *GO) {
+    StringRef V;
+    if (const auto *F = dyn_cast<Function>(GO)) {
+      if (!F->hasFnAttribute("dspic-priority"))
+        return "";
+      V = F->getFnAttribute("dspic-priority").getValueAsString();
+    } else if (const auto *GV = dyn_cast<GlobalVariable>(GO)) {
+      if (!GV->hasAttribute("dspic-priority"))
+        return "";
+      V = GV->getAttribute("dspic-priority").getValueAsString();
+    } else {
+      return "";
+    }
+    unsigned N = std::stoul(V.str());
+    char Buf[32];
+    snprintf(Buf, sizeof Buf, ",priority(0x%04X),keep", N);
+    return Buf;
+  }
+
   static std::string pic30Attrs(const GlobalObject *GO, SectionKind Kind) {
-    if (isa<Function>(GO))
-      return ",code";
+    if (const auto *F = dyn_cast<Function>(GO)) {
+      // trellis session 109: the function placement attributes, cc1's forms (fn.cc1.s):
+      // `address(4096),code` / `priority(0x0003),keep,code` / `code,noload` / `code,keep`.
+      std::string S;
+      if (F->hasFnAttribute("dspic-address"))
+        S += ",address(" + F->getFnAttribute("dspic-address").getValueAsString().str() + ")";
+      S += pic30Priority(GO);
+      S += ",code";
+      if (F->hasFnAttribute("dspic-noload"))
+        S += ",noload";
+      if (F->hasFnAttribute("dspic-keep") && !F->hasFnAttribute("dspic-priority"))
+        S += ",keep";
+      return S;
+    }
     const auto *GV = dyn_cast<GlobalVariable>(GO);
     bool Near = !(GV && GV->hasAttribute("far"));
     bool Noload = GV && GV->hasAttribute("dspic-noload");
@@ -109,23 +142,36 @@ public:
     if (GV && GV->hasAttribute("dspic-address"))
       S += ",address(" +
            GV->getAttribute("dspic-address").getValueAsString().str() + ")";
+    // trellis session 109: `reverse(N)` next (var.cc1.s: `reverse(64),bss`), then priority.
+    if (GV && GV->hasAttribute("dspic-reverse"))
+      S += ",reverse(" + GV->getAttribute("dspic-reverse").getValueAsString().str() + ")";
+    S += pic30Priority(GO);
     if (GV && GV->hasAttribute("dspic-persistent")) {
       if (Near)
         S += ",near";
       S += ",persist";
     } else if (Space == "prog") {
       S += ",code";
-    } else if (Space == "psv") {
+    } else if (Space == "psv" || Space == "auto_psv") {
       S += ",psv,page";
     } else {
       bool Zero = !GV || !GV->hasInitializer() ||
                   (GV->getInitializer() && GV->getInitializer()->isNullValue());
       S += Zero ? ",bss" : ",data";
-      if (Near)
+      // trellis session 109: space(xmemory|ymemory) keep `near`; space(dma) has none (measured,
+      // space-*.cc1.s: `data,xmemory,near` / `data,dma`); page/reverse objects have none either.
+      if (Space == "xmemory" || Space == "ymemory" || Space == "dma")
+        S += "," + Space.str();
+      if (Near && Space != "dma")
         S += ",near";
     }
+    // trellis session 109: page (`bss,page`), keep (`data,near,keep`), noload -- the trailing set.
+    if (GV && GV->hasAttribute("dspic-page"))
+      S += ",page";
     if (Noload)
       S += ",noload";
+    if (GV && GV->hasAttribute("dspic-keep") && !GV->hasAttribute("dspic-priority"))
+      S += ",keep";
     return S;
   }
 
@@ -189,10 +235,17 @@ public:
     // L1d (trellis session 88): an interrupt function's BODY goes in `.isr.isr.text` (cc1's
     // `,code,keep`), and the vector is wired by the linker script from the function's SYMBOL
     // NAME -- there is no vector table. The retain/keep flag is a link concern (L1g).
-    if (const auto *F = dyn_cast<Function>(GO))
+    if (const auto *F = dyn_cast<Function>(GO)) {
       if (F->hasFnAttribute("interrupt"))
         return getContext().getELFSection(".isr.isr.text", ELF::SHT_PROGBITS,
                                           ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+      // trellis session 109: a function with a placement attribute gets its OWN section carrying
+      // it (cc1's `*_hash,...,code`; ours `.text.<name>` -- the name-derived attributes agree).
+      if (F->hasFnAttribute("dspic-address") || F->hasFnAttribute("dspic-noload") ||
+          F->hasFnAttribute("dspic-keep") || F->hasFnAttribute("dspic-priority"))
+        return getContext().getELFSection((".text." + GO->getName()).str() + pic30Attrs(GO, Kind),
+                                          ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+    }
     // trellis session 96 (follow-up 14): a placement attribute with NO section() names cc1's
     // own default -- `.prog,code` for space(prog), and for a bare `persistent` a per-object
     // section, where cc1 generates a hashed name and this uses the symbol, which the linker
@@ -201,23 +254,41 @@ public:
       bool Placed = GVar->hasAttribute("dspic-space") ||
                     GVar->hasAttribute("dspic-persistent") ||
                     GVar->hasAttribute("dspic-noload") ||
-                    GVar->hasAttribute("dspic-address");
+                    GVar->hasAttribute("dspic-address") ||
+                    // trellis session 109: each of these is a per-object section in cc1
+                    GVar->hasAttribute("dspic-keep") || GVar->hasAttribute("dspic-page") ||
+                    GVar->hasAttribute("dspic-reverse") ||
+                    GVar->hasAttribute("dspic-unordered") ||
+                    GVar->hasAttribute("dspic-priority");
       if (Placed && GO->getAddressSpace() != 1) {
         StringRef Space = GVar->hasAttribute("dspic-space")
                               ? GVar->getAttribute("dspic-space").getValueAsString()
                               : StringRef();
+        // trellis session 109: the per-object base is the object's DEFAULT section's name plus
+        // the symbol (`.ndata.<sym>` / `.nbss.<sym>` / `.data.<sym>` / `.bss.<sym>`), so the
+        // attributes the pic30 assembler derives from the NAME agree with the ones spelled out.
+        // space(auto_psv) is the shared `.const` (cc1 ignores an explicit section for it).
+        bool Zero = !GVar->hasInitializer() ||
+                    (GVar->getInitializer() && GVar->getInitializer()->isNullValue());
+        bool Near = !GVar->hasAttribute("far");
+        bool PerObject = !GVar->hasAttribute("dspic-space") && !GVar->hasAttribute("dspic-persistent");
         std::string Base = GVar->hasAttribute("dspic-persistent")
                                ? (".pbss." + GO->getName()).str()
                                : (Space == "prog" ? std::string(".prog")
-                                  : Space == "psv" ? std::string(".const")
-                                                   : std::string(".ndata"));
+                                  : (Space == "psv" || Space == "auto_psv") ? std::string(".const")
+                                  : Space == "dma" ? (".dma." + GO->getName()).str()
+                                  : (Space == "xmemory" || Space == "ymemory")
+                                      ? ("." + Space + "." + GO->getName()).str()
+                                  : !PerObject ? std::string(".ndata")
+                                  : ((Zero ? (Near ? ".nbss." : ".bss.") : (Near ? ".ndata." : ".data.")) +
+                                     GO->getName()).str());
         unsigned Flags = ELF::SHF_ALLOC;
-        if (Space == "prog" || Space == "psv")
+        if (Space == "prog" || Space == "psv" || Space == "auto_psv")
           Flags |= ELF::SHF_EXECINSTR;
         else
           Flags |= ELF::SHF_WRITE;
-        return getContext().getELFSection(Base + pic30Attrs(GO, Kind),
-                                          ELF::SHT_PROGBITS, Flags);
+        unsigned Type = (PerObject && Zero) ? ELF::SHT_NOBITS : ELF::SHT_PROGBITS;
+        return getContext().getELFSection(Base + pic30Attrs(GO, Kind), Type, Flags);
       }
     }
     // L1e prog-space: an addrspace(1) global with no explicit section still goes to program memory.

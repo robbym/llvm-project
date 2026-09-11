@@ -232,6 +232,15 @@ bool Sema::DiagnoseUseOfDecl(NamedDecl *D, ArrayRef<SourceLocation> Locs,
                              ObjCInterfaceDecl *ClassReceiver,
                              bool SkipTrailingRequiresClause) {
   SourceLocation Loc = Locs.front();
+  // trellis session 109: the dsPIC use-site diagnostics, the vendor's sentences (pic30.c marks all
+  // three TREE_DEPRECATED; its messages are in prints/l1f/frontend/ask/var.cc1.log and
+  // err-target_error.cc1.log). Target-specific records: never present on another target.
+  if (D->hasAttr<DSPICUnsafeAttr>())
+    Diag(Loc, diag::warn_dspic_unsafe_use) << D;
+  if (const auto *UA = D->getAttr<DSPICUnsupportedAttr>())
+    Diag(Loc, diag::warn_dspic_unsupported_use) << D << UA->getMessage();
+  if (const auto *TA = D->getAttr<DSPICTargetErrorAttr>())
+    Diag(Loc, diag::err_dspic_target_error_use) << D << TA->getMessage();
   if (getLangOpts().CPlusPlus && isa<FunctionDecl>(D)) {
     // If there were any diagnostics suppressed by template argument deduction,
     // emit them now.

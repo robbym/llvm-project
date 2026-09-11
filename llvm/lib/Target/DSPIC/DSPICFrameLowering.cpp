@@ -176,6 +176,45 @@ static bool isrManagesPSV(const MachineFunction &MF) {
   return F.hasFnAttribute("interrupt") && !F.hasFnAttribute("dspic-no-auto-psv");
 }
 
+// trellis session 109: the `shadow` handler. push.s/pop.s appear iff some of w0..w3 must be saved
+// -- clobbered by the body, or by a callee (cc1's pic30_mustsave: a non-leaf ISR saves every
+// call-clobbered register). A handler that touches none of them emits neither (T4).
+static bool isrShadowPushes(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  if (!F.hasFnAttribute("interrupt") || !F.hasFnAttribute("dspic-shadow"))
+    return false;
+  if (MF.getFrameInfo().hasCalls())
+    return true;
+  const MachineRegisterInfo &MRI = MF.getRegInfo();
+  for (MCPhysReg R : {DSPIC::R12, DSPIC::R13, DSPIC::R14, DSPIC::R15})
+    if (MRI.isPhysRegModified(R))
+      return true;
+  return false;
+}
+
+static bool isrIsShadow(const MachineFunction &MF) {
+  const Function &F = MF.getFunction();
+  return F.hasFnAttribute("interrupt") && F.hasFnAttribute("dspic-shadow");
+}
+
+// the `save(...)` list: the globals named by "dspic-save", in WRITTEN order; the emission walks it
+// backwards (cc1 pushes the LAST-written first, isr.cc1.s T6: g32 then g1).
+static void isrSaveList(const MachineFunction &MF, SmallVectorImpl<const GlobalVariable *> &Out) {
+  const Function &F = MF.getFunction();
+  if (!F.hasFnAttribute("interrupt") || !F.hasFnAttribute("dspic-save"))
+    return;
+  SmallVector<StringRef, 4> Names;
+  F.getFnAttribute("dspic-save").getValueAsString().split(Names, ',');
+  for (StringRef N : Names)
+    if (const GlobalVariable *GV = F.getParent()->getGlobalVariable(N, /*AllowInternal=*/true))
+      Out.push_back(GV);
+}
+
+static unsigned saveWords(const GlobalVariable *GV) {
+  uint64_t Bytes = GV->getDataLayout().getTypeAllocSize(GV->getValueType());
+  return unsigned((Bytes + 1) / 2);
+}
+
 void DSPICFrameLowering::emitPrologue(MachineFunction &MF,
                                       MachineBasicBlock &MBB) const {
   assert(&MF.front() == &MBB && "Shrink-wrapping not yet supported");
@@ -330,8 +369,18 @@ planCalleeSaves(ArrayRef<CalleeSavedInfo> CSI,
 void DSPICFrameLowering::determineCalleeSaves(MachineFunction &MF, BitVector &SavedRegs,
                                               RegScavenger *RS) const {
   TargetFrameLowering::determineCalleeSaves(MF, SavedRegs, RS);
-  if (isrManagesPSV(MF) && SavedRegs.none())
-    SavedRegs.set(DSPIC::R12);
+  // trellis session 109: a save list needs the scratch as much as the PSV setup does; and under
+  // `shadow` w0 is not in the list, so the borrowed register is w8 -- cc1's own choice (T1, T4).
+  SmallVector<const GlobalVariable *, 4> Save;
+  isrSaveList(MF, Save);
+  bool NeedsScratch = isrManagesPSV(MF) || !Save.empty();
+  if (NeedsScratch) {
+    bool Any = false;
+    for (const MCPhysReg *R = MF.getSubtarget().getRegisterInfo()->getCalleeSavedRegs(&MF); *R; ++R)
+      Any |= SavedRegs.test(*R);
+    if (!Any)
+      SavedRegs.set(isrIsShadow(MF) ? DSPIC::R10 : DSPIC::R12);
+  }
 }
 
 bool DSPICFrameLowering::spillCalleeSavedRegisters(
@@ -342,7 +391,10 @@ bool DSPICFrameLowering::spillCalleeSavedRegisters(
   // trellis session 98: a handler that manages PSV must reach this code even when it saves no
   // GPR and no RCOUNT -- cc1's `isr_plain` is exactly that shape.
   bool ManagePSV = isrManagesPSV(MF);
-  if (CSI.empty() && !SaveRC && !ManagePSV)
+  bool ShadowPush = isrShadowPushes(MF);
+  SmallVector<const GlobalVariable *, 4> Save;
+  isrSaveList(MF, Save);
+  if (CSI.empty() && !SaveRC && !ManagePSV && !ShadowPush && Save.empty())
     return false;
 
   DebugLoc DL;
@@ -352,6 +404,10 @@ bool DSPICFrameLowering::spillCalleeSavedRegisters(
   const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
   auto *FuncInfo = MF.getInfo<DSPICMachineFunctionInfo>();
   FuncInfo->setCalleeSavedFrameSize(CSI.size() * 2);
+  // trellis session 109: `shadow` -- push.s is the FIRST instruction of the handler, ahead of
+  // RCOUNT (cc1 isr.cc1.s T3: push.s / push _RCOUNT / push.d w4 ...). Mutant MF1 drops the pop.
+  if (ShadowPush)
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::PUSHS)).setMIFlag(MachineInstr::FrameSetup);
   // RCOUNT first (deepest), before the GPRs -- cc1's order. It self-balances with the pop and
   // is not counted in the frame size (pushed before `lnk`, transparent to w14-relative slots).
   if (SaveRC)
@@ -396,6 +452,22 @@ bool DSPICFrameLowering::spillCalleeSavedRegisters(
       BuildMI(MBB, MI, DL, TII.get(DSPIC::POP16r), Scratch)
           .setMIFlag(MachineInstr::FrameSetup);
   }
+  // trellis session 109: the `save(...)` list, AFTER the PSV setup and through the same scratch
+  // (cc1 T5: `mov #_g1+0,w0 ; mov.w [w0++],[w15++]`), the LAST-written variable first (T6).
+  // ⛔ The word count is the OBJECT's size, not the pointer's -- mutant MF5. determineCalleeSaves
+  // guaranteed a callee-saved register whenever the list is non-empty, so CSI[0] exists.
+  if (!Save.empty()) {
+    Register Scratch = CSI.empty() ? Register(DSPIC::R12) : Register(CSI[0].getReg());
+    for (const GlobalVariable *GV : llvm::reverse(Save)) {
+      BuildMI(MBB, MI, DL, TII.get(DSPIC::MOV16ri), Scratch)
+          .addGlobalAddress(GV, 0)
+          .setMIFlag(MachineInstr::FrameSetup);
+      for (unsigned W = 0, N = saveWords(GV); W < N; ++W)
+        BuildMI(MBB, MI, DL, TII.get(DSPIC::SAVEWORD), Scratch)
+            .addReg(Scratch)
+            .setMIFlag(MachineInstr::FrameSetup);
+    }
+  }
   return true;
 }
 
@@ -404,7 +476,10 @@ bool DSPICFrameLowering::restoreCalleeSavedRegisters(
     MutableArrayRef<CalleeSavedInfo> CSI, const TargetRegisterInfo *TRI) const {
   MachineFunction &MF = *MBB.getParent();
   bool SaveRC = isrSavesRCount(MF);
-  if (CSI.empty() && !SaveRC && !isrManagesPSV(MF))
+  bool ShadowPush = isrShadowPushes(MF);
+  SmallVector<const GlobalVariable *, 4> Save;
+  isrSaveList(MF, Save);
+  if (CSI.empty() && !SaveRC && !isrManagesPSV(MF) && !ShadowPush && Save.empty())
     return false;
 
   DebugLoc DL;
@@ -412,6 +487,23 @@ bool DSPICFrameLowering::restoreCalleeSavedRegisters(
     DL = MI->getDebugLoc();
 
   const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
+
+  // trellis session 109: the save list comes back FIRST of all, in WRITTEN order (the reverse of
+  // the push side), each restore starting at the object's LAST word (cc1 T6: `mov #_g32+2,w0 ;
+  // mov.w [--w15],[w0--]` twice). Mutant MF3 restores in push order.
+  if (!Save.empty()) {
+    Register Scratch = CSI.empty() ? Register(DSPIC::R12) : Register(CSI[0].getReg());
+    for (const GlobalVariable *GV : Save) {
+      unsigned N = saveWords(GV);
+      BuildMI(MBB, MI, DL, TII.get(DSPIC::MOV16ri), Scratch)
+          .addGlobalAddress(GV, 2 * (N - 1))
+          .setMIFlag(MachineInstr::FrameDestroy);
+      for (unsigned W = 0; W < N; ++W)
+        BuildMI(MBB, MI, DL, TII.get(DSPIC::RESTWORD), Scratch)
+            .addReg(Scratch)
+            .setMIFlag(MachineInstr::FrameDestroy);
+    }
+  }
 
   // trellis session 98: the page registers come back FIRST -- before the GPR pops -- which is
   // cc1's order and the reverse of the push side.
@@ -434,6 +526,9 @@ bool DSPICFrameLowering::restoreCalleeSavedRegisters(
   // RCOUNT last -- restored after every GPR, cc1's order.
   if (SaveRC)
     BuildMI(MBB, MI, DL, TII.get(DSPIC::POPRCOUNT)).setMIFlag(MachineInstr::FrameDestroy);
+  // trellis session 109: pop.s is the LAST instruction before retfie (cc1 T1..T3).
+  if (ShadowPush)
+    BuildMI(MBB, MI, DL, TII.get(DSPIC::POPS)).setMIFlag(MachineInstr::FrameDestroy);
   return true;
 }
 
