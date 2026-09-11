@@ -1387,6 +1387,24 @@ let hasSideEffects = 0, isTerminator = 1 in {
   def CPBGT8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b,  jmptarget:$dst), 2, "cpbgt.b\t$a,$b,$dst">;
 }
 
+// trellis session 105: the compare-and-SKIP forms. `cpsXX Wb,Wn` skips the next instruction when
+// the condition holds. Like the cpb forms they take two registers and nothing else, the ordering
+// forms are SIGNED, and they WRITE NO FLAGS (steps/exec/cmpprobe.c F3, measured), so DSPICCmpFuse
+// emits one only where it would have emitted the cpb form -- the same SR-deadness walk -- and
+// only when the branch's displacement is exactly the one word the skip covers. Same terminator
+// convention as the cpb forms: the block keeps both successors from the JCC this replaces, and
+// the skipped instruction stays in its own block. One word each.
+let hasSideEffects = 0, isTerminator = 1 in {
+  def CPSEQ16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "cpseq\t$a,$b">;
+  def CPSNE16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "cpsne\t$a,$b">;
+  def CPSLT16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "cpslt\t$a,$b">;
+  def CPSGT16 : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "cpsgt\t$a,$b">;
+  def CPSEQ8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b),  2, "cpseq.b\t$a,$b">;
+  def CPSNE8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b),  2, "cpsne.b\t$a,$b">;
+  def CPSLT8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b),  2, "cpslt.b\t$a,$b">;
+  def CPSGT8  : DSPICFrameInst<(outs), (ins GR8:$a,  GR8:$b),  2, "cpsgt.b\t$a,$b">;
+}
+
 // a bit field as a value, and the find-first-one pair
 let Defs = [SR] in {
   def BFEXT16rr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs, i16imm:$k, i16imm:$n), 2, "bfext\t$k,$n,$rs,$rd">;

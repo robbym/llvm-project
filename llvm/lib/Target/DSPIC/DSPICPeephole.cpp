@@ -727,6 +727,19 @@ static bool srMayBeRead(MachineBasicBlock *Start, const TargetRegisterInfo *TRI)
   return false;
 }
 
+STATISTIC(NumCmpSkip, "Number of compare+branch pairs fused into cps skip forms");
+
+// the skip forms take no target: the skipped instruction is the layout successor's one word.
+static bool isSkipForm(unsigned Opc) {
+  switch (Opc) {
+  case DSPIC::CPSEQ16: case DSPIC::CPSNE16: case DSPIC::CPSLT16: case DSPIC::CPSGT16:
+  case DSPIC::CPSEQ8:  case DSPIC::CPSNE8:  case DSPIC::CPSLT8:  case DSPIC::CPSGT8:
+    return true;
+  default:
+    return false;
+  }
+}
+
 unsigned DSPICCmpFuseImpl::measure() {
   MF->RenumberBlocks();
   Off.assign(MF->getNumBlockIDs(), 0);
@@ -821,7 +834,50 @@ bool DSPICCmpFuseImpl::runOnMachineFunction(MachineFunction &mf) {
       why(MBB, "REFUSED: displacement out of the 6-bit reach, words", Words);
       continue;
     }
-    why(MBB, "FUSED, displacement words", Words);
+    // ⛔ THE SKIP ARM (trellis session 105): a branch over exactly ONE word is the skip shape.
+    // `cpbXX Wb,Wn,L ; <one word> ; L:` becomes `cpsXX Wb,Wn ; <one word>`.
+    // ⛔ AND IT IS A SPELLING, MEASURED AFTER IT WAS BUILT: the LINKER resolves a one-word cpbeq to
+    // `11 90 e7`, the identical word the assembler gives cpseq (a two-word cpbeq is `21 90 e7`) --
+    // so both firmwares are BYTE-IDENTICAL under this arm at 20 changed sites, and the cycle
+    // difference the prediction claimed (cycleprobe: cpbeq "taken 5", cpseq "skip 2") compared a
+    // displacement-ZERO branch against this very word. What the arm buys is the assembler's six
+    // cps rows in the inventory and an honest mnemonic for what the hardware does; what it costs
+    // is nothing the machine sees. Same guard as the branch forms, because the skip forms write
+    // no flags either (cmpprobe F3). The rule is fuseSkip's (the btsc/btss arm, L1f-g), mirrored:
+    // the layout successor B is ONE instruction, not a pseudo, not inline asm, has this block as
+    // its only predecessor, and reaches the target by falling through or by never continuing.
+    // B's own flag reads are already refused above: B is a successor, and the walk starts at its
+    // first instruction. ⚠ fuseSkip's explicit "two bytes" test is NOT repeated here because
+    // `Words == 1` with B the only block between already says it -- mutant MS3 (the test dropped)
+    // LIVED on its two-word fixture for exactly that reason, and a guard that cannot fire is
+    // documentation pretending to be a check. skip2.c pins the two-word case at Words == 2.
+    unsigned SkipOpc = 0;
+    if (Words == 1) {
+      auto BI = std::next(MBB.getIterator());
+      if (BI != MF->end()) {
+        MachineBasicBlock &B = *BI;
+        auto LI = std::next(BI);
+        if (LI != MF->end() && &*LI == Dest && MBB.isSuccessor(&B) && B.pred_size() == 1 &&
+            B.size() == 1) {
+          MachineInstr &One = B.front();
+          if (!One.isPseudo() && !One.isInlineAsm() &&
+              (One.isBarrier() || B.isSuccessor(Dest))) {
+            switch (CC) {
+            case DSPICCC::COND_E:  SkipOpc = Byte ? DSPIC::CPSEQ8 : DSPIC::CPSEQ16; break;
+            case DSPICCC::COND_NE: SkipOpc = Byte ? DSPIC::CPSNE8 : DSPIC::CPSNE16; break;
+            case DSPICCC::COND_L:  SkipOpc = Byte ? DSPIC::CPSLT8 : DSPIC::CPSLT16; break;
+            default: break;
+            }
+          }
+        }
+      }
+    }
+    if (SkipOpc) {
+      why(MBB, "FUSED, as a skip over one word");
+      Fused = SkipOpc;
+    } else {
+      why(MBB, "FUSED, displacement words", Words);
+    }
 
     Work.push_back({Cmp, Br});
     Opc.push_back(Fused);
@@ -831,10 +887,14 @@ bool DSPICCmpFuseImpl::runOnMachineFunction(MachineFunction &mf) {
     return false;
   for (unsigned i = 0; i != Work.size(); ++i) {
     MachineInstr *Cmp = Work[i].first, *Br = Work[i].second;
-    BuildMI(*Br->getParent(), *Cmp, Br->getDebugLoc(), TII->get(Opc[i]))
-        .add(Cmp->getOperand(0))
-        .add(Cmp->getOperand(1))
-        .addMBB(Br->getOperand(0).getMBB());
+    MachineInstrBuilder MIB =
+        BuildMI(*Br->getParent(), *Cmp, Br->getDebugLoc(), TII->get(Opc[i]))
+            .add(Cmp->getOperand(0))
+            .add(Cmp->getOperand(1));
+    if (isSkipForm(Opc[i]))
+      ++NumCmpSkip;
+    else
+      MIB.addMBB(Br->getOperand(0).getMBB());
     Cmp->eraseFromParent();
     Br->eraseFromParent();
     ++NumCmpFuse;
