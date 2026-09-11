@@ -11,14 +11,22 @@
 // they came from a shim header (tools/dspic-llvm/dspic-builtins.h) as `__asm__ volatile` strings,
 // so this compiler had emitted `tblrdl`/`tblrdh` ZERO times -- it copied them.
 //
+// trellis session 108: the rest of the near-term VENDOR set -- the instructions no C expression
+// spells. Every name and signature below is read off the vendor's own registration
+// (xc16_gcc_831/gcc/gcc/config/pic30/pic30.c, add_builtin_function_public, TARGET_CLASSIC arm),
+// not from memory; cc1's answer for each is banked at prints/l1f/isaops/vbi-ask-pre.txt.
+//
 // The names are the VENDOR's, not `__builtin_dspic_*`: xc16 and XC-DSC spell them exactly so, real
 // firmware calls them by these names, and a port that renamed them would not compile that firmware.
 //
 // ⛔ `Ui` IS SIXTEEN BITS ON THIS TARGET. Session 99 found three clang builtins in this port handing
-// a 16-bit `int` to an i32 intrinsic parameter; every intrinsic below takes and returns i16.
+// a 16-bit `int` to an i32 intrinsic parameter; every intrinsic below takes and returns i16 (or
+// i8 where the vendor's type is `unsigned char`), and `Li` -- `long`, the widening multiplies'
+// result -- is the ONE 32-bit type, produced by ordinary IR extension and multiply, not by an
+// intrinsic.
 //
-// The attribute is "n" (nothrow) and NOT "c" (const): a table read depends on TBLPAG, a
-// memory-mapped SFR the builtin does not name, and a table write changes the flash write latches.
+// The attribute is "n" (nothrow) and NOT "c" (const) on anything that reads TBLPAG or touches the
+// machine state; "nc" on the pure ones (fbcl, the multiplies, the swaps).
 //
 //===----------------------------------------------------------------------===//
 
@@ -30,5 +38,46 @@ BUILTIN(__builtin_tblrdh, "UiUi", "n")
 // The writes target the flash write LATCHES, not program memory: the NVM controller commits them.
 BUILTIN(__builtin_tblwtl, "vUiUi", "n")
 BUILTIN(__builtin_tblwth, "vUiUi", "n")
+
+// ── trellis session 108 ─────────────────────────────────────────────────────────────────────────
+// The BYTE table forms. tblrdl.b reads PM<7:0> at an even offset and PM<15:8> at an odd one;
+// tblrdh.b reads PM<23:16> at an even offset and ZERO at an odd one (DS70000157G). Both take the
+// page from TBLPAG like the word forms, hence "n" and not "c".
+BUILTIN(__builtin_tblrdlb, "UcUi", "n")
+BUILTIN(__builtin_tblrdhb, "UcUi", "n")
+BUILTIN(__builtin_tblwtlb, "vUiUc", "n")
+BUILTIN(__builtin_tblwthb, "vUiUc", "n")
+
+// fbcl Ws,Wnd -- find first bit change from left: the number of leading redundant sign bits,
+// NEGATED (0 for 0x4000 or 0x8000, -14 for 0x0001, -15 when no change is found), sign-extended.
+// The vendor's signature is int(int); pure.
+BUILTIN(__builtin_fbcl, "ii", "nc")
+
+// The four widening 16x16->32 multiplies. ⛔ THESE ARE NOT INTRINSICS: each is an ordinary IR
+// multiply of the two extended operands, and the backend selects `mul.ss`/`mul.uu` from that shape
+// already (L1f-d) and `mul.su`/`mul.us` from the mixed one since this session (a target DAG combine
+// on the i32 MUL of a sign-extended and a zero-extended i16). So the same instructions reach
+// PLAIN C -- `(long)a * (long)b` with one signed and one unsigned operand -- which cc1 does NOT do
+// (it spends five words on that C shape and one on the builtin; vbi-ask-pre.txt, c_mulsu).
+BUILTIN(__builtin_mulss, "Liii", "nc")
+BUILTIN(__builtin_muluu, "ULiUiUi", "nc")
+BUILTIN(__builtin_mulsu, "LiiUi", "nc")
+BUILTIN(__builtin_mulus, "LiUii", "nc")
+
+// swap Wn exchanges the two bytes of a word (the ISD::BSWAP the backend already selects as `swap`);
+// swap.b Wn exchanges the two NIBBLES of the low byte. The vendor spells the byte one
+// `__builtin_swap_byte`.
+BUILTIN(__builtin_swap, "UiUi", "nc")
+BUILTIN(__builtin_swap_byte, "UcUc", "nc")
+
+// The control instructions. `I` = the argument must be an integer constant expression (the
+// instruction takes a literal; cc1 refuses a variable too). The RANGE -- disi 0..16383, pwrsav
+// 0..1 -- is checked in CGBuiltin and refused with a diagnostic at the call, not silently
+// truncated into the encoding. All four sit in isa-inventory.py's INTRINSIC / asm-only exclusion,
+// so they move the standing coverage figure by ZERO; they exist for the firmware that calls them.
+BUILTIN(__builtin_disi, "vIi", "n")
+BUILTIN(__builtin_pwrsav, "vIUi", "n")
+BUILTIN(__builtin_clrwdt, "v", "n")
+BUILTIN(__builtin_nop, "v", "n")
 
 #undef BUILTIN

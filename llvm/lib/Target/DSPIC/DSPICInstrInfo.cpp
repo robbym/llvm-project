@@ -585,7 +585,15 @@ DSPICInstrInfo::getOutliningCandidateInfo(
   unsigned SequenceSize = 0;
   for (auto &MI : RepeatedSequenceLocs[0])
     SequenceSize += getInstSizeInBytes(MI);
-  unsigned CallOverhead = 2;
+  // trellis session 108: the call's cost follows the CODE MODEL the call itself follows
+  // (insertOutlinedCall below, session 97): `call` under -mlarge-code is TWO words, `rcall` one.
+  // This was a constant one word, so under the large model every outlined call was priced at half
+  // its size and a two-instruction sequence at four sites (`bclr.w _IEC1bits,#2 ; nop` in stn3255)
+  // was outlined for a net +3 words -- seen the day __builtin_nop became a real instruction rather
+  // than an inline-asm block the outliner may not touch (steps/vbi/CORRECTIONS.md section 5).
+  bool LargeCode =
+      RepeatedSequenceLocs[0].getMF()->getSubtarget<DSPICSubtarget>().isLargeCode();
+  unsigned CallOverhead = LargeCode ? 4 : 2;
   unsigned FrameOverhead = 2;
   for (outliner::Candidate &C : RepeatedSequenceLocs)
     C.setCallInfo(MachineOutlinerDefault, CallOverhead);

@@ -1218,6 +1218,98 @@ let isCodeGenOnly = 1, usesCustomInserter = 1, Defs = [SR] in {
 }
 
 
+//===----------------------------------------------------------------------===//
+// trellis session 108: MORE ISA CAPABILITIES, INCLUDING THOSE UNREPRESENTABLE BY PLAIN C.
+// The asks are steps/isaops/mulf.c and vbi.c (prints/l1f/isaops/*-ask-pre.txt); the written-first
+// expectations prints/l1f/mulf.expected.first and vbi.expected.first; execution on the device
+// model steps/exec/vbiexec.c. Every value is checked by EXECUTION where the instruction computes
+// one -- the assembler is a control for FORMS only (sessions 84, 85, 98, 101).
+//===----------------------------------------------------------------------===//
+
+// (0) `mul.b f` -- "MUL: Integer Unsigned Multiply f and WREG", byte mode: (WREG)<7:0> * (f)<7:0>
+// -> W2, no flags. The operands are UNSIGNED; a signed byte product never reaches this. The
+// registers are FIXED by the instruction (W0 in, W2 out), so the shape is the MULSSpair one: a
+// pseudo carries the pattern, the inserter copies the byte into W0, emits the instruction and
+// copies W2 out. cc1: `mul.b _gub ; mov.w w2,w0` for `(u16)a * gub` where ours spent five words.
+// ⛔ MUL8f USES W0's LOW BYTE AND DEFS W2 AS IMPLICIT OPERANDS; mutant MB2 drops the copy into W0,
+// which leaves the text of the argument-in-w0 shape unchanged and computes a wrong product wherever
+// the byte lives elsewhere (m_ubub, executed).
+let isCodeGenOnly = 1, mayLoad = 1, Uses = [R12B], Defs = [R14] in
+def MUL8f : DSPICFrameInst<(outs), (ins memsrc:$f), 2, "mul.b\t$f">;
+let isCodeGenOnly = 1, usesCustomInserter = 1, AddedComplexity = 20 in {
+  def MULBF16 : Pseudo<(outs GR16:$rd), (ins GR8:$a, memsrc:$f), "# MULBF16",
+                       [(set GR16:$rd, (mul (i16 (zext GR8:$a)), (zextloadi16i8 faddr:$f)))]>;
+  // the same product when the combiner left the extension outside the load
+  def MULBF16z : Pseudo<(outs GR16:$rd), (ins GR8:$a, memsrc:$f), "# MULBF16z",
+                        [(set GR16:$rd, (mul (i16 (zext GR8:$a)), (i16 (zext (i8 (load faddr:$f))))))]>;
+}
+
+// (1) the MIXED widening multiply, `mul.su Wb,Ws,Wnd` (signed x unsigned) and `mul.us` (unsigned x
+// signed), the product to the pair fixed at w0:w1 as MULSSpair. The node is formed by
+// combineMixedWideningMul in DSPICISelLowering.cpp from an i32 MUL of a sign-extended and a
+// zero-extended i16 -- the shape __builtin_mulsu/mulus emit and the shape `(long)a * (long)b`
+// has from plain C. ⛔ WHICH OPERAND IS SIGNED IS THE INSTRUCTION: `mul.su w0,w1` treats w0 as
+// signed; mutant MM1 exchanges the two mnemonics and the product is wrong whenever the operand
+// that is really unsigned has bit 15 set (executed: -3 x 60000).
+def SDT_DSPICMulMixed : SDTypeProfile<2, 2, [SDTCisVT<0, i16>, SDTCisVT<1, i16>,
+                                              SDTCisVT<2, i16>, SDTCisVT<3, i16>]>;
+def DSPICmulsu : SDNode<"DSPICISD::MULSU", SDT_DSPICMulMixed, []>;
+def DSPICmulus : SDNode<"DSPICISD::MULUS", SDT_DSPICMulMixed, []>;
+let isCodeGenOnly = 1, Defs = [R12, R13, SR] in {
+  def MULSUpair : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "mul.su\t$a,$b,w0">;
+  def MULUSpair : DSPICFrameInst<(outs), (ins GR16:$a, GR16:$b), 2, "mul.us\t$a,$b,w0">;
+}
+let isCodeGenOnly = 1, usesCustomInserter = 1, Defs = [SR] in {
+  def MULSU16 : Pseudo<(outs GR16:$lo, GR16:$hi), (ins GR16:$a, GR16:$b), "# MULSU16",
+                       [(set GR16:$lo, GR16:$hi, (DSPICmulsu GR16:$a, GR16:$b))]>;
+  def MULUS16 : Pseudo<(outs GR16:$lo, GR16:$hi), (ins GR16:$a, GR16:$b), "# MULUS16",
+                       [(set GR16:$lo, GR16:$hi, (DSPICmulus GR16:$a, GR16:$b))]>;
+}
+
+// (2) fbcl Ws,Wnd -- find first bit change from left; writes C (set iff no change is found).
+// swap.b Wn -- the nibbles of the low byte exchanged, in place (one operand, tied).
+let Defs = [SR] in
+def FBCL16 : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs), 2, "fbcl\t$rs,$rd">;
+let Constraints = "$rs = $rd" in
+def SWAP8r : DSPICFrameInst<(outs GR8:$rd), (ins GR8:$rs), 2, "swap.b\t$rd">;
+def : Pat<(int_dspic_fbcl GR16:$rs), (FBCL16 GR16:$rs)>;
+def : Pat<(int_dspic_swapb GR8:$rs), (SWAP8r GR8:$rs)>;
+
+// (3) the BYTE table forms: session 103's block one width down, the same TBLPAG reasoning and the
+// same hasSideEffects. tblrdl.b at an odd offset reads PM<15:8>; tblrdh.b at an odd offset reads
+// ZERO (the phantom byte) -- both executed in steps/exec/vbiexec.c. Mutant MT4 makes tblrdh.b
+// select the tblrdl.b instruction: 0x56 where 0x12 is owed.
+let hasSideEffects = 1 in {
+  let mayLoad = 1 in {
+  def TBLRDL8 : DSPICFrameInst<(outs GR8:$rd), (ins GR16:$p), 2, "tblrdl.b\t[$p],$rd">;
+  def TBLRDH8 : DSPICFrameInst<(outs GR8:$rd), (ins GR16:$p), 2, "tblrdh.b\t[$p],$rd">;
+  }
+  let mayStore = 1 in {
+  def TBLWTL8 : DSPICFrameInst<(outs), (ins GR8:$rs, GR16:$p), 2, "tblwtl.b\t$rs,[$p]">;
+  def TBLWTH8 : DSPICFrameInst<(outs), (ins GR8:$rs, GR16:$p), 2, "tblwth.b\t$rs,[$p]">;
+  }
+}
+def : Pat<(int_dspic_tblrdlb GR16:$p), (TBLRDL8 GR16:$p)>;
+def : Pat<(int_dspic_tblrdhb GR16:$p), (TBLRDH8 GR16:$p)>;
+def : Pat<(int_dspic_tblwtlb GR16:$p, GR8:$v), (TBLWTL8 GR8:$v, GR16:$p)>;
+def : Pat<(int_dspic_tblwthb GR16:$p, GR8:$v), (TBLWTH8 GR8:$v, GR16:$p)>;
+
+// (4) the control instructions. The literal of disi/pwrsav is a TargetConstant (ImmArg) matched
+// by timm; its range was checked in clang. These are in the inventory's INTRINSIC / asm-only
+// exclusion: they move the coverage figure by ZERO and exist for the firmware that calls them.
+// ⚠ `nop` had been a static inline over `__asm__ volatile("nop")` in dspic-builtins.h since
+// session 88; it is a real builtin now and the shim's definition is gone (the two cannot coexist).
+let hasSideEffects = 1 in {
+  def DISI    : DSPICFrameInst<(outs), (ins i16imm:$n), 2, "disi\t$n">;
+  def PWRSAV  : DSPICFrameInst<(outs), (ins i16imm:$m), 2, "pwrsav\t$m">;
+  def CLRWDT  : DSPICFrameInst<(outs), (ins), 2, "clrwdt">;
+  def NOPinst : DSPICFrameInst<(outs), (ins), 2, "nop">;
+}
+def : Pat<(int_dspic_disi timm:$n), (DISI timm:$n)>;
+def : Pat<(int_dspic_pwrsav timm:$m), (PWRSAV timm:$m)>;
+def : Pat<(int_dspic_clrwdt), (CLRWDT)>;
+def : Pat<(int_dspic_nop), (NOPinst)>;
+
 // L1f-c: a byte shifted by k > 1 or by a register is the WORD form on the byte register,
 // cc1's own shape: the extension is free for shl (`sl w0,#2,w0`), `ze` for lsr, `se` for
 // asr. These are patterns, not a lowering through i16: a Custom i8 shift rebuilt as

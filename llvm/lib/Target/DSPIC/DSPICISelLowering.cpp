@@ -1445,13 +1445,46 @@ unsigned DSPICTargetLowering::ComputeNumSignBitsForTargetNode(SDValue Op,
   }
 }
 
+// trellis session 108: THE MIXED-SIGN WIDENING MULTIPLY. An i32 MUL of a sign-extended i16 and
+// a zero-extended i16 is one instruction on this machine -- `mul.su Wb,Ws,Wnd` (signed x
+// unsigned) or `mul.us` (unsigned x signed) -- and nothing generic forms it: SMUL_LOHI wants both
+// operands signed, UMUL_LOHI both unsigned, so the type legalizer expands the mixed product into
+// a `mul.uu` plus a sign-correction (`asr #15 ; mulw ; add`), four or five words. cc1 does the
+// same from plain C (vbi-ask-pre.txt, c_mulsu: five words) and one word only through its
+// __builtin_mulsu. This combine runs BEFORE type legalization, on the i32 node the legalizer would
+// otherwise split, and hands back a BUILD_PAIR of the two-result target node -- the session-89
+// shape (an illegal i32 replaced by a pair of i16s).
+// ⛔ THE OPERAND ORDER IS THE MNEMONIC. The signed operand of `mul.su` is Wb, the FIRST; a
+// zero-extended first operand is `mul.us`. Mutant MM1 exchanges the two.
+static SDValue combineMixedWideningMul(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
+  if (!DCI.isBeforeLegalize() || N->getValueType(0) != MVT::i32)
+    return SDValue();
+  auto ext16 = [](SDValue V, unsigned Opc) {
+    return V.getOpcode() == Opc && V.getOperand(0).getValueType() == MVT::i16;
+  };
+  SDValue A = N->getOperand(0), B = N->getOperand(1);
+  unsigned Opc;
+  if (ext16(A, ISD::SIGN_EXTEND) && ext16(B, ISD::ZERO_EXTEND))
+    Opc = DSPICISD::MULSU;
+  else if (ext16(A, ISD::ZERO_EXTEND) && ext16(B, ISD::SIGN_EXTEND))
+    Opc = DSPICISD::MULUS;
+  else
+    return SDValue();
+  SDLoc dl(N);
+  SelectionDAG &DAG = DCI.DAG;
+  SDValue R = DAG.getNode(Opc, dl, DAG.getVTList(MVT::i16, MVT::i16), A.getOperand(0),
+                          B.getOperand(0));
+  return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, R.getValue(0), R.getValue(1));
+}
+
 // (session 92, the libcalls row) InstCombine spells `a * b` on two i64 arguments `mul %b, %a`,
 // and the routine then took its eight argument words through w8..w11 (14 words) where cc1 is one
 // `bra ___muldi3`. For a commutative op the backend hands to a routine (MUL wider than the word,
 // FADD, FMUL), put the operand that is the EARLIER formal argument first: the lowest CopyFromReg
 // vreg under each operand's BUILD_PAIR tree, in the order the arguments were lowered.
 static unsigned firstArgVReg(SDValue V) {
-  while (V.getOpcode() == ISD::BUILD_PAIR)
+  while (V.getOpcode() == ISD::BUILD_PAIR || V.getOpcode() == ISD::SIGN_EXTEND ||
+         V.getOpcode() == ISD::ZERO_EXTEND || V.getOpcode() == ISD::ANY_EXTEND)  // session 108: the extensions
     V = V.getOperand(0);
   if (V.getOpcode() != ISD::CopyFromReg)
     return 0;
@@ -1613,8 +1646,16 @@ SDValue DSPICTargetLowering::PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) 
     return combineCarryChainConstant(N, DCI);
   if (N->getOpcode() == DSPICISD::CMP || N->getOpcode() == DSPICISD::CMPB)
     return combineCmpThroughAssert(N, DCI.DAG);
+  // trellis session 108: the argument-order combine runs FIRST (the node it returns is revisited),
+  // so the mixed multiply sees its operands in the order the caller wrote them and the mnemonic
+  // follows -- `mul.su w0,w1,w0` for mulsu(a, b), which is cc1's text. The first build had the
+  // mixed combine first and InstCombine's operand order gave `mul.us w1,w0,w0`: the same product,
+  // the other spelling, eight comparer failures on text alone (steps/vbi/CORRECTIONS.md).
   if (N->getOpcode() == ISD::MUL || N->getOpcode() == ISD::FADD || N->getOpcode() == ISD::FMUL)
-    return combineCommutativeLibcallOrder(N, DCI);
+    if (SDValue R = combineCommutativeLibcallOrder(N, DCI))
+      return R;
+  if (N->getOpcode() == ISD::MUL)
+    return combineMixedWideningMul(N, DCI);
   if (N->getOpcode() == ISD::BRCOND || N->getOpcode() == ISD::SELECT)
     return combineCond32(N, DCI);
   if (N->getOpcode() == ISD::LOAD)
@@ -2510,6 +2551,36 @@ DSPICTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   }
   if (Opc == DSPIC::SMULLOHI16 || Opc == DSPIC::UMULLOHI16) {
     unsigned MulOpc = Opc == DSPIC::SMULLOHI16 ? DSPIC::MULSSpair : DSPIC::MULUUpair;
+    BuildMI(*BB, MI, dl, TII.get(MulOpc))
+        .addReg(MI.getOperand(2).getReg())
+        .addReg(MI.getOperand(3).getReg());
+    BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), MI.getOperand(0).getReg())
+        .addReg(DSPIC::R12);
+    BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), MI.getOperand(1).getReg())
+        .addReg(DSPIC::R13);
+    MI.eraseFromParent();
+    return BB;
+  }
+
+  // trellis session 108: `mul.b f` -- the byte into W0's low byte, the instruction (Uses R12B,
+  // Defs R14), the 16-bit product out of W2. Operands: 0 = $rd, 1 = $a, 2..3 = memsrc.
+  // ⛔ Mutant MB1 copies the result from R12 (the operand) instead of R14 (the product); MB2 drops
+  // the copy INTO R12B. Both assemble; both are wrong numbers on the device model.
+  if (Opc == DSPIC::MULBF16 || Opc == DSPIC::MULBF16z) {
+    BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), DSPIC::R12B)
+        .addReg(MI.getOperand(1).getReg());
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MUL8f))
+        .add(MI.getOperand(2))
+        .add(MI.getOperand(3));
+    BuildMI(*BB, MI, dl, TII.get(TargetOpcode::COPY), MI.getOperand(0).getReg())
+        .addReg(DSPIC::R14);
+    MI.eraseFromParent();
+    return BB;
+  }
+  // trellis session 108: the mixed widening multiply, the SMULLOHI16 arm one opcode over --
+  // `mul.su`/`mul.us` into the pair fixed at w0:w1, then the two copies out.
+  if (Opc == DSPIC::MULSU16 || Opc == DSPIC::MULUS16) {
+    unsigned MulOpc = Opc == DSPIC::MULSU16 ? DSPIC::MULSUpair : DSPIC::MULUSpair;
     BuildMI(*BB, MI, dl, TII.get(MulOpc))
         .addReg(MI.getOperand(2).getReg())
         .addReg(MI.getOperand(3).getReg());
