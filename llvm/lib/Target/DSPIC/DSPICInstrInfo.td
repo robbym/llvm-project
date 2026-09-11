@@ -334,6 +334,11 @@ let isBarrier = 1 in {
   }
   let isIndirectBranch = 1, rd = 0 in {
     // Long branches
+    // trellis session 108 (post-close): `goto #imm` is TWO words (a 24-bit target) -- the branch
+    // selector's far branch. I16ri was 4 by MSP430's accident and is one word now; this def says
+    // its own size, because an UNDER-sized far branch would let the selector pick a `bra` that
+    // cannot reach (a link failure, never a wrong branch -- session 97 -- but a refusal all the same).
+    let Size = 4 in
     def Bi  : I16ri<0b0100, (outs), (ins calltarget:$imm),
                     "goto\t$imm",
                     [(brind tblockaddress:$imm)]>;
@@ -362,6 +367,9 @@ let Uses = [SR] in
 let isCall = 1,
     Defs = [R11, R12, R13, R14, R15, W5, W6, W7, SR],
     Uses = [SP] in {
+  // trellis session 108 (post-close): `call` is TWO words (a 24-bit target). II16i is one word
+  // since the size table was corrected; this def says its own size.
+  let Size = 4 in
   def CALLi     : II16i<0b101,
                         (outs), (ins calltarget:$imm),
                         "call\t$imm", [(DSPICcall imm:$imm)]>;
@@ -574,6 +582,7 @@ def MOVZX16rr8 : I8rr<0b0100,
 // isReMaterializableImpl still refuses a non-invariant load -- so this is inert until
 // -dspic-remat-near-global.
 let isReMaterializable = 1 in
+let Size = 4 in  // two instructions, two words (session 108: the audit)
 def MOVZX16rm8 : I8rm<0b0100,
                       (outs GR16:$rd), (ins memsrc:$src),
                       "mov.b\t$src,$rd\n\tze\t$rd,$rd",
@@ -1158,7 +1167,7 @@ let isCodeGenOnly = 1 in
 // the movpag. Declared as `(ins ...)` first, the machine verifier refused it -- "Explicit
 // operand marked as def" -- which is the verifier doing exactly its job on a model that did
 // not match the machine.
-def SETPSVPAGE : DSPICFrameInst<(outs GR16:$s), (ins), 10,
+def SETPSVPAGE : DSPICFrameInst<(outs GR16:$s), (ins), 8,   // four one-word lines (session 108: the audit said 10)
   "mov.w\t#1,$s\n\tmov\t$s,_DSWPAG\n\tmov\t#__const_psvpage,$s\n\tmovpag\t$s,DSRPAG">;
 
 let Defs = [SP], Uses = [SP], mayStore = 1, isCodeGenOnly = 1 in
@@ -1499,9 +1508,9 @@ let hasSideEffects = 0, isTerminator = 1 in {
 
 // a bit field as a value, and the find-first-one pair
 let Defs = [SR] in {
-  def BFEXT16rr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs, i16imm:$k, i16imm:$n), 2, "bfext\t$k,$n,$rs,$rd">;
+  def BFEXT16rr : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs, i16imm:$k, i16imm:$n), 4, "bfext\t$k,$n,$rs,$rd">;  // two words (session 108: the audit)
   let mayLoad = 1 in
-  def BFEXT16fr : DSPICFrameInst<(outs GR16:$rd), (ins memsrc:$f, i16imm:$k, i16imm:$n), 2, "bfext\t$k,$n,$f,$rd">;
+  def BFEXT16fr : DSPICFrameInst<(outs GR16:$rd), (ins memsrc:$f, i16imm:$k, i16imm:$n), 4, "bfext\t$k,$n,$f,$rd">;  // two words (session 108: the audit)
   def FF1L16 : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs), 2, "ff1l\t$rs,$rd">;
   def FF1R16 : DSPICFrameInst<(outs GR16:$rd), (ins GR16:$rs), 2, "ff1r\t$rs,$rd">;
 }

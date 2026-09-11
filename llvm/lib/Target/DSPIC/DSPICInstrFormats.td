@@ -71,11 +71,10 @@ class I8rr<bits<4> opcode,
 
 class I8ri<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstReg, SrcImm, 4, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstReg, SrcImm, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<16> imm;
-  let Inst{31-16} = imm;
-  let rs = 0b0000;
+  let rs = imm{3-0};   // the dummy keeps a reference to imm inside the word (session 108)
 }
 
 class I8rc<bits<4> opcode,
@@ -97,11 +96,10 @@ class I8rc<bits<4> opcode,
 
 class I8rm<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstReg, SrcMem, 4, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstReg, SrcMem, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<20> src;
   let rs = src{3-0};
-  let Inst{31-16} = src{19-4};
 }
 
 class I8rn<bits<4> opcode,
@@ -118,35 +116,30 @@ class I8rp<bits<4> opcode,
 
 class I8mr<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstMem, SrcReg, 4, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstMem, SrcReg, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Alpha";
   bits<20> dst;
   let rd = dst{3-0};
-  let Inst{31-16} = dst{19-4};
 }
 
 class I8mi<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstMem, SrcImm, 6, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstMem, SrcImm, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<16> imm;
   bits<20> dst;
-  let rs = 0b0000;
-  let Inst{31-16} = imm;
+  let rs = imm{3-0};   // the dummy keeps a reference to imm inside the word (session 108)
   let rd = dst{3-0};
-  let Inst{47-32} = dst{19-4};
 }
 
 class I8mc<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : DSPICInst<outs, ins, 4, asmstr> {
+  : DSPICInst<outs, ins, 2, asmstr> {
   let DecoderNamespace = "Beta";
   let Pattern = pattern;
 
   bits<6> imm;
   bits<20> dst;
-
-  let Inst{31-16} = dst{19-4};
   let Inst{15-12} = opcode;
   let Inst{11-8}  = imm{3-0};
   let Inst{7}     = DstMem.Value;
@@ -157,32 +150,28 @@ class I8mc<bits<4> opcode,
 
 class I8mm<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstMem, SrcMem, 6, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstMem, SrcMem, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<20> src;
   bits<20> dst;
   let rs = src{3-0};
-  let Inst{31-16} = src{19-4};
   let rd = dst{3-0};
-  let Inst{47-32} = dst{19-4};
 }
 
 class I8mn<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstMem, SrcIndReg, 4, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstMem, SrcIndReg, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Delta";
   bits<20> dst;
   let rd = dst{3-0};
-  let Inst{31-16} = dst{19-4};
 }
 
 class I8mp<bits<4> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm8<opcode, DstMem, SrcPostInc, 4, outs, ins, asmstr, pattern> {
+  : IForm8<opcode, DstMem, SrcPostInc, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Delta";
   bits<20> dst;
   let rd = dst{3-0};
-  let Inst{31-16} = dst{19-4};
 }
 
 // 16 bit IForm instructions
@@ -198,11 +187,10 @@ class I16rr<bits<4> opcode,
 
 class I16ri<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstReg, SrcImm, 4, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstReg, SrcImm, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<16> imm;
-  let Inst{31-16} = imm;
-  let rs = 0b0000;
+  let rs = imm{3-0};   // the dummy keeps a reference to imm inside the word (session 108)
 }
 
 class I16rc<bits<4> opcode,
@@ -224,11 +212,10 @@ class I16rc<bits<4> opcode,
 
 class I16rm<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstReg, SrcMem, 4, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstReg, SrcMem, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<20> src;
   let rs = src{3-0};
-  let Inst{31-16} = src{19-4};
 }
 
 class I16rn<bits<4> opcode,
@@ -245,35 +232,30 @@ class I16rp<bits<4> opcode,
 
 class I16mr<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstMem, SrcReg, 4, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstMem, SrcReg, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Alpha";
   bits<20> dst;
   let rd = dst{3-0};
-  let Inst{31-16} = dst{19-4};
 }
 
 class I16mi<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstMem, SrcImm, 6, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstMem, SrcImm, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<16> imm;
   bits<20> dst;
-  let Inst{31-16} = imm;
-  let rs = 0b0000;
+  let rs = imm{3-0};   // the dummy keeps a reference to imm inside the word (session 108)
   let rd = dst{3-0};
-  let Inst{47-32} = dst{19-4};
 }
 
 class I16mc<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : DSPICInst<outs, ins, 4, asmstr> {
+  : DSPICInst<outs, ins, 2, asmstr> {
   let DecoderNamespace = "Beta";
   let Pattern = pattern;
 
   bits<6> imm;
   bits<20> dst;
-
-  let Inst{31-16} = dst{19-4};
   let Inst{15-12} = opcode;
   let Inst{11-8}  = imm{3-0};
   let Inst{7}     = DstMem.Value;
@@ -284,32 +266,28 @@ class I16mc<bits<4> opcode,
 
 class I16mm<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstMem, SrcMem, 6, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstMem, SrcMem, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Gamma";
   bits<20> src;
   bits<20> dst;
   let rs = src{3-0};
-  let Inst{31-16} = src{19-4};
   let rd = dst{3-0};
-  let Inst{47-32} = dst{19-4};
 }
 
 class I16mn<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstMem, SrcIndReg, 4, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstMem, SrcIndReg, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Delta";
   bits<20> dst;
   let rd = dst{3-0};
-  let Inst{31-16} = dst{19-4};
 }
 
 class I16mp<bits<4> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IForm16<opcode, DstMem, SrcPostInc, 4, outs, ins, asmstr, pattern> {
+  : IForm16<opcode, DstMem, SrcPostInc, 2, outs, ins, asmstr, pattern> {
   let DecoderNamespace = "Delta";
   bits<20> dst;
   let rd = dst{3-0};
-  let Inst{31-16} = dst{19-4};
 }
 
 // DSPIC Single Operand (Format II) Instructions
@@ -338,18 +316,16 @@ class II8r<bits<3> opcode,
 
 class II8m<bits<3> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IIForm8<opcode, SrcMem, 4, outs, ins, asmstr, pattern> {
+  : IIForm8<opcode, SrcMem, 2, outs, ins, asmstr, pattern> {
   bits<20> src;
   let rs = src{3-0};
-  let Inst{31-16} = src{19-4};
 }
 
 class II8i<bits<3> opcode,
            dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IIForm8<opcode, SrcImm, 4, outs, ins, asmstr, pattern> {
+  : IIForm8<opcode, SrcImm, 2, outs, ins, asmstr, pattern> {
   bits<16> imm;
-  let rs = 0b0000;
-  let Inst{31-16} = imm;
+  let rs = imm{3-0};   // the dummy keeps a reference to imm inside the word (session 108)
 }
 
 class II8c<bits<3> opcode,
@@ -384,18 +360,16 @@ class II16r<bits<3> opcode,
 
 class II16m<bits<3> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IIForm16<opcode, SrcMem, 4, outs, ins, asmstr, pattern> {
+  : IIForm16<opcode, SrcMem, 2, outs, ins, asmstr, pattern> {
   bits<20> src;
   let rs = src{3-0};
-  let Inst{31-16} = src{19-4};
 }
 
 class II16i<bits<3> opcode,
             dag outs, dag ins, string asmstr, list<dag> pattern>
-  : IIForm16<opcode, SrcImm, 4, outs, ins, asmstr, pattern> {
+  : IIForm16<opcode, SrcImm, 2, outs, ins, asmstr, pattern> {
   bits<16> imm;
-  let rs = 0b0000;
-  let Inst{31-16} = imm;
+  let rs = imm{3-0};   // the dummy keeps a reference to imm inside the word (session 108)
 }
 
 class II16c<bits<3> opcode,

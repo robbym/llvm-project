@@ -199,26 +199,26 @@ static AddrMode DecodeDstAddrMode(unsigned Insn) {
 }
 
 static const uint8_t *getDecoderTable(AddrMode SrcAM, unsigned Words) {
-  assert(0 < Words && Words < 4 && "Incorrect number of words");
+  // trellis session 108 (post-close): every instruction of these formats is ONE word since the
+  // size table was corrected (steps/sizes/size-edit.py), so the 32- and 48-bit decoder tables
+  // MSP430's two- and three-word forms generated no longer exist. This disassembler is the
+  // inherited object path this port never uses; it is kept building, not made right.
+  (void)Words;
   switch (SrcAM) {
   default:
     llvm_unreachable("Invalid addressing mode");
   case amRegister:
-    assert(Words < 3 && "Incorrect number of words");
-    return Words == 2 ? DecoderTableAlpha32 : DecoderTableAlpha16;
+    return DecoderTableAlpha16;
   case amConstant:
-    assert(Words < 3 && "Incorrect number of words");
-    return Words == 2 ? DecoderTableBeta32 : DecoderTableBeta16;
+    return DecoderTableBeta16;
   case amIndexed:
   case amSymbolic:
   case amImmediate:
   case amAbsolute:
-    assert(Words > 1 && "Incorrect number of words");
-    return Words == 2 ? DecoderTableGamma32 : DecoderTableGamma48;
+    return DecoderTableGamma16;
   case amIndirect:
   case amIndirectPost:
-    assert(Words < 3 && "Incorrect number of words");
-    return Words == 2 ? DecoderTableDelta32 : DecoderTableDelta16;
+    return DecoderTableDelta16;
   }
 }
 

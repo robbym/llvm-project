@@ -63,6 +63,14 @@ static cl::opt<std::string> DSPICConfigDB(
     cl::desc("dsPIC: the configuration-word database for #pragma config "
              "(the DFP's xc16/bin/config/<device>/aux_configuration.data)"));
 
+// trellis session 108 (post-close): annotate every emitted instruction with the size the backend
+// BELIEVES it has (`getInstSizeInBytes`, the number the outliner and the branch selector price
+// with) and its opcode, as a trailing comment `; size=N OPCODE`. steps/sizes/audit.py compares
+// the claim with the disassembly's actual width. Default off: prints must not change.
+static cl::opt<bool> DSPICPrintSizes(
+    "dspic-print-sizes", cl::init(false), cl::Hidden,
+    cl::desc("dsPIC: annotate each instruction with getInstSizeInBytes and its opcode"));
+
   class DSPICAsmPrinter : public AsmPrinter {
   public:
     DSPICAsmPrinter(TargetMachine &TM, std::unique_ptr<MCStreamer> Streamer)
@@ -450,6 +458,13 @@ const MCExpr *DSPICAsmPrinter::lowerConstant(const Constant *CV,
 void DSPICAsmPrinter::emitInstruction(const MachineInstr *MI) {
   DSPIC_MC::verifyInstructionPredicates(MI->getOpcode(),
                                          getSubtargetInfo().getFeatureBits());
+
+  // trellis session 108 (post-close): the size claim, on the instruction's own line.
+  if (DSPICPrintSizes) {
+    const TargetInstrInfo *TII = MF->getSubtarget().getInstrInfo();
+    OutStreamer->AddComment("size=" + Twine(TII->getInstSizeInBytes(*MI)) + " " +
+                            TII->getName(MI->getOpcode()));
+  }
 
   DSPICMCInstLower MCInstLowering(OutContext, *this);
 
