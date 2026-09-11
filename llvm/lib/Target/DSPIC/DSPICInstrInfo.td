@@ -2097,6 +2097,23 @@ let AddedComplexity = 20 in {
   def NEG16fW : FileToW16<"neg">;
   def COM16fW : FileToW16<"com">;
   def INC8fW  : FileToW8<"inc.b">;
+  // trellis session 107: the eight f,WREG one-operand forms cc1 spells in one word (or that ours
+  // takes though cc1 does not: com.b, sl.w). Same class (b) shape as INC8fW above; the isel
+  // patterns are below with the inc1f8 one. The result is born in GR8_W0/GR16_W0 and copied out
+  // at once, and session 101's shouldCoalesce guard keeps that one-register range short. Byte:
+  def COM8fW  : FileToW8<"com.b">;
+  def DEC8fW  : FileToW8<"dec.b">;
+  def NEG8fW  : FileToW8<"neg.b">;
+  def INC28fW : FileToW8<"inc2.b">;
+  def DEC28fW : FileToW8<"dec2.b">;
+  // Word (INC16fW/DEC16fW/NEG16fW/COM16fW are already above; these are the by-two and shift-left):
+  def INC216fW : FileToW16<"inc2.w">;
+  def DEC216fW : FileToW16<"dec2.w">;
+  // ⚠ sl.w f,WREG: the fileshift comment (session 99) warned shl-by-one reaches a MEMORY-OPERAND
+  // shift, so the FUSED SL16fWr was dead. An isel pattern for `(shl (load f), 1)` is a different
+  // question -- whether it matches before the load folds -- and wreg.expected.first predicts it
+  // does. If it does not, the def is dead and the expectation is corrected at its site.
+  def SL16fW   : FileToW16<"sl.w">;
   // trellis session 99: the shift and rotate members of the same class. No isel pattern for the
   // same reason as the rest of class (b'); DSPICPeephole::fuseFileALU forms them after
   // allocation. ⚠ `sl.w` is absent DELIBERATELY: shl-by-one reaches a memory-operand shift, not
@@ -2116,6 +2133,15 @@ let AddedComplexity = 20 in {
   def : Pat<(negf   (i16 (load faddr:$f))), (COPY_TO_REGCLASS (NEG16fW faddr:$f), GR16)>;
   def : Pat<(comf   (i16 (load faddr:$f))), (COPY_TO_REGCLASS (COM16fW faddr:$f), GR16)>;
   def : Pat<(inc1f8 (i8  (load faddr:$f))), (COPY_TO_REGCLASS (INC8fW  faddr:$f), GR8)>;
+  // trellis session 107: the eight new forms' patterns, the same shape.
+  def : Pat<(comf8  (i8  (load faddr:$f))), (COPY_TO_REGCLASS (COM8fW  faddr:$f), GR8)>;
+  def : Pat<(dec1f8 (i8  (load faddr:$f))), (COPY_TO_REGCLASS (DEC8fW  faddr:$f), GR8)>;
+  def : Pat<(negf8  (i8  (load faddr:$f))), (COPY_TO_REGCLASS (NEG8fW  faddr:$f), GR8)>;
+  def : Pat<(inc2f8 (i8  (load faddr:$f))), (COPY_TO_REGCLASS (INC28fW faddr:$f), GR8)>;
+  def : Pat<(dec2f8 (i8  (load faddr:$f))), (COPY_TO_REGCLASS (DEC28fW faddr:$f), GR8)>;
+  def : Pat<(inc2f  (i16 (load faddr:$f))), (COPY_TO_REGCLASS (INC216fW faddr:$f), GR16)>;
+  def : Pat<(dec2f  (i16 (load faddr:$f))), (COPY_TO_REGCLASS (DEC216fW faddr:$f), GR16)>;
+  def : Pat<(sl1f   (i16 (load faddr:$f))), (COPY_TO_REGCLASS (SL16fW   faddr:$f), GR16)>;
 }
 
 // (b') the WREG-result TWO-OPERAND file forms: WREG = f op WREG, and the PLACE IS UNCHANGED.
