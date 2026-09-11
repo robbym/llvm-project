@@ -30,6 +30,7 @@
 #include "llvm/CodeGen/MachinePassManager.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/Support/Debug.h" // trellis session 103: dbgs(), for -dspic-cmp-fuse-why
+#include "llvm/IR/Function.h"     // trellis session 104: hasOptSize(), the level policy
 #include "llvm/IR/Analysis.h"
 
 using namespace llvm;
@@ -592,8 +593,24 @@ bool DSPICPeepholeImpl::runOnMachineFunction(MachineFunction &MF) {
 //     equal to the original branch's own displacement.
 //===----------------------------------------------------------------------===//
 
-static cl::opt<bool> CmpFuse("dspic-cmp-fuse", cl::Hidden, cl::init(false),
-    cl::desc("Fuse a register compare and the branch after it into cpbeq/cpbne/cpblt/cpbgt"));
+// ⛔ A LEVEL POLICY, NOT A SWITCH (trellis session 104 post-close; the operator's ruling, "on at
+// both"): the fusion is ON for a function carrying optsize or minsize (-Os, -Oz) and OFF
+// otherwise, because on the dsPIC33C device model it is never slower -- steps/exec/cycleprobe.c:
+// cp+bra 2 cycles not taken / 5 taken, cpbeq 1 / 5 -- and always one word smaller, so it is a
+// size decision and the level is where size decisions are made (session 93's CSR-remat gate).
+// The option is an OVERRIDE in either direction for A/B runs and fixtures: `-dspic-cmp-fuse`
+// forces on at any level, `-dspic-cmp-fuse=false` forces off. Unset means the policy.
+static cl::opt<cl::boolOrDefault> CmpFuse("dspic-cmp-fuse", cl::Hidden,
+    cl::desc("Fuse a register compare and the branch after it into cpbeq/cpbne/cpblt "
+             "(unset: on at -Os/-Oz; =false forces off; set forces on)"));
+
+static bool cmpFuseEnabled(const MachineFunction &MF) {
+  switch (CmpFuse) {
+  case cl::boolOrDefault::BOU_TRUE:  return true;
+  case cl::boolOrDefault::BOU_FALSE: return false;
+  default:            return MF.getFunction().hasOptSize(); // optsize OR minsize: -Os and -Oz
+  }
+}
 
 // ⛔ WHY WAS A SITE REFUSED? Session 94's -dspic-remat-why is the precedent, and this one earned
 // its keep the same way: a fixture built specifically to exercise the DISPLACEMENT guard did not
@@ -723,7 +740,7 @@ unsigned DSPICCmpFuseImpl::measure() {
 }
 
 bool DSPICCmpFuseImpl::runOnMachineFunction(MachineFunction &mf) {
-  if (!CmpFuse)
+  if (!cmpFuseEnabled(mf))
     return false;
   MF = &mf;
   TII = static_cast<const DSPICInstrInfo *>(MF->getSubtarget().getInstrInfo());
