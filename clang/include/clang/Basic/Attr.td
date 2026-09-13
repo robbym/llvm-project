@@ -2556,7 +2556,15 @@ def DSPICStrictBitfield : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
 // two records may not own one spelling. On the dsPIC triple ProcessDeclAttribute routes
 // AT_CUDAShared to handleDSPICRefusedAttr before the language-option check (SemaDeclAttr.cpp).
 def DSPICRefused : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
-  let Spellings = [GCC<"eds">, GCC<"preserved">];
+  let Spellings = [GCC<"preserved">];
+  let Documentation = [Undocumented];
+}
+// trellis session 110: `eds` LEAVES the refused set and becomes its own attribute. The guide
+// (DS-50003589D 7.7.1) states __attribute__((eds)) is equivalent to __attribute__((space(eds))),
+// and the operator's rule is that any program xc-dsc compiles must work here.
+def DSPICEds : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"eds">];
+  let Subjects = SubjectList<[Var]>;
   let Documentation = [Undocumented];
 }
 def DSPICRefusedB : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {

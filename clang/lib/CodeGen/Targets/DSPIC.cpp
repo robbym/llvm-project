@@ -253,7 +253,19 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       if (const auto *RA = VD->getAttr<DSPICReverseAttr>())
         GVar->addAttribute("dspic-reverse", std::to_string(RA->getAlign()));
       const auto *SpA = VD->getAttr<DSPICSpaceAttr>();
-      bool ForcedFar = VD->hasAttr<DSPICPageAttr>() || (SpA && SpA->getSpace()->isStr("dma"));
+      // trellis session 110: an EDS object, by either spelling. It is FAR (cc1 emits `bss,eds`
+      // with no `near`, measured at all three memory models), and it carries `page` exactly when
+      // the object cannot straddle a 32K boundary -- by the rule FITTED from cc1 in
+      // steps/eds/page-ladder.sh, which is VERBATIM session 99's near/far rule, so the predicate
+      // is reused rather than duplicated.
+      bool IsEds = VD->hasAttr<DSPICEdsAttr>() || (SpA && SpA->getSpace()->isStr("eds"));
+      if (IsEds) {
+        GVar->addAttribute("dspic-space", "eds");
+        if (dspicAggregateFitsNear(M.getContext(), VD->getType()))
+          GVar->addAttribute("dspic-page");
+      }
+      bool ForcedFar = IsEds || VD->hasAttr<DSPICPageAttr>() ||
+                       (SpA && SpA->getSpace()->isStr("dma"));
       if (ForcedFar) {
         GVar->setAttributes(GVar->getAttributes().removeAttribute(GVar->getContext(), "near"));
         GVar->addAttribute("far");

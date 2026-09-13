@@ -6694,7 +6694,7 @@ static void handleDSPICSpaceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   }
   if (!Space->isStr("prog") && !Space->isStr("psv") && !Space->isStr("data") &&
       !Space->isStr("auto_psv") && !Space->isStr("xmemory") && !Space->isStr("ymemory") &&
-      !Space->isStr("dma")) {
+      !Space->isStr("dma") && !Space->isStr("eds")) {   // trellis session 110: eds is modelled
     S.Diag(AL.getLoc(), diag::err_dspic_space_unimplemented) << Space->getName();
     return;
   }
@@ -8312,6 +8312,10 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_DSPICStrictBitfield:
     handleDSPICStrictBitfieldAttr(S, D, AL);
+    break;
+  // trellis session 110: the bare `eds` spelling, equivalent to space(eds) (guide 7.7.1).
+  case ParsedAttr::AT_DSPICEds:
+    handleSimpleAttribute<DSPICEdsAttr>(S, D, AL);
     break;
   case ParsedAttr::AT_DSPICRefused:
   case ParsedAttr::AT_DSPICRefusedB:

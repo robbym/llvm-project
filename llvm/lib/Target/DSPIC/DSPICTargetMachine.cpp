@@ -160,8 +160,16 @@ public:
       S += Zero ? ",bss" : ",data";
       // trellis session 109: space(xmemory|ymemory) keep `near`; space(dma) has none (measured,
       // space-*.cc1.s: `data,xmemory,near` / `data,dma`); page/reverse objects have none either.
-      if (Space == "xmemory" || Space == "ymemory" || Space == "dma")
+      // trellis session 110: `eds` joins the spelled-out spaces. Measured at all three memory
+      // models: cc1 emits `bss,eds` / `bss,eds,page` and NEVER `near` on an EDS object.
+      if (Space == "xmemory" || Space == "ymemory" || Space == "dma" || Space == "eds")
         S += "," + Space.str();
+      // ⛔ NO `Space != "eds"` GUARD HERE, and that is a measured decision, not an omission.
+      // The first version had one; mutant MP2 removed it and the comparer stayed 96/96, because an
+      // EDS object is already forced FAR in clang/lib/CodeGen/Targets/DSPIC.cpp (`ForcedFar = IsEds
+      // || ...`), so `Near` is false by the time this runs. A second guard that can never fire
+      // reads as load-bearing to the next person and is not. Session 97's precedent: a fix its own
+      // mutants showed to be inert was simplified away rather than kept for comfort.
       if (Near && Space != "dma")
         S += ",near";
     }
@@ -277,7 +285,7 @@ public:
                                : (Space == "prog" ? std::string(".prog")
                                   : (Space == "psv" || Space == "auto_psv") ? std::string(".const")
                                   : Space == "dma" ? (".dma." + GO->getName()).str()
-                                  : (Space == "xmemory" || Space == "ymemory")
+                                  : (Space == "xmemory" || Space == "ymemory" || Space == "eds")
                                       ? ("." + Space + "." + GO->getName()).str()
                                   : !PerObject ? std::string(".ndata")
                                   : ((Zero ? (Near ? ".nbss." : ".bss.") : (Near ? ".ndata." : ".data.")) +
