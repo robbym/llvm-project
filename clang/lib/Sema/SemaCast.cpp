@@ -2697,6 +2697,32 @@ static TryCastResult TryAddressSpaceCast(Sema &Self, ExprResult &SrcExpr,
 }
 
 void CastOperation::checkAddressSpaceCast(QualType SrcType, QualType DestType) {
+  // ⛔ trellis session 112: on the dsPIC, a cast OUT of `__eds__` (address space 2) into the near
+  // space (0) or program space (1) is refused, in cc1's own sentence. The operator ruled the first:
+  // "I don't think conversion from `__eds__ int *` to `int *` is valid." The second is its twin and
+  // is refused on cc1's authority -- the vendor refuses exactly these two of the twenty ordered
+  // pairs (prints/l1f/eds/cast-ask.txt).
+  //
+  // ⛔ EXACTLY TWO, AND THE TEMPTING GENERALISATION IS WRONG. cc1 ACCEPTS eds->ext and eds->pack,
+  // which are also casts out of eds, so "refuse anything leaving eds" would be wrong by two cells.
+  // It accepts all four casts INTO eds. And `(int *)(unsigned long)p` is accepted by both compilers
+  // and is the documented way to do this deliberately: an integer round trip is not an
+  // address-space cast and never reaches here, which is what keeps that capability.
+  if (Self.getASTContext().getTargetInfo().getTriple().getArch() ==
+          llvm::Triple::dspic &&
+      SrcType->isPointerType() && DestType->isPointerType()) {
+    LangAS SrcAS = SrcType->getPointeeType().getAddressSpace();
+    LangAS DstAS = DestType->getPointeeType().getAddressSpace();
+    unsigned S = SrcAS == LangAS::Default ? 0 : toTargetAddressSpace(SrcAS);
+    unsigned D = DstAS == LangAS::Default ? 0 : toTargetAddressSpace(DstAS);
+    if (S == 2 && (D == 0 || D == 1)) {
+      Self.Diag(OpRange.getBegin(), diag::err_dspic_eds_cast)
+          << SrcType << DestType;
+      SrcExpr = ExprError();
+      return;
+    }
+  }
+
   // In OpenCL only conversions between pointers to objects in overlapping
   // addr spaces are allowed. v2.0 s6.5.5 - Generic addr space overlaps
   // with any named one, except for constant.

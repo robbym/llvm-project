@@ -14369,6 +14369,16 @@ def err_dspic_space_unimplemented : Error<
 // capital letter ("Diagnostics should not start with a capital letter"), so the leading letter is
 // lowered. That is the same deviation session 109 took for cc1's "The scratch_reg attribute is not
 // usable!" -- the wording and the named accessors are the vendor's, the capital is not.
+// trellis session 112: cc1's sentence for a cast out of `__eds__` into a space it will not
+// convert to. The vendor prints it over four lines with the two types on their own; clang has no
+// multi-line diagnostic form, so the type names are placed inline and the wording is kept.
+// ⚠ cc1 writes "Unable" with a capital U and clang's TableGen REFUSES a diagnostic that starts with
+// a capital letter ("Diagnostics should not start with a capital letter"). The leading letter is
+// lowered -- the same deviation session 109 took for "The scratch_reg attribute is not usable!" and
+// session 110 for "Cannot access external memory space". The wording is the vendor's; the capital
+// is not.
+def err_dspic_eds_cast : Error<
+  "unable to convert from %0 to type %1">;
 def err_dspic_external_access : Error<
   "cannot access external memory space; declare __%select{read|write}0_external "
   "or __%select{read|write}0_external16">;
