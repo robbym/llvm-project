@@ -24,6 +24,9 @@ void DSPICMCAsmInfo::printSpecifierExpr(raw_ostream &OS,
   case DSPIC::S_HANDLE:    Fn = "handle";    break;
   case DSPIC::S_TBLOFFSET: Fn = "tbloffset"; break;
   case DSPIC::S_TBLPAGE:   Fn = "tblpage";   break;
+  // session 110: the GPL assembler accepts both (cc1 emits them; steps/eds/ask.sh section 5).
+  case DSPIC::S_EDSOFFSET: Fn = "edsoffset"; break;
+  case DSPIC::S_EDSPAGE:   Fn = "edspage";   break;
   default: llvm_unreachable("unknown DSPIC specifier");
   }
   OS << Fn << '(';

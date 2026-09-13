@@ -70,6 +70,19 @@ def DSPICpsvld8z : SDNode<"DSPICISD::PSVLD8Z", SDT_DSPICPsvLd,
                           [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
 def DSPICpsvld8s : SDNode<"DSPICISD::PSVLD8S", SDT_DSPICPsvLd,
                           [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+
+// === session 110: the EDS window, `__eds__` (addrspace 2) ===
+// Measured from cc1 (steps/eds/ASK.md section 3), and NOT the PSV sequence one address space over:
+//   read  : mov _DSRPAG,wV | movpag wP,DSRPAG | mov [wO],wD | movpag wV,DSRPAG
+//   write : mov _DSWPAG,wV | mov wP,_DSWPAG   | mov wS,[wO] | mov wV,_DSWPAG
+// Two different page registers and two different setters. ⚠ And there is NO btsts.c/rlc on the
+// offset: `edsoffset()` already yields a window-set offset, which is why the pointer ARITHMETIC
+// (Phase B) has to clear bit 15 and restore it.
+def SDT_DSPICEdsSt : SDTypeProfile<0, 3, [SDTCisVT<0, i16>, SDTCisVT<1, i16>, SDTCisVT<2, i16>]>;
+def DSPICedsld : SDNode<"DSPICISD::EDSLD", SDT_DSPICPsvLd,
+                        [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def DSPICedsst : SDNode<"DSPICISD::EDSST", SDT_DSPICEdsSt,
+                        [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 def DSPICcmp     : SDNode<"DSPICISD::CMP", SDT_DSPICCmp, [SDNPOutGlue]>;
 // L1f-k (trellis session 92): the borrow compare `cpb`, the second half of a 32-bit compare --
 // it takes the first half's flags as glue and hands the pair's on.
@@ -2403,6 +2416,23 @@ let Uses = [SR], Defs = [SR] in
 let usesCustomInserter = 1, mayLoad = 1, Defs = [SR] in
   def PSVLD16 : Pseudo<(outs GR16:$dst), (ins GR16:$off, GR16:$page), "# PSVLD16",
                        [(set GR16:$dst, (DSPICpsvld GR16:$off, GR16:$page))]>;
+
+// === session 110: the EDS window's own pieces ===
+// DSWPAG is written with a PLAIN `mov`, not `movpag` -- cc1's asymmetry, measured, not inferred.
+let hasSideEffects = 1 in {
+  def MOVFROMDSW : DSPICFrameInst<(outs GR16:$rd), (ins), 2, "mov\t_DSWPAG,$rd">;
+  def MOVTODSW   : DSPICFrameInst<(outs), (ins GR16:$src), 2, "mov\t$src,_DSWPAG">;
+}
+let mayStore = 1 in
+  def MOVINDST16 : DSPICFrameInst<(outs), (ins GR16:$rs, GR16:$p), 2, "mov\t$rs,[$p]">;
+// ⛔ No Defs = [SR] on either pseudo: unlike the PSV read, the EDS sequence has no btsts.c/rlc and
+// therefore clobbers no flags. Claiming SR would pessimise every caller for nothing.
+let usesCustomInserter = 1, mayLoad = 1 in
+  def EDSLD16 : Pseudo<(outs GR16:$dst), (ins GR16:$off, GR16:$page), "# EDSLD16",
+                       [(set GR16:$dst, (DSPICedsld GR16:$off, GR16:$page))]>;
+let usesCustomInserter = 1, mayStore = 1 in
+  def EDSST16 : Pseudo<(outs), (ins GR16:$src, GR16:$off, GR16:$page), "# EDSST16",
+                       [(DSPICedsst GR16:$src, GR16:$off, GR16:$page)]>;
 // Session 90: the byte read (same sequence, `mov.b`).
 let usesCustomInserter = 1, mayLoad = 1, Defs = [SR] in {
   def PSVLD8 : Pseudo<(outs GR8:$dst), (ins GR16:$off, GR16:$page), "# PSVLD8",

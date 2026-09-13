@@ -226,6 +226,10 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   // L1e prog-space: fold an addrspace(1) i16 read into the PSV-window node before the wide
   // (i32) program pointer reaches type legalization.
   setTargetDAGCombine(ISD::LOAD);
+  // session 110: the `__eds__` word STORE is folded into the DSWPAG-window node here. Without
+  // this registration PerformDAGCombine is never called for a store and the addrspace(2) i32
+  // address survives into type legalization, which asserts in ExpandOp_NormalStore.
+  setTargetDAGCombine(ISD::STORE);
   // L1f-k (trellis session 92): BRCOND(SETCC i32) -> BR_CC and SELECT(SETCC i32) -> SELECT_CC by
   // hand -- the generic folds require a LEGAL comparand type, and i32 is not one here.
   setTargetDAGCombine(ISD::BRCOND);
@@ -1196,6 +1200,56 @@ static SDValue psvByte(SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValu
   return DAG.getMemIntrinsicNode(Node, dl, DAG.getVTList(ResVT, MVT::Other), Ops, MVT::i8, MMO);
 }
 
+// session 110: fold an addrspace(2) (`__eds__`) word read into the DSRPAG-window node, and an
+// addrspace(2) word write into the DSWPAG one. PHASE A IS WORD-ONLY ON PURPOSE: the byte and i32
+// widths, and every form involving pointer ARITHMETIC, are Phase B and are listed in
+// EDS.expected.first. An unhandled width returns SDValue() and keeps the ordinary load/store --
+// ⚠ which on addrspace 2 is a WRONG near access, so Phase B is owed and not optional.
+//
+// The pointer is split the way psvWord already splits a program address -- TRUNCATE for the offset,
+// SRL 16 + TRUNCATE for the page. ⛔ NOT EXTRACT_ELEMENT: the first version used that and the
+// i32 address then survived into type legalization, which asserted
+// "ExpandOp_NormalStore: Can only expand the stored value so far" on the STORE.
+static void edsSplit(SelectionDAG &DAG, const SDLoc &dl, SDValue Addr32,
+                     SDValue &Off, SDValue &Page) {
+  Off = DAG.getNode(ISD::TRUNCATE, dl, MVT::i16, Addr32);
+  SDValue Hi = DAG.getNode(ISD::SRL, dl, MVT::i32, Addr32, DAG.getConstant(16, dl, MVT::i32));
+  Page = DAG.getNode(ISD::TRUNCATE, dl, MVT::i16, Hi);
+}
+
+static SDValue combineEdsLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
+  LoadSDNode *LD = cast<LoadSDNode>(N);
+  if (LD->getAddressSpace() != 2)
+    return SDValue();
+  if (LD->getExtensionType() != ISD::NON_EXTLOAD || LD->getMemoryVT() != MVT::i16)
+    return SDValue();
+  SelectionDAG &DAG = DCI.DAG;
+  SDLoc dl(N);
+  SDValue Off, Page;
+  edsSplit(DAG, dl, LD->getBasePtr(), Off, Page);
+  SDValue Ops[] = { LD->getChain(), Off, Page };
+  SDValue W = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
+                                      DAG.getVTList(MVT::i16, MVT::Other), Ops, MVT::i16,
+                                      LD->getMemOperand());
+  DCI.CombineTo(N, W, W.getValue(1));
+  return SDValue(N, 0);
+}
+
+static SDValue combineEdsStore(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
+  StoreSDNode *ST = cast<StoreSDNode>(N);
+  if (ST->getAddressSpace() != 2)
+    return SDValue();
+  if (ST->isTruncatingStore() || ST->getMemoryVT() != MVT::i16)
+    return SDValue();
+  SelectionDAG &DAG = DCI.DAG;
+  SDLoc dl(N);
+  SDValue Off, Page;
+  edsSplit(DAG, dl, ST->getBasePtr(), Off, Page);
+  SDValue Ops[] = { ST->getChain(), ST->getValue(), Off, Page };
+  return DAG.getMemIntrinsicNode(DSPICISD::EDSST, dl, DAG.getVTList(MVT::Other), Ops,
+                                 MVT::i16, ST->getMemOperand());
+}
+
 static SDValue combineProgLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
   LoadSDNode *LD = cast<LoadSDNode>(N);
   if (LD->getAddressSpace() != 1)
@@ -1666,8 +1720,13 @@ SDValue DSPICTargetLowering::PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) 
     return combineMixedWideningMul(N, DCI);
   if (N->getOpcode() == ISD::BRCOND || N->getOpcode() == ISD::SELECT)
     return combineCond32(N, DCI);
-  if (N->getOpcode() == ISD::LOAD)
-    return combineProgLoad(N, DCI);
+  if (N->getOpcode() == ISD::LOAD) {
+    if (SDValue R = combineProgLoad(N, DCI))
+      return R;
+    return combineEdsLoad(N, DCI);   // session 110
+  }
+  if (N->getOpcode() == ISD::STORE)
+    return combineEdsStore(N, DCI);  // session 110
   if (N->getOpcode() == ISD::OR) {
     if (SDValue R = combineBitfieldInsert(N, DCI.DAG))
       return R;
@@ -1731,6 +1790,18 @@ SDValue DSPICTargetLowering::LowerGlobalAddress(SDValue Op,
     SDLoc dl(Op);
     SDValue Lo = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_TBLOFFSET);
     SDValue Hi = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_TBLPAGE);
+    Lo = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Lo);
+    Hi = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Hi);
+    return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+  }
+
+  // session 110: an extended-data-space global (addrspace 2, `__eds__`) is the same shape with the
+  // other pair of relocation operators -- `mov #edsoffset(sym),wLo ; mov #edspage(sym),wHi`, cc1's
+  // `take_addr` exactly (steps/eds/ASK.md section 2).
+  if (GV->getAddressSpace() == 2) {
+    SDLoc dl(Op);
+    SDValue Lo = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_EDSOFFSET);
+    SDValue Hi = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_EDSPAGE);
     Lo = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Lo);
     Hi = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Hi);
     return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
@@ -2407,6 +2478,34 @@ DSPICTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
 
   const TargetInstrInfo &TII = *BB->getParent()->getSubtarget().getInstrInfo();
   DebugLoc dl = MI.getDebugLoc();
+
+  // session 110: expand the EDS-window read and write to cc1's sequences. The read saves and sets
+  // DSRPAG with `movpag`; the write saves and sets DSWPAG with a PLAIN `mov`. No btsts.c/rlc --
+  // `edsoffset()` already carries the window bit (steps/eds/ASK.md section 3).
+  if (Opc == DSPIC::EDSLD16 || Opc == DSPIC::EDSST16) {
+    bool IsLd = Opc == DSPIC::EDSLD16;
+    MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
+    Register Save = MRI.createVirtualRegister(&DSPIC::GR16RegClass);
+    if (IsLd) {
+      Register Dst  = MI.getOperand(0).getReg();
+      Register Off  = MI.getOperand(1).getReg();
+      Register Page = MI.getOperand(2).getReg();
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVFROMDSR), Save);
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVPAGDSR)).addReg(Page);
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVINDLD16), Dst).addReg(Off);
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVPAGDSR)).addReg(Save);
+    } else {
+      Register Src  = MI.getOperand(0).getReg();
+      Register Off  = MI.getOperand(1).getReg();
+      Register Page = MI.getOperand(2).getReg();
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVFROMDSW), Save);
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVTODSW)).addReg(Page);
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVINDST16)).addReg(Src).addReg(Off);
+      BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVTODSW)).addReg(Save);
+    }
+    MI.eraseFromParent();
+    return BB;
+  }
 
   // L1e prog-space (session 89): expand the PSV-window read to cc1's sequence.
   if (Opc == DSPIC::PSVLD16) {

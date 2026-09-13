@@ -64,7 +64,10 @@ public:
   // address held page:offset (measured: sizeof(__prog__ int*) == 4 under cc1). Data pointers
   // stay 2 bytes.
   uint64_t getPointerWidthV(LangAS AS) const override {
-    return (AS != LangAS::Default && toTargetAddressSpace(AS) == 1) ? 32 : PointerWidth;
+    // session 110: address space 2 is `__eds__`, whose pointer is also 4 bytes (offset:page).
+    // Measured from cc1: sizeof(__eds__ int *) == 4, sizeof(int *) == 2 (steps/eds/ASK.md).
+    unsigned TAS = toTargetAddressSpace(AS);
+    return (AS != LangAS::Default && (TAS == 1 || TAS == 2)) ? 32 : PointerWidth;
   }
   uint64_t getPointerAlignV(LangAS AS) const override {
     return (AS != LangAS::Default && toTargetAddressSpace(AS) == 1) ? 16 : PointerAlign;

@@ -36,6 +36,8 @@ GetGlobalAddressSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_NONE:
   case DSPICII::MO_TBLOFFSET:
   case DSPICII::MO_TBLPAGE:
+  case DSPICII::MO_EDSOFFSET:
+  case DSPICII::MO_EDSPAGE:   // session 110
     break;
   }
 
@@ -49,6 +51,8 @@ GetExternalSymbolSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_NONE:
   case DSPICII::MO_TBLOFFSET:
   case DSPICII::MO_TBLPAGE:
+  case DSPICII::MO_EDSOFFSET:
+  case DSPICII::MO_EDSPAGE:   // session 110
     break;
   }
 
@@ -68,6 +72,8 @@ GetJumpTableSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_NONE:
   case DSPICII::MO_TBLOFFSET:
   case DSPICII::MO_TBLPAGE:
+  case DSPICII::MO_EDSOFFSET:
+  case DSPICII::MO_EDSPAGE:   // session 110
     break;
   }
 
@@ -88,6 +94,8 @@ GetConstantPoolIndexSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_NONE:
   case DSPICII::MO_TBLOFFSET:
   case DSPICII::MO_TBLPAGE:
+  case DSPICII::MO_EDSOFFSET:
+  case DSPICII::MO_EDSPAGE:   // session 110
     break;
   }
 
@@ -102,6 +110,8 @@ GetBlockAddressSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_NONE:
   case DSPICII::MO_TBLOFFSET:
   case DSPICII::MO_TBLPAGE:
+  case DSPICII::MO_EDSOFFSET:
+  case DSPICII::MO_EDSPAGE:   // session 110
     break;
   }
 
@@ -119,6 +129,8 @@ LowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym) const {
   case DSPICII::MO_NONE:
   case DSPICII::MO_TBLOFFSET:
   case DSPICII::MO_TBLPAGE:
+  case DSPICII::MO_EDSOFFSET:
+  case DSPICII::MO_EDSPAGE:   // session 110
     break;
   }
 
@@ -167,6 +179,13 @@ void DSPICMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
       else if (MO.getTargetFlags() == DSPICII::MO_TBLPAGE)
         MCOp = MCOperand::createExpr(
             MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_TBLPAGE, Ctx));
+      // session 110: the `__eds__` halves, the same shape one address space over.
+      else if (MO.getTargetFlags() == DSPICII::MO_EDSOFFSET)
+        MCOp = MCOperand::createExpr(
+            MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_EDSOFFSET, Ctx));
+      else if (MO.getTargetFlags() == DSPICII::MO_EDSPAGE)
+        MCOp = MCOperand::createExpr(
+            MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_EDSPAGE, Ctx));
       break;
     case MachineOperand::MO_ExternalSymbol:
       MCOp = LowerSymbolOperand(MO, GetExternalSymbolSymbol(MO));

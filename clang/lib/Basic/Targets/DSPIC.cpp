@@ -67,7 +67,11 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   // and program-space ACCESS (tblrd/PSV, the packed-pointer representation) are the data-model
   // work (backend stage L1e); they are NOT modelled by this recognition.
   Builder.defineMacro("__prog__", "__attribute__((address_space(1)))");
-  Builder.defineMacro("__eds__", "");
+  // session 110: `__eds__` is MODELLED, not silenced. It was defined EMPTY here, so
+  // `__eds__ int gv; return gv;` compiled to a direct near access ignoring the address space,
+  // silently, where cc1 emits the DSRPAG-windowed read. The operator: "any program the user
+  // writes targetting the xc-dsc compiler needs to work here".
+  Builder.defineMacro("__eds__", "__attribute__((address_space(2)))");
   Builder.defineMacro("__external__", "");
   Builder.defineMacro("__pack_upper_byte", "");
 }
