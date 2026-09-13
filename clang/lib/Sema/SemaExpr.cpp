@@ -670,6 +670,19 @@ ExprResult Sema::DefaultLvalueConversion(Expr *E) {
   QualType T = E->getType();
   assert(!T.isNull() && "r-value conversion on typeless expression?");
 
+  // trellis session 110: on the dsPIC, a READ of an object in external memory space
+  // (`__external__`, address space 3) is refused in cc1's own words. Every read goes through an
+  // lvalue-to-rvalue conversion, so this one point covers a direct read, a read through a pointer
+  // and an array element -- the three forms cc1 was measured refusing (steps/eds/ext-ask.sh).
+  // Taking the address, declaring the object and `sizeof` do NOT come here, and cc1 accepts all
+  // three, so the boundary matches without a special case.
+  if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic &&
+      T.getAddressSpace() != LangAS::Default &&
+      toTargetAddressSpace(T.getAddressSpace()) == 3) {
+    Diag(E->getExprLoc(), diag::err_dspic_external_access) << 0;
+    return ExprError();
+  }
+
   // lvalue-to-rvalue conversion cannot be applied to types that decay to
   // pointers (i.e. function or array types).
   if (T->canDecayToPointerType())
@@ -14395,6 +14408,16 @@ static void DiagnoseRecursiveConstFields(Sema &S, const Expr *E,
 /// emit an error and return true.  If so, return false.
 static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
   assert(!E->hasPlaceholderType(BuiltinType::PseudoObject));
+
+  // trellis session 110: a WRITE to external memory space carries a DIFFERENT sentence from a read
+  // (__write_external, not __read_external) -- measured, not symmetrised. Assignment, compound
+  // assignment and ++/-- all come through here.
+  if (S.Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic &&
+      E->getType().getAddressSpace() != LangAS::Default &&
+      toTargetAddressSpace(E->getType().getAddressSpace()) == 3) {
+    S.Diag(Loc, diag::err_dspic_external_access) << 1;
+    return true;
+  }
 
   S.CheckShadowingDeclModification(E, Loc);
 

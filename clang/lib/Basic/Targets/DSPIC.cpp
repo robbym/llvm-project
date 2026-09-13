@@ -72,6 +72,9 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   // silently, where cc1 emits the DSRPAG-windowed read. The operator: "any program the user
   // writes targetting the xc-dsc compiler needs to work here".
   Builder.defineMacro("__eds__", "__attribute__((address_space(2)))");
-  Builder.defineMacro("__external__", "");
+  // session 110: `__external__` is MODELLED. It was defined EMPTY, so a direct read compiled to
+  // an ordinary near access -- silently the wrong memory. Address space 3; every load and store
+  // in it is refused in cc1's own words (SemaExpr.cpp), which is what cc1 does too.
+  Builder.defineMacro("__external__", "__attribute__((address_space(3)))");
   Builder.defineMacro("__pack_upper_byte", "");
 }

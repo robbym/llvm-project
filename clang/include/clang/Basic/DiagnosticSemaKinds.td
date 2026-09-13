@@ -14363,6 +14363,15 @@ def err_dspic_space_unimplemented : Error<
   "'prog', 'psv', 'data', 'auto_psv', 'xmemory', 'ymemory' and 'dma' are">;
 // trellis session 109: the front end. The vendor's own sentences where it has them (banked in
 // prints/l1f/frontend/ask/*.cc1.log), this port's where it refuses.
+// trellis session 110: cc1's own two sentences for a direct access to external memory space.
+// They differ between a read and a write, which is why there are two and not one symmetrised pair.
+// ⚠ cc1 writes "Cannot" with a capital C; clang's TableGen REFUSES a diagnostic that starts with a
+// capital letter ("Diagnostics should not start with a capital letter"), so the leading letter is
+// lowered. That is the same deviation session 109 took for cc1's "The scratch_reg attribute is not
+// usable!" -- the wording and the named accessors are the vendor's, the capital is not.
+def err_dspic_external_access : Error<
+  "cannot access external memory space; declare __%select{read|write}0_external "
+  "or __%select{read|write}0_external16">;
 def err_dspic_space_unsupported : Error<
   "space(%0) not supported on this target">;
 def err_dspic_space_subargs : Error<
