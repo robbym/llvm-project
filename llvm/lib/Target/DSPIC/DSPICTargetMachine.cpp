@@ -423,6 +423,11 @@ MachineFunctionInfo *DSPICTargetMachine::createMachineFunctionInfo(
 void DSPICPassConfig::addIRPasses() {
   addPass(createAtomicExpandLegacyPass());
 
+  // trellis session 112: the `__eds__` paging carry. BEFORE the base addIRPasses() on
+  // purpose -- CodeGenPrepare runs inside it and rewrites a load's addressing into integer
+  // arithmetic, leaving no GetElementPtrInst for this pass to find.
+  // NOTE this pipeline is NOT the one llc/clang use; DSPICCodeGenPassBuilder is.
+  addPass(createDSPICEDSPtrArithPass());
   TargetPassConfig::addIRPasses();
 }
 

@@ -19,6 +19,7 @@ add_llvm_target(DSPICCodeGen
   DSPICBranchSelector.cpp
   DSPICCodeGenPassBuilder.cpp
   DSPICISelDAGToDAG.cpp
+  DSPICEDSPtrArith.cpp
   DSPICISelLowering.cpp
   DSPICInstrInfo.cpp
   DSPICFrameLowering.cpp

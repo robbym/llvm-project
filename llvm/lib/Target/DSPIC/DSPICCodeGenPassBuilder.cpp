@@ -44,6 +44,10 @@ public:
 
 void DSPICCodeGenPassBuilder::addIRPasses(PassManagerWrapper &PMW) {
   addFunctionPass(AtomicExpandPass(TM), PMW);
+  // trellis session 112: the `__eds__` paging carry, BEFORE Base::addIRPasses() -- which
+  // runs CodeGenPrepare, and CGP rewrites a load's addressing into integer arithmetic,
+  // leaving no GetElementPtrInst for this pass to find. Measured, not assumed.
+  addFunctionPass(DSPICEDSPtrArithPass(), PMW);
 
   Base::addIRPasses(PMW);
 }

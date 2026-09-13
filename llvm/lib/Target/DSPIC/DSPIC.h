@@ -87,6 +87,19 @@ public:
 
 FunctionPass *createDSPICCmpFuseLegacyPass();
 
+// trellis session 112: carry `__eds__` (addrspace 2) pointer arithmetic into the PAGE word
+// instead of through bit 15, the hardware's window select. An IR pass because the address
+// space survives only in the TYPE -- ISD::PTRADD discriminates by pointer EVT and all three
+// of this target's non-default spaces are i32, so a DAG-level fix could not tell them apart.
+// REQUIRED, not Optional: an optional pass is SKIPPED on `optnone` functions, which would
+// silently restore the miscompile at -O0. A correctness pass must always run.
+class DSPICEDSPtrArithPass
+    : public RequiredPassInfoMixin<DSPICEDSPtrArithPass> {
+public:
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &FAM);
+};
+FunctionPass *createDSPICEDSPtrArithPass();
+
 void initializeDSPICAsmPrinterPass(PassRegistry &);
 void initializeDSPICDAGToDAGISelLegacyPass(PassRegistry &);
 
