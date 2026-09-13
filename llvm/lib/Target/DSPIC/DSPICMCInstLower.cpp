@@ -38,6 +38,8 @@ GetGlobalAddressSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_TBLPAGE:
   case DSPICII::MO_EDSOFFSET:
   case DSPICII::MO_EDSPAGE:   // session 110
+  case DSPICII::MO_PACKEDLO:
+  case DSPICII::MO_PACKEDHI:  // session 111
     break;
   }
 
@@ -53,6 +55,8 @@ GetExternalSymbolSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_TBLPAGE:
   case DSPICII::MO_EDSOFFSET:
   case DSPICII::MO_EDSPAGE:   // session 110
+  case DSPICII::MO_PACKEDLO:
+  case DSPICII::MO_PACKEDHI:  // session 111
     break;
   }
 
@@ -74,6 +78,8 @@ GetJumpTableSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_TBLPAGE:
   case DSPICII::MO_EDSOFFSET:
   case DSPICII::MO_EDSPAGE:   // session 110
+  case DSPICII::MO_PACKEDLO:
+  case DSPICII::MO_PACKEDHI:  // session 111
     break;
   }
 
@@ -96,6 +102,8 @@ GetConstantPoolIndexSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_TBLPAGE:
   case DSPICII::MO_EDSOFFSET:
   case DSPICII::MO_EDSPAGE:   // session 110
+  case DSPICII::MO_PACKEDLO:
+  case DSPICII::MO_PACKEDHI:  // session 111
     break;
   }
 
@@ -112,6 +120,8 @@ GetBlockAddressSymbol(const MachineOperand &MO) const {
   case DSPICII::MO_TBLPAGE:
   case DSPICII::MO_EDSOFFSET:
   case DSPICII::MO_EDSPAGE:   // session 110
+  case DSPICII::MO_PACKEDLO:
+  case DSPICII::MO_PACKEDHI:  // session 111
     break;
   }
 
@@ -131,6 +141,8 @@ LowerSymbolOperand(const MachineOperand &MO, MCSymbol *Sym) const {
   case DSPICII::MO_TBLPAGE:
   case DSPICII::MO_EDSOFFSET:
   case DSPICII::MO_EDSPAGE:   // session 110
+  case DSPICII::MO_PACKEDLO:
+  case DSPICII::MO_PACKEDHI:  // session 111
     break;
   }
 
@@ -186,6 +198,13 @@ void DSPICMCInstLower::Lower(const MachineInstr *MI, MCInst &OutMI) const {
       else if (MO.getTargetFlags() == DSPICII::MO_EDSPAGE)
         MCOp = MCOperand::createExpr(
             MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_EDSPAGE, Ctx));
+      // session 111: the packed-flash halves, one address space over again.
+      else if (MO.getTargetFlags() == DSPICII::MO_PACKEDLO)
+        MCOp = MCOperand::createExpr(
+            MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_PACKEDLO, Ctx));
+      else if (MO.getTargetFlags() == DSPICII::MO_PACKEDHI)
+        MCOp = MCOperand::createExpr(
+            MCSpecifierExpr::create(MCOp.getExpr(), DSPIC::S_PACKEDHI, Ctx));
       break;
     case MachineOperand::MO_ExternalSymbol:
       MCOp = LowerSymbolOperand(MO, GetExternalSymbolSymbol(MO));

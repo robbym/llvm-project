@@ -76,5 +76,9 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   // an ordinary near access -- silently the wrong memory. Address space 3; every load and store
   // in it is refused in cc1's own words (SemaExpr.cpp), which is what cc1 does too.
   Builder.defineMacro("__external__", "__attribute__((address_space(3)))");
-  Builder.defineMacro("__pack_upper_byte", "");
+  // session 111: `__pack_upper_byte` is MODELLED. It was defined EMPTY, so a packed-flash object
+  // was an ordinary near data object read from RAM -- silently the wrong memory. Address space 4:
+  // a 32-bit linear pointer, placement in `,packedflash`, every read through the vendor's own
+  // ___P32DFrd, the record laid out packed (SemaType.cpp), writes refused in cc1's sentence.
+  Builder.defineMacro("__pack_upper_byte", "__attribute__((address_space(4)))");
 }

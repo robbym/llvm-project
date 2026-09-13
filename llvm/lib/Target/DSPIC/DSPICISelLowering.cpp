@@ -1334,6 +1334,56 @@ static SDValue combineEdsStore(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) 
   return SDValue();
 }
 
+// session 111: a read of packed flash (`__pack_upper_byte`, addrspace 4) is a call of the vendor's
+// own ___P32DFrd -- (w0:w1 = the 32-bit LINEAR address, w2 = the size in bytes) -> the value in the
+// return registers for its size, exactly pic30-classic.md's "P32DFrd_16" define_expand
+// (emit_library_call_value with GEN_INT(GET_MODE_SIZE(mode))). The routine copies `count` bytes
+// from the div-3 remapped program address into a stack buffer and returns w0..w3 from it, so a
+// byte comes back UNEXTENDED in w0 (cc1 follows with `se w0,w0`) and the extension is applied
+// here per the load's extension type. ⛔ ONE call at ANY alignment: cc1 splits an alignment-1
+// access of two or more bytes into byte reads and recombines them (ps.b at offset 1: two calls);
+// the routine is a byte loop over a linear address, so one call with the full count yields the
+// same bytes -- established by execution (steps/exec/packexec.c), not by this comment.
+// A pre-legalize combine because the i32 pointer of an addrspace-4 load is illegal here and would
+// otherwise reach the type legalizer (session 110's lesson for the EDS load, one space over).
+static SDValue combinePackedLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
+  LoadSDNode *LD = cast<LoadSDNode>(N);
+  if (LD->getAddressSpace() != 4)
+    return SDValue();
+  SelectionDAG &DAG = DCI.DAG;
+  const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+  LLVMContext &Ctx = *DAG.getContext();
+  SDLoc dl(N);
+  EVT MemVT = LD->getMemoryVT();
+  unsigned Bytes = MemVT.getStoreSize();
+  if (!MemVT.isSimple() || Bytes == 0 || Bytes > 8 || !isPowerOf2_32(Bytes))
+    return SDValue();
+  Type *RetTy = Type::getIntNTy(Ctx, Bytes * 8);
+  TargetLowering::ArgListTy Args;
+  Args.emplace_back(LD->getBasePtr(), Type::getInt32Ty(Ctx));
+  Args.emplace_back(DAG.getConstant(Bytes, dl, MVT::i16), Type::getInt16Ty(Ctx));
+  TargetLowering::CallLoweringInfo CLI(DAG);
+  CLI.setDebugLoc(dl).setChain(LD->getChain())
+      // ⛔ TWO underscores here, THREE in the symbol: this target prefixes external symbols with
+      // `_` (session 110's "_memcpy_eds" -> "__memcpy_eds" lesson, recorded at its site).
+      .setLibCallee(CallingConv::C, RetTy,
+                    DAG.getExternalSymbol("__P32DFrd", TLI.getPointerTy(DAG.getDataLayout())),
+                    std::move(Args));
+  std::pair<SDValue, SDValue> R = TLI.LowerCallTo(CLI);
+  SDValue Val = R.first;
+  if (MemVT.isFloatingPoint())
+    Val = DAG.getNode(ISD::BITCAST, dl, MemVT, Val);
+  EVT ResVT = LD->getValueType(0);
+  if (Val.getValueType() != ResVT) {
+    unsigned Ext = LD->getExtensionType() == ISD::SEXTLOAD ? ISD::SIGN_EXTEND
+                 : LD->getExtensionType() == ISD::ZEXTLOAD ? ISD::ZERO_EXTEND
+                                                            : ISD::ANY_EXTEND;
+    Val = DAG.getNode(Ext, dl, ResVT, Val);
+  }
+  DCI.CombineTo(N, Val, R.second);
+  return SDValue(N, 0);
+}
+
 static SDValue combineProgLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
   LoadSDNode *LD = cast<LoadSDNode>(N);
   if (LD->getAddressSpace() != 1)
@@ -1807,7 +1857,9 @@ SDValue DSPICTargetLowering::PerformDAGCombine(SDNode *N, DAGCombinerInfo &DCI) 
   if (N->getOpcode() == ISD::LOAD) {
     if (SDValue R = combineProgLoad(N, DCI))
       return R;
-    return combineEdsLoad(N, DCI);   // session 110
+    if (SDValue R = combineEdsLoad(N, DCI))   // session 110
+      return R;
+    return combinePackedLoad(N, DCI);         // session 111
   }
   if (N->getOpcode() == ISD::STORE)
     return combineEdsStore(N, DCI);  // session 110
@@ -1886,6 +1938,19 @@ SDValue DSPICTargetLowering::LowerGlobalAddress(SDValue Op,
     SDLoc dl(Op);
     SDValue Lo = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_EDSOFFSET);
     SDValue Hi = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_EDSPAGE);
+    Lo = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Lo);
+    Hi = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Hi);
+    return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+  }
+
+  // session 111: a packed-flash global (addrspace 4, `__pack_upper_byte`) -- `mov
+  // #packed_lo(sym+off),wLo ; mov #packed_hi(sym+off),wHi`, cc1's `addr3` exactly, the constant
+  // offset folded into the relocation whose addend the linker adds (prints/l1f/eds/pack-ask3.txt:
+  // the assembled field carries the +3 under a PACKED_LO relocation naming the bare symbol).
+  if (GV->getAddressSpace() == 4) {
+    SDLoc dl(Op);
+    SDValue Lo = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_PACKEDLO);
+    SDValue Hi = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset, DSPICII::MO_PACKEDHI);
     Lo = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Lo);
     Hi = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Hi);
     return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);

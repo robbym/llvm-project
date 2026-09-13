@@ -240,6 +240,15 @@ public:
 
   MCSection *SelectSectionForGlobal(const GlobalObject *GO, SectionKind Kind,
                                     const TargetMachine &TM) const override {
+    // trellis session 111: a packed-flash object (`__pack_upper_byte`, addrspace 4) goes in its own
+    // section carrying the `packedflash` attribute -- cc1's `*_<hash>,packedflash`, ours named by
+    // the symbol, which the GPL assembler gives the same flags (prints/l1f/eds/pack-ask2.txt:
+    // CONTENTS, ALLOC, LOAD, PACKEDFLASH). Always PROGBITS: it is flash, and cc1 emits `.skip` for
+    // a zero-initialised packed object rather than a bss section. Read-only for the assembler's
+    // purposes (no SHF_WRITE): every write is refused in Sema.
+    if (GO->getAddressSpace() == 4 && !isa<Function>(GO))
+      return getContext().getELFSection((".packed." + GO->getName()).str() + ",packedflash",
+                                        ELF::SHT_PROGBITS, ELF::SHF_ALLOC);
     // L1d (trellis session 88): an interrupt function's BODY goes in `.isr.isr.text` (cc1's
     // `,code,keep`), and the vector is wired by the linker script from the function's SYMBOL
     // NAME -- there is no vector table. The retain/keep flag is a link concern (L1g).

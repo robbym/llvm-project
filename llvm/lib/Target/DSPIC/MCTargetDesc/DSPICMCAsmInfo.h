@@ -25,14 +25,18 @@ namespace DSPIC {
 // refuses `mov #_f,w0`: "Cannot reference executable symbol (_f) in a data context").
 enum { S_HANDLE = 1, S_TBLOFFSET = 2, S_TBLPAGE = 3,
        // session 110: the two halves of an extended-data-space address, `__eds__`.
-       S_EDSOFFSET = 4, S_EDSPAGE = 5 };
+       S_EDSOFFSET = 4, S_EDSPAGE = 5,
+       // session 111: the two halves of a packed-flash linear address, `__pack_upper_byte`.
+       S_PACKEDLO = 6, S_PACKEDHI = 7 };
 } // namespace DSPIC
 
 namespace DSPICII {
 // Machine-operand target flags: the two halves of a 24-bit program address (L1e prog-space).
 enum TOF { MO_NONE = 0, MO_TBLOFFSET, MO_TBLPAGE,
            // session 110: `__eds__` (addrspace 2) -- offset:page in 4 bytes.
-           MO_EDSOFFSET, MO_EDSPAGE };
+           MO_EDSOFFSET, MO_EDSPAGE,
+           // session 111: `__pack_upper_byte` (addrspace 4) -- a linear 32-bit address.
+           MO_PACKEDLO, MO_PACKEDHI };
 } // namespace DSPICII
 
 class DSPICMCAsmInfo : public MCAsmInfoELF {

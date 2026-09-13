@@ -6566,12 +6566,102 @@ static bool BuildAddressSpaceIndex(Sema &S, LangAS &ASIdx,
   return true;
 }
 
+// trellis session 111: `__pack_upper_byte` on the dsPIC. cc1 lays a record out PACKED under this
+// qualifier (measured: sizeof 8 against the plain 10, `ps.b` at offset 1, an array striding by the
+// packed size) and makes the qualified record a DIFFERENT type from the plain one (`ns = ps` is
+// "incompatible types"). It does that with a variant type copy (pic30.c
+// pic30_build_variant_type_copy). A clang RecordDecl has exactly one layout, so the same move is
+// made here: the first time the qualifier meets a record, a packed CLONE of that record is built
+// -- the same fields, the same tag and name, `packed` -- and the qualified type is built over the
+// clone. The clone is cached per record so every `__pack_upper_byte struct S` is one type. A
+// nested record member keeps its own layout, which is GCC's `packed` and cc1's data emission.
+// ⚠ An INCOMPLETE record is not cloned: cc1 freezes its variant at the qualifier and then refuses
+// every member access through such a pointer ("has no member named"), so no program that compiles
+// on cc1 reaches the plain layout ours would use there. ⚠ A record with an anonymous struct or
+// union member is refused (err_dspic_packed_anon): the IndirectFieldDecls that make its members
+// visible are not cloned here, and a silent "no member named" on a real program is worse than a
+// named refusal -- COSTED, not decided; the vendor accepts it.
+// ⚠ The cache is file-static rather than a Sema member so that Sema.h is untouched; one compile
+// is one ASTContext in this port.
+static llvm::DenseMap<const RecordDecl *, RecordDecl *> DSPICPackedClones;
+
+static RecordDecl *dspicPackedClone(Sema &S, const RecordDecl *RD, SourceLocation Loc) {
+  const RecordDecl *Def = RD->getDefinition();
+  if (!Def)
+    return nullptr;                          // incomplete: see above
+  auto It = DSPICPackedClones.find(Def);
+  if (It != DSPICPackedClones.end())
+    return It->second;
+  for (const FieldDecl *FD : Def->fields())
+    if (FD->isAnonymousStructOrUnion()) {
+      S.Diag(Loc, diag::err_dspic_packed_anon);
+      return nullptr;
+    }
+  ASTContext &Ctx = S.Context;
+  RecordDecl *Clone = RecordDecl::Create(Ctx, Def->getTagKind(),
+                                         const_cast<DeclContext *>(Def->getDeclContext()),
+                                         Def->getBeginLoc(), Def->getLocation(),
+                                         Def->getIdentifier());
+  Clone->setImplicit(true);
+  Clone->addAttr(PackedAttr::CreateImplicit(Ctx, Loc));
+  Clone->startDefinition();
+  for (const FieldDecl *FD : Def->fields()) {
+    FieldDecl *NF = FieldDecl::Create(Ctx, Clone, FD->getBeginLoc(), FD->getLocation(),
+                                      FD->getIdentifier(), FD->getType(),
+                                      FD->getTypeSourceInfo(), FD->getBitWidth(),
+                                      FD->isMutable(), FD->getInClassInitStyle());
+    NF->setAccess(FD->getAccess());
+    Clone->addDecl(NF);
+  }
+  Clone->completeDefinition();
+  DSPICPackedClones[Def] = Clone;
+  return Clone;
+}
+
+// The qualified type over the clone, keeping T's other qualifiers; a constant array of records
+// (a typedef'd array under the qualifier) is rebuilt over the clone's element type. Returns a null
+// QualType when there is nothing to substitute.
+static QualType dspicPackedType(Sema &S, QualType T, SourceLocation Loc) {
+  ASTContext &Ctx = S.Context;
+  if (const auto *CAT = Ctx.getAsConstantArrayType(T)) {
+    QualType Elem = dspicPackedType(S, CAT->getElementType(), Loc);
+    if (Elem.isNull())
+      return QualType();
+    QualType A = Ctx.getConstantArrayType(Elem, CAT->getSize(), CAT->getSizeExpr(),
+                                          CAT->getSizeModifier(),
+                                          CAT->getIndexTypeCVRQualifiers());
+    return Ctx.getQualifiedType(A, T.getQualifiers());
+  }
+  const RecordDecl *RD = T->getAsRecordDecl();
+  if (!RD)
+    return QualType();
+  if (RD->hasAttr<PackedAttr>() && DSPICPackedClones.count(RD->getDefinition()) == 0)
+    return QualType();                      // the user's own packed record: nothing to change
+  RecordDecl *Clone = dspicPackedClone(S, RD, Loc);
+  if (!Clone)
+    return QualType();
+  Qualifiers Q = T.getQualifiers();
+  Q.removeAddressSpace();
+  // (this tree spells the record's type getCanonicalTagType; getRecordType is gone -- the first
+  // build said so)
+  return Ctx.getQualifiedType(Ctx.getCanonicalTagType(Clone), Q);
+}
+
 QualType Sema::BuildAddressSpaceAttr(QualType &T, LangAS ASIdx, Expr *AddrSpace,
                                      SourceLocation AttrLoc) {
   if (!AddrSpace->isValueDependent()) {
     if (DiagnoseMultipleAddrSpaceAttributes(*this, T.getAddressSpace(), ASIdx,
                                             AttrLoc))
       return QualType();
+
+    // trellis session 111: `__pack_upper_byte` (dsPIC address space 4) on a record type is a
+    // PACKED CLONE of the record -- see dspicPackedClone above.
+    if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic &&
+        ASIdx != LangAS::Default && toTargetAddressSpace(ASIdx) == 4) {
+      QualType P = dspicPackedType(*this, T, AttrLoc);
+      if (!P.isNull())
+        T = P;
+    }
 
     return Context.getAddrSpaceQualType(T, ASIdx);
   }

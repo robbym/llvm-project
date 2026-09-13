@@ -14419,6 +14419,17 @@ static bool CheckForModifiableLvalue(Expr *E, SourceLocation Loc, Sema &S) {
     return true;
   }
 
+  // trellis session 111: a WRITE into packed flash (`__pack_upper_byte`, address space 4) is
+  // refused in cc1's own sentence -- direct, through a pointer, compound, ++/-- all come here;
+  // reads never do (they go through ___P32DFrd in the backend). Initialisation of a global is not
+  // an assignment expression and is not refused, which is cc1's boundary too.
+  if (S.Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic &&
+      E->getType().getAddressSpace() != LangAS::Default &&
+      toTargetAddressSpace(E->getType().getAddressSpace()) == 4) {
+    S.Diag(Loc, diag::err_dspic_packed_write);
+    return true;
+  }
+
   S.CheckShadowingDeclModification(E, Loc);
 
   SourceLocation OrigLoc = Loc;

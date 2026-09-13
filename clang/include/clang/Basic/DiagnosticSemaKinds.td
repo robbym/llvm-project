@@ -14411,5 +14411,12 @@ def warn_dspic_strict_bitfield_nonmember : Warning<
   "ignoring 'strict_bitfield' attribute applied to non-member %0">;
 def err_dspic_attr_refused : Error<
   "dsPIC '%0' is not provided by this compiler: %1">;
+// trellis session 111: `__pack_upper_byte` (address space 4). The write sentence is cc1's own,
+// verbatim (prints/l1f/eds/pack-ask.txt, pack-ask2.txt); the anonymous-member one is ours -- the
+// vendor accepts such a record, and cloning IndirectFieldDecls is a second increment (COSTED).
+def err_dspic_packed_write : Error<
+  "invalid address space for destination">;
+def err_dspic_packed_anon : Error<
+  "'__pack_upper_byte' on a record with an anonymous struct or union member is not supported yet">;
 
 } // end of sema component.

@@ -603,7 +603,7 @@ std::string Triple::computeDataLayout(StringRef ABIName) const {
   case Triple::dspic:
     // session 110: p2:32:16 is `__eds__` (extended data space) -- a 32-bit offset:page pointer,
     // 16-bit aligned, exactly as p1 is for `__prog__`.
-    return "e-m:o-p:16:16-p1:32:16-p2:32:16-p3:32:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
+    return "e-m:o-p:16:16-p1:32:16-p2:32:16-p3:32:16-p4:32:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
   case Triple::msp430:
     return "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16";
   case Triple::ppc:

@@ -27,6 +27,9 @@ void DSPICMCAsmInfo::printSpecifierExpr(raw_ostream &OS,
   // session 110: the GPL assembler accepts both (cc1 emits them; steps/eds/ask.sh section 5).
   case DSPIC::S_EDSOFFSET: Fn = "edsoffset"; break;
   case DSPIC::S_EDSPAGE:   Fn = "edspage";   break;
+  // session 111: the GPL assembler accepts both (prints/l1f/eds/pack-ask2.txt, PACKED_LO/HI).
+  case DSPIC::S_PACKEDLO:  Fn = "packed_lo"; break;
+  case DSPIC::S_PACKEDHI:  Fn = "packed_hi"; break;
   default: llvm_unreachable("unknown DSPIC specifier");
   }
   OS << Fn << '(';

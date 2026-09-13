@@ -68,7 +68,8 @@ public:
     // Measured from cc1: sizeof(__eds__ int *) == 4, sizeof(int *) == 2 (steps/eds/ASK.md).
     unsigned TAS = toTargetAddressSpace(AS);
     // 3 is `__external__`: measured sizeof(__external__ int *) == 4, the same as eds and prog.
-    return (AS != LangAS::Default && (TAS == 1 || TAS == 2 || TAS == 3)) ? 32 : PointerWidth;
+    // 4 is `__pack_upper_byte` (session 111): measured sizeof(__pack_upper_byte char *) == 4.
+    return (AS != LangAS::Default && (TAS == 1 || TAS == 2 || TAS == 3 || TAS == 4)) ? 32 : PointerWidth;
   }
   uint64_t getPointerAlignV(LangAS AS) const override {
     return (AS != LangAS::Default && toTargetAddressSpace(AS) == 1) ? 16 : PointerAlign;
