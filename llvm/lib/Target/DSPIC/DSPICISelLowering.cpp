@@ -1224,6 +1224,75 @@ static void edsSplit(SelectionDAG &DAG, const SDLoc &dl, SDValue Addr32,
   Page = DAG.getNode(ISD::TRUNCATE, dl, MVT::i16, Hi);
 }
 
+// trellis session 112: `base + disp` in the `__eds__` (addrspace 2) representation, with the carry
+// landing in the PAGE word instead of running through bit 15, the hardware's window select.
+//
+// ⛔ THIS IS THE SAME RULE AS DSPICEDSPtrArith.cpp's emitPagedAdd, AT A SECOND SITE, AND THE TWO MUST
+// NOT DRIFT. That pass rewrites `getelementptr` INSTRUCTIONS, so it fixes every address a GEP
+// computes; it cannot see the `+2` between the two halves of an i32, because that add is created
+// here, in the DAG. Same formula, same constants, each file naming the other:
+//
+//   page = a >> 16 ; off = a & 0x7FFF ; lin = (page << 15) | off
+//   s = lin + disp
+//   res = ((s >> 15) << 16) | (s & 0x7FFF) | ((s >> 15) != 0 ? 0x8000 : 0)
+//
+// ⛔ AND `__prog__` (addrspace 1) MUST NOT USE THIS. combineProgLoad has the same `+2` shape and is a
+// LINEAR space, where a flat add is correct. The two combines look alike and are not alike.
+// Defined in DSPICEDSPtrArith.cpp at GLOBAL scope (that file has `using namespace llvm;` but the
+// option is not inside the namespace), so the declaration must be global too -- wrapping it in
+// `namespace llvm` names a different symbol and fails at LINK, not at compile.
+extern llvm::cl::opt<bool> DSPICEnableEDSPtrArith;
+// Is this address a LINK-TIME CONSTANT -- the `BUILD_PAIR(Wrapper(TargetGlobalAddress edsoffset),
+// Wrapper(... edspage))` that LowerGlobalAddress builds for an addrspace(2) global?
+//
+// ⛔ IT MATTERS BECAUSE SUCH AN ADDRESS NEEDS NO RUNTIME CARRY AND MUST NOT PAY FOR ONE. `sym + 2`
+// is resolved by the LINKER, which computes the true (page, offset) pair for the linear address --
+// session 111 measured the identity, `linear = page * 0x8000 + (offset & 0x7FFF)` -- so the flat add
+// folds into the relocation and is both correct across pages AND two instructions instead of the
+// carry's dozen. This is the same argument as the constant-index case at the IR site, and the same
+// requirement the operator's ruling put on the row: the fix is the RUNTIME path only.
+//
+// ⚠ THE FIRST VERSION OF THIS FUNCTION HAD NO SUCH TEST and regressed `eds/compare` from 29/0 to
+// 27/2 -- E9h and E9j, "r_l / w_l folds +2 into the relocation", which are pins written for exactly
+// this. The guard existed at the other site and not at this one.
+static bool edsIsLinkTimeAddr(SDValue A) {
+  // ⚠ TWO SPELLINGS, AND THE FIRST VERSION KNEW ONLY ONE. LowerGlobalAddress runs during
+  // LEGALIZATION, so whether this combine sees the raw GlobalAddress or the already-lowered
+  // BUILD_PAIR depends on which round it fires in -- measured: the LOAD's combine saw the pair and
+  // the STORE's saw the bare global, so accepting only the pair fixed E9h and left E9j red.
+  if (isa<GlobalAddressSDNode>(A))
+    return true;
+  if (A.getOpcode() != ISD::BUILD_PAIR)
+    return false;
+  for (unsigned I = 0; I != 2; ++I) {
+    SDValue Op = A.getOperand(I);
+    if (Op.getOpcode() != DSPICISD::Wrapper)
+      return false;
+    if (!isa<GlobalAddressSDNode>(Op.getOperand(0)))
+      return false;
+  }
+  return true;
+}
+
+static SDValue edsPagedAdd(SelectionDAG &DAG, const SDLoc &dl, SDValue Addr32, uint32_t Disp) {
+  auto C = [&](uint32_t V) { return DAG.getConstant(V, dl, MVT::i32); };
+  // the same switch the IR pass reads: one rule, one axis, so the defect builds whole on demand.
+  if (!DSPICEnableEDSPtrArith || edsIsLinkTimeAddr(Addr32))
+    return DAG.getNode(ISD::ADD, dl, MVT::i32, Addr32, C(Disp));
+  SDValue Page = DAG.getNode(ISD::SRL, dl, MVT::i32, Addr32, C(16));
+  SDValue Off = DAG.getNode(ISD::AND, dl, MVT::i32, Addr32, C(0x7FFF));
+  SDValue Lin = DAG.getNode(ISD::OR, dl, MVT::i32,
+                            DAG.getNode(ISD::SHL, dl, MVT::i32, Page, C(15)), Off);
+  SDValue Sum = DAG.getNode(ISD::ADD, dl, MVT::i32, Lin, C(Disp));
+  SDValue NewPage = DAG.getNode(ISD::SRL, dl, MVT::i32, Sum, C(15));
+  SDValue NewOff = DAG.getNode(ISD::AND, dl, MVT::i32, Sum, C(0x7FFF));
+  SDValue InWindow = DAG.getSetCC(dl, MVT::i16, NewPage, C(0), ISD::SETNE);
+  SDValue Window = DAG.getNode(ISD::SELECT, dl, MVT::i32, InWindow, C(0x8000), C(0));
+  SDValue Hi = DAG.getNode(ISD::SHL, dl, MVT::i32, NewPage, C(16));
+  return DAG.getNode(ISD::OR, dl, MVT::i32,
+                     DAG.getNode(ISD::OR, dl, MVT::i32, Hi, NewOff), Window);
+}
+
 static SDValue combineEdsLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
   LoadSDNode *LD = cast<LoadSDNode>(N);
   if (LD->getAddressSpace() != 2)
@@ -1274,7 +1343,8 @@ static SDValue combineEdsLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
     SDValue Lo = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
                                          DAG.getVTList(MVT::i16, MVT::Other), OpsLo, MVT::i16,
                                          LD->getMemOperand());
-    SDValue Ptr2 = DAG.getNode(ISD::ADD, dl, MVT::i32, Ptr, DAG.getConstant(2, dl, MVT::i32));
+    // session 112: the paging carry, not a flat add -- see edsPagedAdd above.
+    SDValue Ptr2 = edsPagedAdd(DAG, dl, Ptr, 2);
     SDValue Off2, Page2;
     edsSplit(DAG, dl, Ptr2, Off2, Page2);
     SDValue OpsHi[] = { Lo.getValue(1), Off2, Page2 };
@@ -1323,8 +1393,8 @@ static SDValue combineEdsStore(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) 
     SDValue OpsLo[] = { ST->getChain(), Lo, Off, Page };
     SDValue C1 = DAG.getMemIntrinsicNode(DSPICISD::EDSST, dl, DAG.getVTList(MVT::Other), OpsLo,
                                          MVT::i16, ST->getMemOperand());
-    SDValue Ptr2 = DAG.getNode(ISD::ADD, dl, MVT::i32, ST->getBasePtr(),
-                               DAG.getConstant(2, dl, MVT::i32));
+    // session 112: the paging carry, not a flat add -- see edsPagedAdd above.
+    SDValue Ptr2 = edsPagedAdd(DAG, dl, ST->getBasePtr(), 2);
     SDValue Off2, Page2;
     edsSplit(DAG, dl, Ptr2, Off2, Page2);
     SDValue OpsHi[] = { C1, Hi, Off2, Page2 };

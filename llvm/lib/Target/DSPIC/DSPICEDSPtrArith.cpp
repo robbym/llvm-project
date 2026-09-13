@@ -62,8 +62,12 @@ using namespace llvm;
 STATISTIC(NumEDSPtrArith, "Number of __eds__ GEPs given a paging carry");
 
 // The port's convention: every behaviour change gets a hidden switch so an A/B is one flag away.
-static cl::opt<bool>
-    EnableEDSPtrArith("dspic-eds-ptr-arith", cl::Hidden, cl::init(true),
+// ⛔ NOT static, and the name is the target's: DSPICISelLowering.cpp's edsPagedAdd reads the SAME
+// option, because the paging carry is ONE RULE AT TWO SITES. This pass fixes every address a GEP
+// computes; the `+2` between the two halves of an i32 is created in the DAG, where no IR pass can
+// see it. One switch so that "the defect, on demand" means the whole defect and not half of it.
+cl::opt<bool>
+    DSPICEnableEDSPtrArith("dspic-eds-ptr-arith", cl::Hidden, cl::init(true),
                       cl::desc("Carry __eds__ pointer arithmetic into the page word "
                                "instead of through the hardware window-select bit"));
 
@@ -135,7 +139,7 @@ static Value *emitPagedAdd(IRBuilder<> &B, Value *Base, Value *Disp) {
 }
 
 static bool runEDSPtrArith(Function &F) {
-  if (!EnableEDSPtrArith || F.isDeclaration())
+  if (!DSPICEnableEDSPtrArith || F.isDeclaration())
     return false;
 
   const DataLayout &DL = F.getParent()->getDataLayout();
