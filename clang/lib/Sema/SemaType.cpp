@@ -6592,11 +6592,6 @@ static RecordDecl *dspicPackedClone(Sema &S, const RecordDecl *RD, SourceLocatio
   auto It = DSPICPackedClones.find(Def);
   if (It != DSPICPackedClones.end())
     return It->second;
-  for (const FieldDecl *FD : Def->fields())
-    if (FD->isAnonymousStructOrUnion()) {
-      S.Diag(Loc, diag::err_dspic_packed_anon);
-      return nullptr;
-    }
   ASTContext &Ctx = S.Context;
   RecordDecl *Clone = RecordDecl::Create(Ctx, Def->getTagKind(),
                                          const_cast<DeclContext *>(Def->getDeclContext()),
@@ -6605,6 +6600,7 @@ static RecordDecl *dspicPackedClone(Sema &S, const RecordDecl *RD, SourceLocatio
   Clone->setImplicit(true);
   Clone->addAttr(PackedAttr::CreateImplicit(Ctx, Loc));
   Clone->startDefinition();
+  llvm::DenseMap<const FieldDecl *, FieldDecl *> Fields;
   for (const FieldDecl *FD : Def->fields()) {
     FieldDecl *NF = FieldDecl::Create(Ctx, Clone, FD->getBeginLoc(), FD->getLocation(),
                                       FD->getIdentifier(), FD->getType(),
@@ -6612,6 +6608,41 @@ static RecordDecl *dspicPackedClone(Sema &S, const RecordDecl *RD, SourceLocatio
                                       FD->isMutable(), FD->getInClassInitStyle());
     NF->setAccess(FD->getAccess());
     Clone->addDecl(NF);
+    Fields[FD] = NF;
+  }
+  // An ANONYMOUS struct or union member is two things in clang: an unnamed FieldDecl whose type is
+  // the anonymous record, and one IndirectFieldDecl per inner member, which is what makes `pa.x`
+  // resolve. Cloning only the fields loses the second kind and every `pa.x` becomes "no member
+  // named x". ⛔ The first landing REFUSED such a record instead of copying them, on a premise about
+  // cc1 that no ask script had measured -- and cc1 ACCEPTS it (steps/eds/pack-ask2.sh's anon case,
+  // `xc-dsc-gcc -c` produces an object), so the refusal breached the standing rule that a program
+  // xc-dsc compiles must work here. The copy is this loop.
+  // Only the FIRST link of the chain belongs to this record -- the unnamed FieldDecl -- so it is
+  // remapped to the clone's copy and the rest are left pointing into the inner record, which is NOT
+  // cloned because a nested record keeps its own layout (measured: cc1's data emission for
+  // `struct Out { char a; struct In in; char c; }` lays `In` out naturally inside the packed outer).
+  for (Decl *D : Def->decls()) {
+    auto *IFD = dyn_cast<IndirectFieldDecl>(D);
+    if (!IFD || IFD->getChainingSize() == 0)
+      continue;
+    // ⛔ THE CHAIN MUST BE ALLOCATED IN THE ASTContext. IndirectFieldDecl::Create does NOT copy
+    // the array it is handed -- it stores the pointer, and Sema itself allocates the chain in the
+    // ASTContext (SemaDecl.cpp, InjectAnonymousStructOrUnionMembers) before
+    // calling. A SmallVector here dangles the moment this iteration ends, and the first member
+    // access then asserts in cast<FieldDecl> inside BuildAnonymousStructUnionMemberReference.
+    unsigned N = IFD->getChainingSize();
+    NamedDecl **Chain = new (Ctx) NamedDecl *[N];
+    for (unsigned i = 0; i != N; ++i)
+      Chain[i] = IFD->chain()[i];
+    if (auto *Outer = dyn_cast<FieldDecl>(Chain[0])) {
+      auto F = Fields.find(Outer);
+      if (F != Fields.end())
+        Chain[0] = F->second;
+    }
+    IndirectFieldDecl *NI = IndirectFieldDecl::Create(
+        Ctx, Clone, IFD->getLocation(), IFD->getIdentifier(), IFD->getType(), {Chain, N});
+    NI->setAccess(IFD->getAccess());
+    Clone->addDecl(NI);
   }
   Clone->completeDefinition();
   DSPICPackedClones[Def] = Clone;
