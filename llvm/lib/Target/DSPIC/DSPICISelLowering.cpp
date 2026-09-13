@@ -93,7 +93,12 @@ DSPICTargetLowering::DSPICTargetLowering(const TargetMachine &TM,
   setOperationAction(ISD::ROTR,             MVT::i8,    Custom);
   setOperationAction(ISD::ROTL,             MVT::i16,   Custom);
   setOperationAction(ISD::ROTR,             MVT::i16,   Custom);
-  setOperationAction(ISD::GlobalAddress,    MVT::i16,   Custom);
+  setOperationAction(ISD::GlobalAddress, MVT::i16, Custom);
+  // trellis session 112: without these two, an addrspacecast reaches the type legalizer
+  // and dies with "Do not know how to expand the result of this operator!" -- a FATAL
+  // backend error on all 20 ordered cross-space casts, 18 of which cc1 accepts.
+  setOperationAction(ISD::ADDRSPACECAST, MVT::i16, Custom);
+  setOperationAction(ISD::ADDRSPACECAST,   MVT::i32,   Custom);
   // L1e prog-space: an addrspace(1) global address is i32 (page:offset); LowerGlobalAddress
   // splits it into tbloffset/tblpage, so it must be Custom too (else the legalizer expands it).
   setOperationAction(ISD::GlobalAddress,    MVT::i32,   Custom);
@@ -258,6 +263,7 @@ SDValue DSPICTargetLowering::LowerOperation(SDValue Op,
   case ISD::UDIVREM:
   case ISD::SDIVREM:          return LowerDivRem(Op, DAG);
   case ISD::GlobalAddress:    return LowerGlobalAddress(Op, DAG);
+  case ISD::ADDRSPACECAST:    return LowerADDRSPACECAST(Op, DAG);
   case ISD::BlockAddress:     return LowerBlockAddress(Op, DAG);
   case ISD::ExternalSymbol:   return LowerExternalSymbol(Op, DAG);
   case ISD::SETCC:            return LowerSETCC(Op, DAG);
@@ -1984,6 +1990,68 @@ SDValue DSPICTargetLowering::LowerShifts(SDValue Op,
   return Op;
 }
 
+// trellis session 112: a cast between two address spaces.
+//
+// ⛔ THE RULE IS THE VENDOR'S, MEASURED OVER ALL TWENTY ORDERED PAIRS AND NOT INFERRED FROM ONE.
+// prints/l1f/eds/cast-sem.txt classifies every cell of cc1's own emitted code:
+//
+//   CONVERT (2)  near->eds, prog->eds      real arithmetic on the source value
+//   REFUSED (2)  eds->near, eds->prog      "Unable to convert from '__eds__ int *' to type 'int *'"
+//   NULL   (16)  every other ordered pair  the value is discarded
+//
+// ⚠ Two earlier accounts of this were wrong in opposite directions -- "cc1 compiles every such cast
+// and returns a null pointer" (session 111) and "cc1 REFUSES it" (session 112, from a single cell).
+// The table is what settles it.
+//
+// ⚠ THE TWO REFUSED CELLS ARE LOWERED AS NULL HERE, AND ARE OWED A FRONT-END DIAGNOSTIC in cc1's
+// own sentence. A report_fatal_error would have no source location, could not be suppressed, and
+// would be indistinguishable from the crash this function exists to remove.
+SDValue DSPICTargetLowering::LowerADDRSPACECAST(SDValue Op,
+                                                 SelectionDAG &DAG) const {
+  auto *N = cast<AddrSpaceCastSDNode>(Op);
+  unsigned Src = N->getSrcAddressSpace(), Dst = N->getDestAddressSpace();
+  SDLoc dl(Op);
+  EVT VT = Op.getValueType();
+
+  // near(0) -> eds(2). cc1: `mul.uu w0,#1,w0 ; btsc w0,#15 ; mov #__const_psvpage,w1`.
+  // ⚠ READ OFF cc1's OUTPUT, and the READING is mine: a near address with bit 15 set already lies
+  // in the window, so its page is the const-PSV page; below 0x8000 it is page 0. The emitted text
+  // matches cc1 either way -- what a wrong reading costs is this comment.
+  // ⚠ BUILT AS A PAIR OF i16 HALVES, which is LowerGlobalAddress's own idiom, and not as i32
+  // arithmetic. The first version made the page a `TargetExternalSymbol` of type i32 and crashed in
+  // exactly the place this function exists to fix -- "ExpandIntegerResult #0: t17: i32 =
+  // TargetExternalSymbol'__const_psvpage'" -- because i32 is not a legal type here. 19 of the 20
+  // cells were fixed and this one still died, found by RE-MEASURING the table.
+  if (Src == 0 && Dst == 2 && VT == MVT::i32) {
+    SDValue Lo = Op.getOperand(0);
+    SDValue InWin = DAG.getSetCC(dl, MVT::i16,
+                                 DAG.getNode(ISD::AND, dl, MVT::i16, Lo,
+                                             DAG.getConstant(0x8000, dl, MVT::i16)),
+                                 DAG.getConstant(0, dl, MVT::i16), ISD::SETNE);
+    SDValue Psv = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16,
+                              DAG.getTargetExternalSymbol("_const_psvpage", MVT::i16));
+    // ⚠ ONE leading underscore here, TWO in the object: the target prefixes external
+    // symbols with `_`, and cc1 emits `__const_psvpage`. Session 110 overshot this exact trap
+    // and got `___memcpy_eds`, a name nothing defines; this undershot it and got
+    // `_const_psvpage`, likewise undefined. Checked against cc1's own text, not counted.
+    SDValue Hi = DAG.getNode(ISD::SELECT, dl, MVT::i16, InWin, Psv,
+                             DAG.getConstant(0, dl, MVT::i16));
+    return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+  }
+
+  // prog(1) -> eds(2). cc1: `btsts.c w0,#15 ; rlc w1,w1` -- the 24-bit tblpage:tbloffset shifted
+  // LEFT by one through the carry, which is the 15-bit-offset re-normalisation, the same identity
+  // as the paging carry in edsPagedAdd.
+  if (Src == 1 && Dst == 2 && VT == MVT::i32) {
+    SDValue A = Op.getOperand(0);
+    return DAG.getNode(ISD::SHL, dl, MVT::i32, A, DAG.getConstant(1, dl, MVT::i32));
+  }
+
+  // every other pair: the value is discarded, exactly as cc1 does. One `clr.w` into a 16-bit near
+  // pointer, two into a 32-bit one -- the width follows the destination type, not a count.
+  return DAG.getConstant(0, dl, VT);
+}
+
 SDValue DSPICTargetLowering::LowerGlobalAddress(SDValue Op,
                                                  SelectionDAG &DAG) const {
   const GlobalValue *GV = cast<GlobalAddressSDNode>(Op)->getGlobal();
@@ -2040,6 +2108,13 @@ void DSPICTargetLowering::ReplaceNodeResults(SDNode *N,
   switch (N->getOpcode()) {
   case ISD::GlobalAddress:
     Results.push_back(LowerGlobalAddress(SDValue(N, 0), DAG));
+    break;
+  // trellis session 112: a cross-space cast whose RESULT is an illegal i32. Hand back the lowered
+  // value so the integer legalizer expands it into two i16 halves, exactly as the GlobalAddress
+  // case above does. Without this arm the node reaches ExpandIntegerResult and dies with
+  // "Do not know how to expand the result of this operator!" -- the crash on all 20 cells.
+  case ISD::ADDRSPACECAST:
+    Results.push_back(LowerADDRSPACECAST(SDValue(N, 0), DAG));
     break;
   case ISD::VAARG: {
     // Session 96: a multi-word va_arg must be expanded HERE, not by the integer legalizer.

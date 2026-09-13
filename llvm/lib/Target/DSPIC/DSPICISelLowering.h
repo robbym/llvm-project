@@ -44,6 +44,9 @@ namespace llvm {
     SDValue LowerShifts(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerDivRem(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerGlobalAddress(SDValue Op, SelectionDAG &DAG) const;
+  // trellis session 112: the cross-address-space cast. Ours crashed on all 20 ordered
+  // pairs; cc1 accepts 18. See steps/eds/CAST.expected.first.
+  SDValue LowerADDRSPACECAST(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerBlockAddress(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerExternalSymbol(SDValue Op, SelectionDAG &DAG) const;
     SDValue LowerBR_CC(SDValue Op, SelectionDAG &DAG) const;
