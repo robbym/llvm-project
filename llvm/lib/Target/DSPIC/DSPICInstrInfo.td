@@ -83,6 +83,17 @@ def DSPICedsld : SDNode<"DSPICISD::EDSLD", SDT_DSPICPsvLd,
                         [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
 def DSPICedsst : SDNode<"DSPICISD::EDSST", SDT_DSPICEdsSt,
                         [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
+// Phase B(i): the BYTE width. The extension is IN the load (ze/se [w],w) -- L1e's rule, because
+// `mov.b [w],w` does not zero the high byte and def8 -> SUBREG_TO_REG drops a following extend.
+def SDT_DSPICEdsSt8 : SDTypeProfile<0, 3, [SDTCisVT<0, i8>, SDTCisVT<1, i16>, SDTCisVT<2, i16>]>;
+def DSPICedsld8  : SDNode<"DSPICISD::EDSLD8", SDT_DSPICPsvLd8,
+                          [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def DSPICedsld8z : SDNode<"DSPICISD::EDSLD8Z", SDT_DSPICPsvLd,
+                          [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def DSPICedsld8s : SDNode<"DSPICISD::EDSLD8S", SDT_DSPICPsvLd,
+                          [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def DSPICedsst8  : SDNode<"DSPICISD::EDSST8", SDT_DSPICEdsSt8,
+                          [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 def DSPICcmp     : SDNode<"DSPICISD::CMP", SDT_DSPICCmp, [SDNPOutGlue]>;
 // L1f-k (trellis session 92): the borrow compare `cpb`, the second half of a 32-bit compare --
 // it takes the first half's flags as glue and hands the pair's on.
@@ -2423,8 +2434,10 @@ let hasSideEffects = 1 in {
   def MOVFROMDSW : DSPICFrameInst<(outs GR16:$rd), (ins), 2, "mov\t_DSWPAG,$rd">;
   def MOVTODSW   : DSPICFrameInst<(outs), (ins GR16:$src), 2, "mov\t$src,_DSWPAG">;
 }
-let mayStore = 1 in
+let mayStore = 1 in {
   def MOVINDST16 : DSPICFrameInst<(outs), (ins GR16:$rs, GR16:$p), 2, "mov\t$rs,[$p]">;
+  def MOVINDST8  : DSPICFrameInst<(outs), (ins GR8:$rs, GR16:$p), 2, "mov.b\t$rs,[$p]">;
+}
 // ⛔ No Defs = [SR] on either pseudo: unlike the PSV read, the EDS sequence has no btsts.c/rlc and
 // therefore clobbers no flags. Claiming SR would pessimise every caller for nothing.
 let usesCustomInserter = 1, mayLoad = 1 in
@@ -2433,6 +2446,18 @@ let usesCustomInserter = 1, mayLoad = 1 in
 let usesCustomInserter = 1, mayStore = 1 in
   def EDSST16 : Pseudo<(outs), (ins GR16:$src, GR16:$off, GR16:$page), "# EDSST16",
                        [(DSPICedsst GR16:$src, GR16:$off, GR16:$page)]>;
+// Phase B(i): the byte forms of both directions.
+let usesCustomInserter = 1, mayLoad = 1 in {
+  def EDSLD8  : Pseudo<(outs GR8:$dst),  (ins GR16:$off, GR16:$page), "# EDSLD8",
+                       [(set GR8:$dst,  (DSPICedsld8 GR16:$off, GR16:$page))]>;
+  def EDSLD8Z : Pseudo<(outs GR16:$dst), (ins GR16:$off, GR16:$page), "# EDSLD8Z",
+                       [(set GR16:$dst, (DSPICedsld8z GR16:$off, GR16:$page))]>;
+  def EDSLD8S : Pseudo<(outs GR16:$dst), (ins GR16:$off, GR16:$page), "# EDSLD8S",
+                       [(set GR16:$dst, (DSPICedsld8s GR16:$off, GR16:$page))]>;
+}
+let usesCustomInserter = 1, mayStore = 1 in
+  def EDSST8 : Pseudo<(outs), (ins GR8:$src, GR16:$off, GR16:$page), "# EDSST8",
+                      [(DSPICedsst8 GR8:$src, GR16:$off, GR16:$page)]>;
 // Session 90: the byte read (same sequence, `mov.b`).
 let usesCustomInserter = 1, mayLoad = 1, Defs = [SR] in {
   def PSVLD8 : Pseudo<(outs GR8:$dst), (ins GR16:$off, GR16:$page), "# PSVLD8",

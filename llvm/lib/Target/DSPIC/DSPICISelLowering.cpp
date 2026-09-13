@@ -1221,33 +1221,110 @@ static SDValue combineEdsLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
   LoadSDNode *LD = cast<LoadSDNode>(N);
   if (LD->getAddressSpace() != 2)
     return SDValue();
-  if (LD->getExtensionType() != ISD::NON_EXTLOAD || LD->getMemoryVT() != MVT::i16)
-    return SDValue();
+  EVT VT = LD->getMemoryVT();
+  ISD::LoadExtType Ext = LD->getExtensionType();
   SelectionDAG &DAG = DCI.DAG;
   SDLoc dl(N);
   SDValue Off, Page;
   edsSplit(DAG, dl, LD->getBasePtr(), Off, Page);
-  SDValue Ops[] = { LD->getChain(), Off, Page };
-  SDValue W = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
-                                      DAG.getVTList(MVT::i16, MVT::Other), Ops, MVT::i16,
-                                      LD->getMemOperand());
-  DCI.CombineTo(N, W, W.getValue(1));
-  return SDValue(N, 0);
+
+  // Phase B(i): the BYTE read. The extension is IN the windowed load, never by a following op --
+  // L1e's rule and session 90's measured miscompile (`mov.b [w],w` does not zero the high byte,
+  // and def8 -> SUBREG_TO_REG drops a trailing extend). cc1 extends afterwards; we deliberately
+  // do not.
+  if (VT == MVT::i8) {
+    unsigned Node = Ext == ISD::ZEXTLOAD ? DSPICISD::EDSLD8Z
+                  : Ext == ISD::SEXTLOAD ? DSPICISD::EDSLD8S : DSPICISD::EDSLD8;
+    EVT ResVT = Ext == ISD::NON_EXTLOAD ? MVT::i8 : MVT::i16;
+    SDValue Ops[] = { LD->getChain(), Off, Page };
+    SDValue B = DAG.getMemIntrinsicNode(Node, dl, DAG.getVTList(ResVT, MVT::Other), Ops,
+                                        MVT::i8, LD->getMemOperand());
+    SDValue Val = B;
+    if (Ext != ISD::NON_EXTLOAD && LD->getValueType(0) != MVT::i16)
+      Val = DAG.getNode(ISD::ANY_EXTEND, dl, LD->getValueType(0), B);
+    DCI.CombineTo(N, Val, B.getValue(1));
+    return SDValue(N, 0);
+  }
+  if (Ext != ISD::NON_EXTLOAD)
+    return SDValue();
+
+  if (VT == MVT::i16) {
+    SDValue Ops[] = { LD->getChain(), Off, Page };
+    SDValue W = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
+                                        DAG.getVTList(MVT::i16, MVT::Other), Ops, MVT::i16,
+                                        LD->getMemOperand());
+    DCI.CombineTo(N, W, W.getValue(1));
+    return SDValue(N, 0);
+  }
+  // Phase B(i): an i32 is two window accesses, at Ptr and Ptr+2, exactly as combineProgLoad does
+  // for `__prog__`. ⚠ The +2 is a FLAT 32-bit add; cc1 instead does inc2/bra nc/bset #15/inc
+  // _DSRPAG so that the pair survives a 32K page boundary. See this file's header: ours is correct
+  // for an object that does not straddle one, and that single condition covers every unhandled
+  // case rather than there being four.
+  if (VT == MVT::i32) {
+    SDValue Ptr = LD->getBasePtr();
+    SDValue OpsLo[] = { LD->getChain(), Off, Page };
+    SDValue Lo = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
+                                         DAG.getVTList(MVT::i16, MVT::Other), OpsLo, MVT::i16,
+                                         LD->getMemOperand());
+    SDValue Ptr2 = DAG.getNode(ISD::ADD, dl, MVT::i32, Ptr, DAG.getConstant(2, dl, MVT::i32));
+    SDValue Off2, Page2;
+    edsSplit(DAG, dl, Ptr2, Off2, Page2);
+    SDValue OpsHi[] = { Lo.getValue(1), Off2, Page2 };
+    SDValue Hi = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
+                                         DAG.getVTList(MVT::i16, MVT::Other), OpsHi, MVT::i16,
+                                         LD->getMemOperand());
+    SDValue Val = DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+    DCI.CombineTo(N, Val, Hi.getValue(1));
+    return SDValue(N, 0);
+  }
+  return SDValue();
 }
 
 static SDValue combineEdsStore(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
   StoreSDNode *ST = cast<StoreSDNode>(N);
   if (ST->getAddressSpace() != 2)
     return SDValue();
-  if (ST->isTruncatingStore() || ST->getMemoryVT() != MVT::i16)
-    return SDValue();
+  EVT VT = ST->getMemoryVT();
   SelectionDAG &DAG = DCI.DAG;
   SDLoc dl(N);
   SDValue Off, Page;
   edsSplit(DAG, dl, ST->getBasePtr(), Off, Page);
-  SDValue Ops[] = { ST->getChain(), ST->getValue(), Off, Page };
-  return DAG.getMemIntrinsicNode(DSPICISD::EDSST, dl, DAG.getVTList(MVT::Other), Ops,
-                                 MVT::i16, ST->getMemOperand());
+  SDValue Val = ST->getValue();
+
+  // Phase B(i): the BYTE write. A truncating store of a wider value narrows here.
+  if (VT == MVT::i8) {
+    if (Val.getValueType() != MVT::i8)
+      Val = DAG.getNode(ISD::TRUNCATE, dl, MVT::i8, Val);
+    SDValue Ops[] = { ST->getChain(), Val, Off, Page };
+    return DAG.getMemIntrinsicNode(DSPICISD::EDSST8, dl, DAG.getVTList(MVT::Other), Ops,
+                                   MVT::i8, ST->getMemOperand());
+  }
+  if (ST->isTruncatingStore())
+    return SDValue();
+  if (VT == MVT::i16) {
+    SDValue Ops[] = { ST->getChain(), Val, Off, Page };
+    return DAG.getMemIntrinsicNode(DSPICISD::EDSST, dl, DAG.getVTList(MVT::Other), Ops,
+                                   MVT::i16, ST->getMemOperand());
+  }
+  // Phase B(i): an i32 store is two window writes, low word first (the little-endian order the
+  // loads read back). The same flat-+2 caveat as the load.
+  if (VT == MVT::i32) {
+    SDValue Lo = DAG.getNode(ISD::TRUNCATE, dl, MVT::i16, Val);
+    SDValue HiSh = DAG.getNode(ISD::SRL, dl, MVT::i32, Val, DAG.getConstant(16, dl, MVT::i32));
+    SDValue Hi = DAG.getNode(ISD::TRUNCATE, dl, MVT::i16, HiSh);
+    SDValue OpsLo[] = { ST->getChain(), Lo, Off, Page };
+    SDValue C1 = DAG.getMemIntrinsicNode(DSPICISD::EDSST, dl, DAG.getVTList(MVT::Other), OpsLo,
+                                         MVT::i16, ST->getMemOperand());
+    SDValue Ptr2 = DAG.getNode(ISD::ADD, dl, MVT::i32, ST->getBasePtr(),
+                               DAG.getConstant(2, dl, MVT::i32));
+    SDValue Off2, Page2;
+    edsSplit(DAG, dl, Ptr2, Off2, Page2);
+    SDValue OpsHi[] = { C1, Hi, Off2, Page2 };
+    return DAG.getMemIntrinsicNode(DSPICISD::EDSST, dl, DAG.getVTList(MVT::Other), OpsHi,
+                                   MVT::i16, ST->getMemOperand());
+  }
+  return SDValue();
 }
 
 static SDValue combineProgLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
@@ -2482,6 +2559,36 @@ DSPICTargetLowering::EmitInstrWithCustomInserter(MachineInstr &MI,
   // session 110: expand the EDS-window read and write to cc1's sequences. The read saves and sets
   // DSRPAG with `movpag`; the write saves and sets DSWPAG with a PLAIN `mov`. No btsts.c/rlc --
   // `edsoffset()` already carries the window bit (steps/eds/ASK.md section 3).
+  // Phase B(i): the byte forms. Same window, `ze`/`se`/`mov.b` in the access itself.
+  if (Opc == DSPIC::EDSLD8 || Opc == DSPIC::EDSLD8Z || Opc == DSPIC::EDSLD8S) {
+    unsigned LdOpc = Opc == DSPIC::EDSLD8Z ? DSPIC::MOVINDLDZ8
+                   : Opc == DSPIC::EDSLD8S ? DSPIC::MOVINDLDS8 : DSPIC::MOVINDLD8;
+    MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
+    Register Dst  = MI.getOperand(0).getReg();
+    Register Off  = MI.getOperand(1).getReg();
+    Register Page = MI.getOperand(2).getReg();
+    Register Save = MRI.createVirtualRegister(&DSPIC::GR16RegClass);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVFROMDSR), Save);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVPAGDSR)).addReg(Page);
+    BuildMI(*BB, MI, dl, TII.get(LdOpc), Dst).addReg(Off);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVPAGDSR)).addReg(Save);
+    MI.eraseFromParent();
+    return BB;
+  }
+  if (Opc == DSPIC::EDSST8) {
+    MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
+    Register Src  = MI.getOperand(0).getReg();
+    Register Off  = MI.getOperand(1).getReg();
+    Register Page = MI.getOperand(2).getReg();
+    Register Save = MRI.createVirtualRegister(&DSPIC::GR16RegClass);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVFROMDSW), Save);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVTODSW)).addReg(Page);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVINDST8)).addReg(Src).addReg(Off);
+    BuildMI(*BB, MI, dl, TII.get(DSPIC::MOVTODSW)).addReg(Save);
+    MI.eraseFromParent();
+    return BB;
+  }
+
   if (Opc == DSPIC::EDSLD16 || Opc == DSPIC::EDSST16) {
     bool IsLd = Opc == DSPIC::EDSLD16;
     MachineRegisterInfo &MRI = BB->getParent()->getRegInfo();
