@@ -8,6 +8,7 @@
 
 #include "DSPICSelectionDAGInfo.h"
 #include "DSPICISelLowering.h"
+#include "MCTargetDesc/DSPICMCAsmInfo.h"   // DSPICII::MO_EDSOFFSET / MO_EDSPAGE (session 110)
 #include "llvm/CodeGen/SelectionDAG.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -57,6 +58,71 @@ SDValue DSPICSelectionDAGInfo::EmitTargetCodeForMemcpy(
         .setDiscardResult();
     return TLI.LowerCallTo(CLI).second;
   }
+  // trellis session 110: a block copy touching EXTENDED DATA SPACE (addrspace 2) in either
+  // direction is cc1's `__memcpy_eds` libcall -- w0:w1 = src as a 32-bit EDS address, w2:w3 = dst
+  // likewise, w4 and w5 the size. ⛔ This arm must come BEFORE the inline path below: that path
+  // builds a DSPICISD::MEMCPY whose pointer operands are i16, and handing it an addrspace-2 i32
+  // pointer produced a node LowerOperation has no case for -- the crash this row repairs.
+  // ⚠ The two size registers cannot be told apart from any observable: the only constructs that
+  // reach here are whole-object (assignment, return, pass-by-value), where length and both object
+  // sizes coincide, and cc1 refuses __builtin_memcpy with an __eds__ pointer (guide 7.7.3). So
+  // passing the size twice is cc1's call exactly, for every case that can occur.
+  if (DstPtrInfo.getAddrSpace() == 2 || SrcPtrInfo.getAddrSpace() == 2) {
+    const TargetLowering &TLI = DAG.getTargetLoweringInfo();
+    LLVMContext &Ctx = *DAG.getContext();
+    Type *I16 = Type::getInt16Ty(Ctx);
+    Type *I32 = Type::getInt32Ty(Ctx);
+    // An operand NOT in addrspace 2 is a 16-bit address and the routine takes 32-bit EDS addresses
+    // on BOTH sides, so it has to be widened. ⛔ cc1 widens a near GLOBAL with the relocation pair
+    // -- `mov #edsoffset(_ns),w2 ; mov #edspage(_ns),w3` -- not by zero-extending, and the first
+    // version of this arm zero-extended (`mov #_ns,w2 ; clr w3`), which the comparer caught against
+    // cc1. Matched here rather than argued about: whether a zero page is equivalent depends on what
+    // __memcpy_eds does with it, which is not established. A RUNTIME near pointer still zero-extends
+    // -- no relocation exists for it -- and that case is NOT witnessed by any fixture.
+    auto Wide = [&](SDValue P, unsigned AS) -> SDValue {
+      if (AS == 2)
+        return P;
+      // ⚠ the pointer reaches here EITHER bare or already wrapped, depending on how far the DAG
+      // has been built; the first version only looked through Wrapper and silently fell through to
+      // the zero-extend, which the comparer caught against cc1.
+      {
+        SDValue Inner = P.getOpcode() == DSPICISD::Wrapper ? P.getOperand(0) : P;
+        if (auto *GA = dyn_cast<GlobalAddressSDNode>(Inner)) {
+          SDValue Lo = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16,
+                                   DAG.getTargetGlobalAddress(GA->getGlobal(), dl, MVT::i16,
+                                                              GA->getOffset(),
+                                                              DSPICII::MO_EDSOFFSET));
+          SDValue Hi = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16,
+                                   DAG.getTargetGlobalAddress(GA->getGlobal(), dl, MVT::i16,
+                                                              GA->getOffset(),
+                                                              DSPICII::MO_EDSPAGE));
+          return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+        }
+      }
+      return DAG.getZExtOrTrunc(P, dl, MVT::i32);
+    };
+    SDValue SrcA = Wide(Src, SrcPtrInfo.getAddrSpace());
+    SDValue DstA = Wide(Dst, DstPtrInfo.getAddrSpace());
+    SDValue N = DAG.getZExtOrTrunc(Size, dl, MVT::i16);
+    TargetLowering::ArgListTy Args;
+    Args.emplace_back(SrcA, I32);
+    Args.emplace_back(DstA, I32);
+    Args.emplace_back(N, I16);
+    Args.emplace_back(N, I16);
+    TargetLowering::CallLoweringInfo CLI(DAG);
+    CLI.setDebugLoc(dl).setChain(Chain)
+        .setLibCallee(CallingConv::C, Type::getVoidTy(Ctx),
+                      // ⛔ ONE underscore fewer than the symbol: this target prefixes external
+                      // symbols with `_`, so "__memcpy_eds" here emitted `___memcpy_eds` -- three
+                      // underscores, a name nothing defines and a LINK failure, not a miscompile.
+                      // Session 92 found the same class when every libcall name was MSP430's.
+                      DAG.getExternalSymbol("_memcpy_eds",
+                                            TLI.getPointerTy(DAG.getDataLayout())),
+                      std::move(Args))
+        .setDiscardResult();
+    return TLI.LowerCallTo(CLI).second;
+  }
+
   auto *C = dyn_cast<ConstantSDNode>(Size);
   if (!C || isVolatile)
     return SDValue();

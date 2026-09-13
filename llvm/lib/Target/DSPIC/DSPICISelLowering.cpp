@@ -271,7 +271,14 @@ SDValue DSPICTargetLowering::LowerOperation(SDValue Op,
   case ISD::JumpTable:        return LowerJumpTable(Op, DAG);
   case ISD::BR_JT:            return LowerBR_JT(Op, DAG);
   default:
-    llvm_unreachable("unimplemented operand");
+    // trellis session 110: NAME the operand. `llvm_unreachable("unimplemented operand")` told a
+    // reader nothing, and locating the EDS block-copy crash behind it took a bisection over eight
+    // shapes -- the message could have said which opcode on the first run. The operator's standing
+    // brief is that compiler errors are as helpful as possible.
+    report_fatal_error("dsPIC: no Custom lowering for " +
+                       Twine(Op->getOperationName(&DAG)) + " (opcode " +
+                       Twine(Op.getOpcode()) + ", type " +
+                       Twine(Op.getValueType().getEVTString()) + ")", false);
   }
 }
 
