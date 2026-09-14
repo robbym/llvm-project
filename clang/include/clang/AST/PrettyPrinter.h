@@ -94,6 +94,7 @@ struct PrintingPolicy {
         UsePreferredNames(true), AlwaysIncludeTypeForTemplateArgument(false),
         CleanUglifiedParameters(false), EntireContentsOfLargeArray(true),
         PrettyEnums(true), UseEnumerators(true), UseHLSLTypes(LO.HLSL),
+        DSPICAddressSpaceNames(LO.DSPICAddressSpaceNames),
         SuppressDeclAttributes(false), SuppressLambdaBody(false) {}
 
   /// Adjust this printing policy for cases where it's known that we're
@@ -371,6 +372,12 @@ struct PrintingPolicy {
   /// sugared types when possible.
   LLVM_PREFERRED_TYPE(bool)
   unsigned UseHLSLTypes : 1;
+
+  /// trellis session 112: whether to print a dsPIC target address space with the vendor's own
+  /// qualifier (`__eds__`, `__prog__`, `__external__`, `__pack_upper_byte`) rather than
+  /// `__attribute__((address_space(N)))`. Set by DSPICTargetInfo::adjust; no other target sets it.
+  LLVM_PREFERRED_TYPE(bool)
+  unsigned DSPICAddressSpaceNames : 1;
 
   /// Whether to suppress attributes in decl printing.
   LLVM_PREFERRED_TYPE(bool)

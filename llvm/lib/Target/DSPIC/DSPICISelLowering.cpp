@@ -2081,6 +2081,35 @@ SDValue DSPICTargetLowering::LowerGlobalAddress(SDValue Op,
     return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
   }
 
+  // ⛔ trellis session 112: an EXTERNAL-memory global (addrspace 3, `__external__`) is 4 bytes
+  // too, and before this arm it ABORTED -- the node fell through to the default
+  // `TargetGlobalAddress` at the illegal i32 PtrVT and died in ExpandIntegerResult with "Do not
+  // know how to expand the result of this operator!" on source cc1 compiles silently.
+  //
+  // ⛔ THE ENCODING IS READ OFF cc1's OBJECT, NOT ITS TEXT (prints/l1f/eds/ext-addr-reloc.txt).
+  // The text is `mov #_v,w0 ; mov #_v,w1`, the same operand twice, which cannot tell "the plain
+  // address in both halves" from "two relocations that render alike". readelf can: BOTH words
+  // carry `R_PIC30_WORD` on the same symbol. So the vendor's `__external__` pointer really is
+  // (addr, addr), and the plain relocation goes in both halves -- unlike addrspace 2 and 4, whose
+  // halves are genuinely different operators.
+  //
+  // ⚠ The constant offset folds into BOTH halves: cc1 writes `mov #_a+6` twice for `&a[3]`, the
+  // +6 in the instruction FIELD with the relocation's addend 0, which is what passing `Offset` to
+  // getTargetGlobalAddress produces.
+  //
+  // ⚠ NOT CLAIMED: that this is a sensible encoding. Every __external__ access goes through
+  // `__read_external`/`__write_external` -- both compilers REFUSE a direct one -- so the high half
+  // is never dereferenced by generated code and what it is FOR is established by nothing here.
+  // Ours matches the vendor because the standing rule binds the cc1-accepts case.
+  if (GV->getAddressSpace() == 3) {
+    SDLoc dl(Op);
+    SDValue Lo = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset);
+    SDValue Hi = DAG.getTargetGlobalAddress(GV, dl, MVT::i16, Offset);
+    Lo = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Lo);
+    Hi = DAG.getNode(DSPICISD::Wrapper, dl, MVT::i16, Hi);
+    return DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+  }
+
   // session 111: a packed-flash global (addrspace 4, `__pack_upper_byte`) -- `mov
   // #packed_lo(sym+off),wLo ; mov #packed_hi(sym+off),wHi`, cc1's `addr3` exactly, the constant
   // offset folded into the relocation whose addend the linker adds (prints/l1f/eds/pack-ask3.txt:

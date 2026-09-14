@@ -28,6 +28,16 @@ namespace clang {
 namespace targets {
 
 class LLVM_LIBRARY_VISIBILITY DSPICTargetInfo : public TargetInfo {
+public:
+  // ⛔ trellis session 112: ask the type printer for the vendor's qualifier spellings. This is the
+  // whole of the target-keying -- the flag defaults OFF and only this target turns it on, so the
+  // shared arm in Qualifiers::print is unreachable from any other triple.
+  void adjust(DiagnosticsEngine &Diags, LangOptions &Opts,
+              const TargetInfo *Aux) override {
+    TargetInfo::adjust(Diags, Opts, Aux);
+    Opts.DSPICAddressSpaceNames = true;
+  }
+
   static const char *const GCCRegNames[];
 
 public:

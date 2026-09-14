@@ -2797,8 +2797,25 @@ void Qualifiers::print(raw_ostream &OS, const PrintingPolicy& Policy,
     if (addSpace)
       OS << ' ';
     addSpace = true;
+    // ⛔ trellis session 112: on the dsPIC, name the space the way the USER WROTE IT and the way
+    // the vendor compiler prints it. Ours issues a cross-space cast error cc1 does not issue at
+    // all (the operator's reject ruling), so a reader meeting it has nothing from the vendor to
+    // explain `__attribute__((address_space(2)))` -- and "the compiler errors should be as helpful
+    // as possible" is standing. The names are cc1's, not invented.
+    // ⚠ GATED ON A LangOption SET BY DSPICTargetInfo::adjust, so no other triple reaches this arm.
+    if (Policy.DSPICAddressSpaceNames && isTargetAddressSpace(getAddressSpace())) {
+      switch (toTargetAddressSpace(getAddressSpace())) {
+      case 1:  OS << "__prog__"; break;
+      case 2:  OS << "__eds__"; break;
+      case 3:  OS << "__external__"; break;
+      case 4:  OS << "__pack_upper_byte"; break;
+      // An address space this target does not name keeps the generic spelling rather than being
+      // invented -- a wrong name in a diagnostic is worse than an ugly one.
+      default: OS << "__attribute__((address_space(" << ASStr << ")))"; break;
+      }
+    }
     // Wrap target address space into an attribute syntax
-    if (isTargetAddressSpace(getAddressSpace()))
+    else if (isTargetAddressSpace(getAddressSpace()))
       OS << "__attribute__((address_space(" << ASStr << ")))";
     else
       OS << ASStr;

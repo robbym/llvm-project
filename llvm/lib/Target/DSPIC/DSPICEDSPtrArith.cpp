@@ -49,6 +49,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/Utils/Local.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -138,6 +139,35 @@ static Value *emitPagedAdd(IRBuilder<> &B, Value *Base, Value *Disp) {
   return B.CreateOr(B.CreateOr(Hi, NewOff), Window, "eds.ptr");
 }
 
+// ⛔ trellis session 112: IS THIS BASE AT PAGE 0, KNOWABLY? A bare `__eds__` object -- one without
+// `space(eds)` -- is placed in ordinary data, where the window bit is already clear, so the paging
+// carry computes the same address a flat add does and costs 11 -> 23 instructions to do it.
+//
+// ⛔ THAT IS THE LINKER'S ANSWER, NOT AN ARGUMENT FROM THE SCRIPT. The device's own .gld gives ONE
+// data region (0x1000 + 0x1F000) shared by ordinary and EDS data, and caps ordinary data NOWHERE in
+// its MEMORY block. Asked directly and bisected (prints/l1f/eds/nearcarry.txt): the largest bare
+// `__eds__` array that links is 28638 bytes at 0x01002..0x07FDF, and one byte more is a LINK ERROR.
+// Ordinary data tops out at 0x7FFF -- one below the EDS window -- and the toolchain REFUSES rather
+// than crossing. So no in-bounds index on such an object can reach bit 15.
+//
+// ⛔ THE ATTRIBUTE IS THE PLACEMENT'S OWN. `"dspic-space"="eds"` is the string
+// DSPICTargetMachine.cpp reads to put `,eds` on the section; re-deriving "is this in EDS" a second
+// way invites the two to disagree, and a disagreement here is a miscompile.
+//
+// ⚠ Conservative in both directions that matter: an unknown base (a pointer PARAMETER, a computed
+// address, an external declaration whose space we cannot see) returns false and pays the carry.
+static bool baseIsKnownPageZero(const Value *Ptr) {
+  const Value *V = Ptr->stripPointerCasts()->stripInBoundsConstantOffsets();
+  const auto *GV = dyn_cast<GlobalVariable>(V);
+  if (!GV)
+    return false;
+  // A declaration is defined elsewhere and may carry space(eds) there; do not guess.
+  if (GV->isDeclaration())
+    return false;
+  return !(GV->hasAttribute("dspic-space") &&
+           GV->getAttribute("dspic-space").getValueAsString() == "eds");
+}
+
 static bool runEDSPtrArith(Function &F) {
   if (!DSPICEnableEDSPtrArith || F.isDeclaration())
     return false;
@@ -148,7 +178,10 @@ static bool runEDSPtrArith(Function &F) {
   SmallVector<GetElementPtrInst *, 8> Work;
   for (Instruction &I : instructions(F))
     if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
-      if (GEP->getPointerAddressSpace() == EDSAddrSpace)
+      if (GEP->getPointerAddressSpace() == EDSAddrSpace &&
+          // trellis session 112: a base that is knowably at page 0 keeps the flat add, which is
+          // the SAME address there and eleven instructions cheaper. See baseIsKnownPageZero.
+          !baseIsKnownPageZero(GEP->getPointerOperand()))
         Work.push_back(GEP);
 
   bool Changed = false;
