@@ -2721,6 +2721,29 @@ void CastOperation::checkAddressSpaceCast(QualType SrcType, QualType DestType) {
       SrcExpr = ExprError();
       return;
     }
+    // ⛔ trellis session 112, the operator's ruling: EVERY OTHER cross-space pointer conversion is
+    // REJECTED, because it has no meaning on this machine and cc1's answer to it is a SILENT NULL.
+    // "If they really want to do something stupid they can go through the integer conversion
+    // route" -- and that route is untouched: an integer round trip is not an address-space cast and
+    // never reaches here.
+    //
+    // ⛔ A WHITELIST, NOT A BLACKLIST. The target can convert exactly two pairs -- near->eds (a near
+    // address with bit 15 set already lies in the window) and prog->eds (tblpage:tbloffset
+    // re-normalised into page:offset). Everything else is disjoint. Listing the REFUSALS instead
+    // would default a newly added address space to silently nulling, which is the behaviour being
+    // removed; this way a new space defaults to refused. Session 111 added space 4 and nothing
+    // noticed.
+    //
+    // ⚠ THIS DIVERGES FROM cc1, WHICH ACCEPTS ALL SIXTEEN WITH A WARNING. That is the operator's
+    // call, not parity, and the record says so. The two survivors are not a judgement of mine:
+    // they are exactly the two cc1 is SILENT on, and cc1 is silent precisely where the conversion
+    // means something.
+    if (S != D && !(D == 2 && (S == 0 || S == 1))) {
+      Self.Diag(OpRange.getBegin(), diag::err_dspic_disjoint_cast)
+          << SrcType << DestType;
+      SrcExpr = ExprError();
+      return;
+    }
   }
 
   // In OpenCL only conversions between pointers to objects in overlapping

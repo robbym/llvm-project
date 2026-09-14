@@ -14379,6 +14379,14 @@ def err_dspic_space_unimplemented : Error<
 // is not.
 def err_dspic_eds_cast : Error<
   "unable to convert from %0 to type %1">;
+// trellis session 112: ours' OWN sentence, not cc1's -- cc1 only warns here, and this verdict
+// diverges from it deliberately. It names both spaces and the escape hatch, because a user who
+// hits this needs to be told what to write instead ("errors as helpful as possible" is standing).
+// ⚠ Lower case leading letter: clang's TableGen refuses a diagnostic that starts with a capital.
+def err_dspic_disjoint_cast : Error<
+  "cast between disjoint address spaces: %0 cannot be converted to %1; "
+  "the conversion has no meaning on this target and would yield a null pointer. "
+  "Convert through an integer if that is intended">;
 def err_dspic_external_access : Error<
   "cannot access external memory space; declare __%select{read|write}0_external "
   "or __%select{read|write}0_external16">;
