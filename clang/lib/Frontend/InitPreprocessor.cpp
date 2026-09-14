@@ -1072,6 +1072,15 @@ static void InitializePredefinedMacros(const TargetInfo &TI,
   if (CGOpts.OptimizeSize != 0)
     Builder.defineMacro("__OPTIMIZE_SIZE__");
 
+  // trellis session 118: the vendor compiler's own __OPTIMIZATION_LEVEL__, which carries the -O
+  // NUMBER where clang's __OPTIMIZE__ carries only whether there was one. Measured through
+  // xc-dsc-gcc: 0/1/2/3 at -O0/-O1/-O2/-O3, and 2 at -Os (which also defines __OPTIMIZE_SIZE__);
+  // cc1 refuses -Oz, where this reports OptimizationLevel's own number. It is here and not in
+  // DSPICTargetInfo::getTargetDefines because that is handed LangOptions, which has no -O number
+  // -- the first spelling of this row tried it there and the build refused it by name.
+  if (TI.getTriple().getArch() == llvm::Triple::dspic)
+    Builder.defineMacro("__OPTIMIZATION_LEVEL__", Twine(CGOpts.OptimizationLevel));
+
   if (LangOpts.FastMath)
     Builder.defineMacro("__FAST_MATH__");
 

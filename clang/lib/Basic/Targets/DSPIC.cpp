@@ -81,4 +81,65 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   // a 32-bit linear pointer, placement in `,packedflash`, every read through the vendor's own
   // ___P32DFrd, the record laid out packed (SemaType.cpp), writes refused in cc1's sentence.
   Builder.defineMacro("__pack_upper_byte", "__attribute__((address_space(4)))");
+
+  // ── trellis session 118: THE VENDOR'S FAMILY-WIDE PREDEFINED MACROS ──────────────────────
+  // Every name and value below is read off `xc-dsc-gcc -dM -E` at FOUR devices
+  // (steps/frontend/macro-ask.sh; banked at prints/l1f/frontend/macro/), and every one of them is
+  // identical at all four -- 33CK1024MP705, 33CK256MP508, 33EP256MU806 and 30F6014A. The macros
+  // that MOVE with the device (__dsPIC<part>__, __IVT_NUM, __HAS_DMA__, __HAS_DMAV2__,
+  // __HAS_EDS__, __HAS_PMP__) are deliberately NOT here: they need the device on the command line
+  // and the pack's database, and this target takes no -mcpu.
+  //
+  // ⛔ WHY THE COMPILER AND NOT A BUILD SCRIPT. These were compensated by eleven hand-written -D
+  // flags in each of two build scripts. A missing macro is the silent kind of divergence -- the
+  // `#if` takes the other arm and the two compilers build different programs from one source --
+  // and 54 firmware files test __XC16__, 52 test __dsPIC33C__, 166 pack headers test XC16.
+  Builder.defineMacro("__C30__");
+  Builder.defineMacro("__C30");
+  Builder.defineMacro("C30");
+  Builder.defineMacro("__C30ELF__");
+  Builder.defineMacro("__C30ELF");
+  Builder.defineMacro("__XC__");
+  Builder.defineMacro("__XC16__");
+  Builder.defineMacro("__XC16");
+  Builder.defineMacro("XC16");
+  Builder.defineMacro("__XC16ELF__");
+  Builder.defineMacro("__XC16ELF");
+  Builder.defineMacro("__XC_DSC__");
+  Builder.defineMacro("__XC_DSC");
+  Builder.defineMacro("XC_DSC");
+  Builder.defineMacro("__XC_DSCELF__");
+  Builder.defineMacro("__XC_DSCELF");
+  Builder.defineMacro("__XC_DSC_MUSL__");
+  Builder.defineMacro("__dsPIC30ELF__");
+  Builder.defineMacro("__dsPIC30ELF");
+  Builder.defineMacro("__dsPIC30");
+  Builder.defineMacro("dsPIC30");
+  Builder.defineMacro("__BUILTIN_ITTYPE");
+  Builder.defineMacro("__HAS_BUILTINS_16__");
+  Builder.defineMacro("__HAS_CODEGUARD__");
+  Builder.defineMacro("__HAS_DSP__");
+  Builder.defineMacro("__LONG_LONG_WIDTH__", "64");
+  // ⚠ THE VERSION MACROS ARE ZERO BECAUSE THE VENDOR'S OWN SHIPPED COMPILER REPORTS ZERO. Asked
+  // of xc-dsc-gcc v4.00 directly: __C30_VERSION__ 0, __XC16_VERSION__ 0, __XC_DSC_VERSION__ 0.
+  // The record already establishes why (the install's __VERSION__ carries the unsubstituted token
+  // MCHP_VERSION -- its version macros are broken, not authoritative), and steps/stn3255/build.sh
+  // deliberately passes -D__C30_VERSION__=4000 over it, measured from the vendor's own ELF. A
+  // command-line -D wins over a target define, so that override still stands.
+  Builder.defineMacro("__C30_VERSION__", "0");
+  Builder.defineMacro("__XC16_VERSION__", "0");
+  Builder.defineMacro("__XC16_VERSION", "0");
+  Builder.defineMacro("__XC_DSC_VERSION__", "0");
+  // __XC16_BUILD_DATE__ / __XC_DSC_BUILD_DATE__ are COSTED, not implemented: a vendor build date
+  // ("Aug 31 2026" on this install), with zero customers measured in the vendor libc headers, the
+  // device pack's support headers or either firmware tree. Inventing one is a claim about a build
+  // that did not happen.
+  //
+  // __LARGE_ARRAYS__ is EXACT, from the target feature this port already carries. Measured through
+  // cc1: 0 by default, 1 under -menable-large-arrays, and it does NOT move with -mlarge-code or
+  // -mlarge-data.
+  Builder.defineMacro("__LARGE_ARRAYS__", LargeArrays ? "1" : "0");
+  // __OPTIMIZATION_LEVEL__ is NOT here: getTargetDefines is handed LangOptions, which carries no
+  // -O number. It is defined exactly, from CGOpts.OptimizationLevel, in InitPreprocessor.cpp --
+  // three lines from where clang already defines __OPTIMIZE__ from the same field.
 }
