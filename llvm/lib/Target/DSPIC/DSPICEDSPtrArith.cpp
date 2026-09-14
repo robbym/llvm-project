@@ -124,11 +124,24 @@ char DSPICEDSPtrArith::ID = 0;
 // object is placed NEAR, at page 0, with the window bit already clear; then lin == off, and any
 // in-bounds displacement keeps page' == 0, so the window bit stays clear and the access stays
 // direct. That is exactly why cc1's restored bit is `(page != 0)` and not a constant 1.
-static Value *emitPagedAdd(IRBuilder<> &B, Value *Base, Value *Disp) {
-  Type *I32 = B.getInt32Ty();
+// session 114 (post-close): the pair -> LINEAR conversion, at ONE site. `emitPagedAdd` computed
+// this inline and the pointer-difference rewrite needs the same function of the same input; two
+// copies of one formula is how combineEdsLoad and combineProgLoad came to share two defects.
+//
+//   page = base >> 16 ; off = base & 0x7FFF (the window bit stripped) ; lin = page << 15 | off
+//
+// ⚠ The window bit is DISCARDED here, not preserved: it is the hardware's window-select flag, not
+// part of the address, and a placed object carries it set on every offset. Keeping it would add a
+// constant 0x8000 to both operands of a difference -- harmless there and wrong everywhere else.
+static Value *emitToLinear(IRBuilder<> &B, Value *Base) {
   Value *Page = B.CreateLShr(Base, 16, "eds.page");
   Value *Off = B.CreateAnd(Base, OffsetMask, "eds.off");
-  Value *Lin = B.CreateOr(B.CreateShl(Page, OffsetBits), Off, "eds.lin");
+  return B.CreateOr(B.CreateShl(Page, OffsetBits), Off, "eds.lin");
+}
+
+static Value *emitPagedAdd(IRBuilder<> &B, Value *Base, Value *Disp) {
+  Type *I32 = B.getInt32Ty();
+  Value *Lin = emitToLinear(B, Base);
   Value *Sum = B.CreateAdd(Lin, Disp, "eds.lin.add");
   Value *NewPage = B.CreateLShr(Sum, OffsetBits, "eds.page.new");
   Value *NewOff = B.CreateAnd(Sum, OffsetMask, "eds.off.new");
@@ -137,6 +150,19 @@ static Value *emitPagedAdd(IRBuilder<> &B, Value *Base, Value *Disp) {
                                  ConstantInt::get(I32, 0), "eds.window");
   Value *Hi = B.CreateShl(NewPage, 16);
   return B.CreateOr(B.CreateOr(Hi, NewOff), Window, "eds.ptr");
+}
+
+// session 114 (post-close): is V `trunc (ptrtoint <addrspace 2 ptr>)`? clang lowers `a - b` to
+// exactly that on both operands, then one `sub` at ptrdiff width and an exact `ashr` for the
+// element size. The PAIR value is handed back so the caller can convert it.
+static Value *edsPtrDiffOperand(Value *V) {
+  auto *T = dyn_cast<TruncInst>(V);
+  if (!T)
+    return nullptr;
+  auto *P = dyn_cast<PtrToIntInst>(T->getOperand(0));
+  if (!P || P->getPointerOperand()->getType()->getPointerAddressSpace() != EDSAddrSpace)
+    return nullptr;
+  return P;
 }
 
 // ⛔ trellis session 112: IS THIS BASE AT PAGE 0, KNOWABLY? A bare `__eds__` object -- one without
@@ -175,6 +201,13 @@ static bool runEDSPtrArith(Function &F) {
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Collect first: the transform erases the GEPs it replaces.
+  SmallVector<BinaryOperator *, 4> Diffs;
+  for (Instruction &I : instructions(F))
+    if (auto *BO = dyn_cast<BinaryOperator>(&I))
+      if (BO->getOpcode() == Instruction::Sub && edsPtrDiffOperand(BO->getOperand(0)) &&
+          edsPtrDiffOperand(BO->getOperand(1)))
+        Diffs.push_back(BO);
+
   SmallVector<GetElementPtrInst *, 8> Work;
   for (Instruction &I : instructions(F))
     if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
@@ -185,6 +218,26 @@ static bool runEDSPtrArith(Function &F) {
         Work.push_back(GEP);
 
   bool Changed = false;
+
+  // ⛔ session 114 (post-close): the difference is taken on LINEAR addresses. The operands arrive
+  // as `trunc(ptrtoint p)` -- the OFFSET WORD alone -- and subtracting those discards the page,
+  // which is the whole defect (steps/exec/edsdiff.c: -385 where 15999 is owed, across an array the
+  // linker straddled). ⚠ The SUB is replaced, never the truncs: a trunc may have other users and
+  // rewriting it in place would change their values too.
+  // ⚠ The subtraction is done at 32 bits and truncated to the difference's own type, which is what
+  // cc1 does -- its ptrdiff_t here is 16 bits, measured (steps/eds/ptrarith-ask.sh), so this is not
+  // a widening. Correct for any distance representable in that type, which is every distance inside
+  // one `space(eds)` object: cc1 caps such an object at 32 767 bytes.
+  for (BinaryOperator *Sub : Diffs) {
+    IRBuilder<> B(Sub);
+    Value *LA = emitToLinear(B, edsPtrDiffOperand(Sub->getOperand(0)));
+    Value *LB = emitToLinear(B, edsPtrDiffOperand(Sub->getOperand(1)));
+    Value *D = B.CreateTrunc(B.CreateSub(LA, LB, "eds.diff"), Sub->getType());
+    Sub->replaceAllUsesWith(D);
+    Sub->eraseFromParent();
+    Changed = true;
+  }
+
   for (GetElementPtrInst *GEP : Work) {
     IRBuilder<> B(GEP);
     Value *Disp = emitGEPOffset(&B, DL, GEP);
