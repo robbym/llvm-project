@@ -2428,6 +2428,11 @@ Parser::DeclGroupPtrTy Parser::ParseDeclGroup(ParsingDeclSpec &DS,
       } else {
         if (Tok.is(tok::l_brace)) {
           Diag(Tok, diag::err_function_definition_not_allowed);
+          // trellis session 118: on the dsPIC target this error is almost always a GNU nested
+          // function, which the VENDOR compiler accepts -- so the refusal names itself instead
+          // of reading like a syntax error. Gated on the triple: no other target sees it.
+          if (getTargetInfo().getTriple().getArch() == llvm::Triple::dspic)
+            Diag(Tok, diag::note_dspic_nested_function);
           SkipMalformedDecl();
           return nullptr;
         }

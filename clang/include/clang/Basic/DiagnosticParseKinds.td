@@ -517,6 +517,14 @@ def warn_cxx98_compat_static_assert : Warning<
   InGroup<CXX98Compat>, DefaultIgnore;
 def err_function_definition_not_allowed : Error<
   "function definition is not allowed here">;
+// trellis session 118: the dsPIC front end's one KNOWN divergence from the vendor compiler in
+// this family. xc-dsc-gcc compiles a GNU nested function; clang does not implement them and
+// this port cannot add them, so the refusal stands -- but it must SAY SO rather than leave a
+// programmer with a sentence that reads like a syntax error in their own code.
+def note_dspic_nested_function : Note<
+  "GNU nested functions are not supported by this compiler; the vendor's xc-dsc-gcc does "
+  "accept them, so this is a known divergence -- move the inner function to file scope and "
+  "pass what it captured as a parameter">;
 def err_expected_end_of_enumerator : Error<
   "expected '= constant-expression' or end of enumerator definition">;
 def err_expected_coloncolon_after_super : Error<
