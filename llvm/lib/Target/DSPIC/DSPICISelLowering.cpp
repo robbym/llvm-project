@@ -1230,6 +1230,24 @@ static void edsSplit(SelectionDAG &DAG, const SDLoc &dl, SDValue Addr32,
   Page = DAG.getNode(ISD::TRUNCATE, dl, MVT::i16, Hi);
 }
 
+// session 114: THE EXTENSION APPLIED TO A WINDOWED LOAD'S RESULT IS THE LOAD'S OWN.
+// A windowed access is built at the natural width of the memory it touches, so whenever the load's
+// VALUE type is wider than what the window node produced, the difference has to be made up here --
+// and with the extension the LOAD asked for. ANY_EXTEND is the answer only for NON_EXTLOAD, where
+// it can never fire because a non-extending load's value type IS its memory type.
+// ⛔ Getting this wrong is silent: `u32 x = e8[0];` was emitting `ze [w1],w0` and never defining
+// w1, so the caller read `edsoffset(_a8)` as the high half of the result. It assembles, it links,
+// and only the device model and both halves of the value can see it (steps/exec/edswiden.c).
+static SDValue extendWindowedLoad(SelectionDAG &DAG, const SDLoc &dl, SDValue V, LoadSDNode *LD) {
+  EVT ResVT = LD->getValueType(0);
+  if (V.getValueType() == ResVT)
+    return V;
+  unsigned Op = LD->getExtensionType() == ISD::SEXTLOAD ? ISD::SIGN_EXTEND
+              : LD->getExtensionType() == ISD::ZEXTLOAD ? ISD::ZERO_EXTEND
+                                                        : ISD::ANY_EXTEND;
+  return DAG.getNode(Op, dl, ResVT, V);
+}
+
 // trellis session 112: `base + disp` in the `__eds__` (addrspace 2) representation, with the carry
 // landing in the PAGE word instead of running through bit 15, the hardware's window select.
 //
@@ -1321,21 +1339,23 @@ static SDValue combineEdsLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
     SDValue Ops[] = { LD->getChain(), Off, Page };
     SDValue B = DAG.getMemIntrinsicNode(Node, dl, DAG.getVTList(ResVT, MVT::Other), Ops,
                                         MVT::i8, LD->getMemOperand());
-    SDValue Val = B;
-    if (Ext != ISD::NON_EXTLOAD && LD->getValueType(0) != MVT::i16)
-      Val = DAG.getNode(ISD::ANY_EXTEND, dl, LD->getValueType(0), B);
+    // session 114 (D2): the load's OWN extension, never ANY_EXTEND -- see extendWindowedLoad.
+    SDValue Val = extendWindowedLoad(DAG, dl, B, LD);
     DCI.CombineTo(N, Val, B.getValue(1));
     return SDValue(N, 0);
   }
-  if (Ext != ISD::NON_EXTLOAD)
-    return SDValue();
+  // ⛔ session 114 (D1): there is NO bail-out on an extending load here any more. DAGCombiner folds
+  // `zext(load)` into a ZEXTLOAD, and refusing it left a generic LOAD carrying an i32 ADDRESS for
+  // type legalization to meet -- an ABORT on `u32 x = e16[i];`, which cc1 compiles. The window
+  // access is the same at either extension; only the width of the RESULT differs.
 
   if (VT == MVT::i16) {
     SDValue Ops[] = { LD->getChain(), Off, Page };
     SDValue W = DAG.getMemIntrinsicNode(DSPICISD::EDSLD, dl,
                                         DAG.getVTList(MVT::i16, MVT::Other), Ops, MVT::i16,
                                         LD->getMemOperand());
-    DCI.CombineTo(N, W, W.getValue(1));
+    SDValue Val = extendWindowedLoad(DAG, dl, W, LD);
+    DCI.CombineTo(N, Val, W.getValue(1));
     return SDValue(N, 0);
   }
   // Phase B(i): an i32 is two window accesses, at Ptr and Ptr+2, exactly as combineProgLoad does
@@ -1358,6 +1378,8 @@ static SDValue combineEdsLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) {
                                          DAG.getVTList(MVT::i16, MVT::Other), OpsHi, MVT::i16,
                                          LD->getMemOperand());
     SDValue Val = DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+    // session 114 (D1): an i32 EDS word widened to i64 reaches here as a ZEXTLOAD.
+    Val = extendWindowedLoad(DAG, dl, Val, LD);
     DCI.CombineTo(N, Val, Hi.getValue(1));
     return SDValue(N, 0);
   }
