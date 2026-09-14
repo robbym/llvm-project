@@ -195,9 +195,20 @@ bool DSPICPeepholeImpl::fusePairs(MachineBasicBlock &MBB) {
 // skipped instruction stays in its own block and the CFG is unchanged (the block still reaches
 // both successors), so the branch target must be the block after the skipped one in layout, the
 // skipped block must have no other predecessor, and it must reach the target -- by falling
-// through, or by never continuing (a return, a tail call, a jump). The skipped instruction is
-// one word (the hardware skips one word) and reads no flag (the skip forms write none, where
-// the test wrote Z). Every pair the GPL `as` took: prints/l1f/probe7.log.
+// through, or by never continuing (a return, a tail call, a jump). The skipped instruction reads
+// no flag (the skip forms write none, where the test wrote Z) and is ONE MachineInstr of two
+// bytes -- a test that is REQUIRED, though not for the reason this comment gave until now.
+// ⛔ trellis session 113: "the hardware skips one word" was FALSE. The hardware skips one
+// INSTRUCTION -- DS70000157G p.48 Table 3-7's Cycles column carries Note 1, "two cycles if the
+// skip is taken over a one-word instruction and three cycles if the skip is taken over a
+// two-word instruction", and the worked BTSC/BTSS examples on pp.169, 171 and 173 each skip a
+// two-word GOTO with the PC landing at 002006, past both words; session 106 executed the same
+// thing on the device model (reports/session-106.md). What the size test actually buys is that
+// on THIS target a Size == 4 MachineInstr need not be one two-word instruction: MOVZX16rm8 is
+// `mov.b` then `ze`, two one-word instructions in one MachineInstr (DSPICInstrInfo.td, Size 4),
+// and a skip would take only the `mov.b` and let `ze` run -- a wrong answer. INLINEASM is the
+// second such case, and this test is the only exclusion for either. So do NOT relax it on the
+// strength of the hardware rule. Every pair the GPL `as` took: prints/l1f/probe7.log.
 bool DSPICPeepholeImpl::fuseSkip(MachineFunction &MF) {
   bool Changed = false;
   for (auto AI = MF.begin(); AI != MF.end(); ++AI) {
