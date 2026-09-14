@@ -1501,18 +1501,22 @@ static SDValue combineProgLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) 
                   : Ext == ISD::SEXTLOAD ? DSPICISD::PSVLD8S : DSPICISD::PSVLD8;
     EVT ResVT = Ext == ISD::NON_EXTLOAD ? MVT::i8 : MVT::i16;
     SDValue B = psvByte(DAG, dl, LD->getChain(), Ptr, LD->getMemOperand(), Node, ResVT);
-    SDValue Val = B;
-    if (Ext != ISD::NON_EXTLOAD && LD->getValueType(0) != MVT::i16)
-      Val = DAG.getNode(ISD::ANY_EXTEND, dl, LD->getValueType(0), B);
+    // session 114 (post-close): the load's OWN extension, never ANY_EXTEND. Same helper, same
+    // reason, and the same silent defect this had in common with combineEdsLoad.
+    SDValue Val = extendWindowedLoad(DAG, dl, B, LD);
     DCI.CombineTo(N, Val, B.getValue(1));
     return SDValue(N, 0);
   }
-  if (Ext != ISD::NON_EXTLOAD)
-    return SDValue();
+  // ⛔ session 114 (post-close): NO bail-out on an extending load. DAGCombiner folds `zext(load)`
+  // into a ZEXTLOAD and refusing it left a generic LOAD carrying an i32 ADDRESS for type
+  // legalization to meet -- an ABORT on `u32 x = k16[i];`, which cc1 compiles. The windowed read is
+  // the same at either extension; only the width of the RESULT differs.
 
   if (VT == MVT::i16) {
     SDValue W = psvWord(DAG, dl, LD->getChain(), Ptr, LD->getMemOperand());
-    DCI.CombineTo(N, W, W.getValue(1));
+    // the PSV window's word read, widened by the load's own extension (addrspace 1).
+    SDValue Val = extendWindowedLoad(DAG, dl, W, LD);
+    DCI.CombineTo(N, Val, W.getValue(1));
     return SDValue(N, 0);
   }
   if (VT == MVT::i32) {
@@ -1520,6 +1524,8 @@ static SDValue combineProgLoad(SDNode *N, TargetLowering::DAGCombinerInfo &DCI) 
     SDValue Ptr2 = DAG.getNode(ISD::ADD, dl, MVT::i32, Ptr, DAG.getConstant(2, dl, MVT::i32));
     SDValue Hi = psvWord(DAG, dl, Lo.getValue(1), Ptr2, LD->getMemOperand());
     SDValue Val = DAG.getNode(ISD::BUILD_PAIR, dl, MVT::i32, Lo, Hi);
+    // session 114 (post-close): a `__prog__` i32 widened to i64 reaches here as a ZEXTLOAD.
+    Val = extendWindowedLoad(DAG, dl, Val, LD);
     DCI.CombineTo(N, Val, Hi.getValue(1));
     return SDValue(N, 0);
   }
