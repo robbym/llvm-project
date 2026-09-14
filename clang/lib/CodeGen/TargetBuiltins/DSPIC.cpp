@@ -123,5 +123,82 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_clrwdt));
   case DSPIC::BI__builtin_nop:
     return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_nop));
+
+  // ── trellis session 118 ───────────────────────────────────────────────────────────────────────
+  case DSPIC::BI__builtin_btg:
+  case DSPIC::BI__builtin_btg_8:
+  case DSPIC::BI__builtin_btg_16:
+  case DSPIC::BI__builtin_btg_32: {
+    // ⛔ NO INTRINSIC. `*p ^= (1 << n)` is already the IR shape the backend selects `btg` from --
+    // measured through this very compiler before the builtin was written: `g16 ^= 1<<3` gives
+    // `btg.w _g16,#3`, `g8 ^= 1<<5` gives `btg.b _g8,#5`, `g32 ^= 1L<<20` gives `btg.w _g32+2,#4`
+    // and `*p ^= 1` gives `btg [w0],#0`. An intrinsic would have COST that folding.
+    // ⚠ OURS EMITS THE WORD FORM ON A WORD PLACE WHERE cc1 NARROWS TO A BYTE (`btg.b _g16,#3`).
+    // That is L1f-g's width rule and the promise it realizes (`guarantees.md`'s sixth member,
+    // `overlays.md` §3), and it is a DELIBERATE departure, the same one session 87 costed.
+    unsigned Width = BuiltinID == DSPIC::BI__builtin_btg_8    ? 8
+                     : BuiltinID == DSPIC::BI__builtin_btg_32 ? 32
+                                                              : 16;
+    llvm::APSInt V = E->getArg(1)->EvaluateKnownConstInt(getContext());
+    int64_t N = V.getSExtValue();
+    if (N < 0 || N >= (int64_t)Width) {
+      // The bit number reaches the instruction's #bit4 field through a mask; a value past the
+      // place's width would toggle nothing and be silently accepted. Mutant MB6 drops this.
+      CGM.Error(E->getArg(1)->getExprLoc(),
+                "__builtin_btg: the bit number is out of range for the pointee's width");
+      return nullptr;
+    }
+    Address P = EmitPointerWithAlignment(E->getArg(0));
+    llvm::Type *T = P.getElementType();
+    // ⚠ THE ACCESS IS NOT VOLATILE even though three of the four vendor signatures take a
+    // `volatile` pointer, and cc1 is the authority: it emits ONE `btg.b _g32+2,#20-16` for the
+    // 32-bit case. A volatile access of the whole pointee makes LLVM keep both halves, and the
+    // first build of this row emitted `mov.w _g32,w0 ; btg.w _g32+2,#4 ; mov.w w0,_g32` -- three
+    // accesses where the builtin means ONE bit toggle. The single `btg` IS the narrow access an
+    // SFR wants; widening it would be the opposite of what `volatile` is asked for here.
+    Value *Old = Builder.CreateLoad(P);
+    Value *Mask = llvm::ConstantInt::get(T, (uint64_t)1 << N);
+    // ⚠ THE STORE IS THE RETURN VALUE. Returning nullptr from here is how clang says "not
+    // handled", and it comes out as "error: cannot compile this builtin function yet" at the call
+    // -- which is what the first build of this row did, on a builtin whose type is `void`.
+    return Builder.CreateStore(Builder.CreateXor(Old, Mask), P);
+  }
+  case DSPIC::BI__builtin_disable_interrupts:
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_disable_interrupts));
+  case DSPIC::BI__builtin_enable_interrupts:
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_enable_interrupts));
+  case DSPIC::BI__builtin_software_reset:
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_software_reset));
+  case DSPIC::BI__builtin_software_breakpoint:
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_software_breakpoint));
+  case DSPIC::BI__builtin_repeat_nop: {
+    Value *N = EmitScalarExpr(E->getArg(0));
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_repeat_nop), N);
+  }
+  case DSPIC::BI__builtin_ff1l:
+  case DSPIC::BI__builtin_ff1l_16:
+  case DSPIC::BI__builtin_ff1r:
+  case DSPIC::BI__builtin_ff1r_16: {
+    // The `_16` spellings are the SAME instruction: cc1 emits `ff1l w1,w0` for both. Mutant MB3
+    // makes ff1l select the ff1r instruction.
+    bool L = BuiltinID == DSPIC::BI__builtin_ff1l ||
+             BuiltinID == DSPIC::BI__builtin_ff1l_16;
+    Value *X = EmitScalarExpr(E->getArg(0));
+    return Builder.CreateCall(
+        CGM.getIntrinsic(L ? Intrinsic::dspic_ff1l : Intrinsic::dspic_ff1r), X);
+  }
+  case DSPIC::BI__builtin_fbcl_16: {
+    // The vendor spells fbcl twice; one instruction, no new intrinsic.
+    Value *X = EmitScalarExpr(E->getArg(0));
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_fbcl), X);
+  }
+  case DSPIC::BI__builtin_swap_16: {
+    Value *X = EmitScalarExpr(E->getArg(0));
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::bswap, X->getType()), X);
+  }
+  case DSPIC::BI__builtin_swap_8: {
+    Value *X = EmitScalarExpr(E->getArg(0));
+    return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_swapb), X);
+  }
   }
 }

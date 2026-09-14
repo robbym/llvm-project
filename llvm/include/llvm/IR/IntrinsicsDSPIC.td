@@ -58,4 +58,28 @@ let TargetPrefix = "dspic" in { // All intrinsics start with "llvm.dspic.".
   def int_dspic_pwrsav : Intrinsic<[], [llvm_i16_ty], [IntrHasSideEffects, ImmArg<ArgIndex<0>>]>;
   def int_dspic_clrwdt : Intrinsic<[], [], [IntrHasSideEffects]>;
   def int_dspic_nop    : Intrinsic<[], [], [IntrHasSideEffects]>;
+
+  // ── trellis session 118 ───────────────────────────────────────────────────────────────────────
+  // ⚠ NOTHING HERE FOR btg: `__builtin_btg` is `*p ^= (1u << n)` in CGBuiltin and the backend
+  // already selects `btg` from it. An intrinsic would have COST capability -- it cannot fold the
+  // place into the instruction the way the existing L1f-g patterns do.
+
+  // ff1l / ff1r Ws,Wnd: pure. The hardware result IS the vendor builtin's value (0 when no bit is
+  // set, else the shift count starting at 1 -- DS70000157G pp.257/259), so no adjustment is owed.
+  // Going through ctlz/cttz instead costs six instructions to cc1's two: this backend's pattern is
+  // `DEC16rr (FF1L16 x)` plus a zero test the builtin does not need.
+  def int_dspic_ff1l : Intrinsic<[llvm_i16_ty], [llvm_i16_ty], [IntrNoMem, IntrSpeculatable]>;
+  def int_dspic_ff1r : Intrinsic<[llvm_i16_ty], [llvm_i16_ty], [IntrNoMem, IntrSpeculatable]>;
+
+  // The global interrupt enable, and the two machine-control instructions. Each carries
+  // IntrHasSideEffects for the same reason disi does: a `bclr _INTCON2,#15` that moved would
+  // protect the wrong region, and a `reset` that was deleted would not reset.
+  def int_dspic_disable_interrupts : Intrinsic<[], [], [IntrHasSideEffects]>;
+  def int_dspic_enable_interrupts  : Intrinsic<[], [], [IntrHasSideEffects]>;
+  def int_dspic_software_reset     : Intrinsic<[], [], [IntrHasSideEffects]>;
+  def int_dspic_software_breakpoint: Intrinsic<[], [], [IntrHasSideEffects]>;
+
+  // `repeat #n ; nop`. The count is NOT an ImmArg: the vendor accepts a variable as well as a
+  // literal (`repeat Wn` is a real form), so both are patterns on the same intrinsic.
+  def int_dspic_repeat_nop : Intrinsic<[], [llvm_i16_ty], [IntrHasSideEffects]>;
 }

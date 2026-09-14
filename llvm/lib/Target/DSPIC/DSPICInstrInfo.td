@@ -1366,6 +1366,43 @@ def : Pat<(int_dspic_nop), (NOPinst)>;
 // trunc(shl(ext)) LOOPED with the combiner narrowing it back (`slb`, the first run,
 // prints/l1f/clang/shifts-hang.log), and Promote does not reach shifts of a legal type
 // (the second run: "Cannot select").
+// ── trellis session 118: the rest of the vendor's machine-control builtins ─────────────────────
+// ⛔ EVERY ASM STRING BELOW IS cc1's OWN, banked at prints/l1f/frontend/builtin2-ask.small.s. The
+// two nops after the INTCON2 write are part of the vendor's definition of the builtin, not
+// padding -- the same shape as __builtin_write_NVM's two nops, which the vendor's machine
+// description hard-codes in the insn template.
+// ⚠ `_INTCON2` is an EXTERNAL SFR SYMBOL named inside the instruction's own text, exactly as
+// session 88's RCOUNT save names `_RCOUNT`. Nothing declares it: the assembler resolves it from
+// the device's linker script.
+// ⚠ isCodeGenOnly: a multi-line asm string is not something the ASM PARSER can read back, and
+// TableGen refuses it by name ("multiline instruction is not valid for the asmparser, mark it
+// isCodeGenOnly") -- which is how REPEATdiv and the divide pair are already marked.
+let isCodeGenOnly = 1, hasSideEffects = 1 in {
+  def DISABLEINT : DSPICFrameInst<(outs), (ins), 6,
+                                  "bclr\t_INTCON2,#15\n\tnop\n\tnop">;
+  def ENABLEINT  : DSPICFrameInst<(outs), (ins), 6,
+                                  "bset\t_INTCON2,#15\n\tnop\n\tnop">;
+  def SWRESET    : DSPICFrameInst<(outs), (ins), 2, "reset">;
+  def SWBREAK    : DSPICFrameInst<(outs), (ins), 2, "break">;
+  // ⛔ ONE INSTRUCTION OF TWO ASM LINES (Size 4). A `repeat` and the instruction it drives must
+  // stay adjacent; session 99 measured a pass splitting a repeat from its divide and the fix was
+  // exactly this -- make the pair one MachineInstr. Both operand forms exist because the vendor
+  // accepts a variable count as well as a literal.
+  // ⚠ `$n` and NOT `#$n`: an i16imm operand prints its own `#`, as DISI's "disi\t$n" does. The
+  // first spelling emitted `repeat ##4`, which the GPL assembler would have had to refuse.
+  def REPEATNOPi : DSPICFrameInst<(outs), (ins i16imm:$n), 4, "repeat\t$n\n\tnop">;
+  def REPEATNOPr : DSPICFrameInst<(outs), (ins GR16:$n), 4, "repeat\t$n\n\tnop">;
+}
+def : Pat<(int_dspic_disable_interrupts), (DISABLEINT)>;
+def : Pat<(int_dspic_enable_interrupts), (ENABLEINT)>;
+def : Pat<(int_dspic_software_reset), (SWRESET)>;
+def : Pat<(int_dspic_software_breakpoint), (SWBREAK)>;
+def : Pat<(int_dspic_repeat_nop imm:$n), (REPEATNOPi imm:$n)>;
+def : Pat<(int_dspic_repeat_nop GR16:$n), (REPEATNOPr GR16:$n)>;
+// ⚠ the ff1l/ff1r patterns are NOT here: FF1L16 is defined ~160 lines further down and TableGen
+// wants the def before the use. They sit beside the ctlz/cttz patterns that share those
+// instructions, which is also where a reader looking for them would go.
+
 def : Pat<(shl GR8:$x, lit4imm16:$k),
           (EXTRACT_SUBREG (SL16ri (SUBREG_TO_REG GR8:$x, subreg_8bit), imm:$k), subreg_8bit)>;
 def : Pat<(srl GR8:$x, lit4imm16:$k),
@@ -2020,6 +2057,14 @@ let isCodeGenOnly = 1, usesCustomInserter = 1, Defs = [SR] in {
 // are the patterns the turned node meets)
 def : Pat<(ctlz_zero_poison GR16:$x), (DEC16rr (FF1L16 GR16:$x))>;
 def : Pat<(cttz_zero_poison GR16:$x), (DEC16rr (FF1R16 GR16:$x))>;
+// trellis session 118: the vendor builtins onto the SAME two instructions, with NO adjustment.
+// ⛔ THE CONTRAST WITH THE TWO LINES ABOVE IS THE POINT: ctlz is ff1l MINUS ONE and needs the
+// DEC plus a zero test the caller supplies, where the vendor's __builtin_ff1l IS the hardware
+// result (DS70000157G p.257: 0 when no bit is set, else the shift count starting at 1). Routing
+// the builtin through ctlz costs `cp0 ; bra z ; ff1l ; dec ; inc` -- six instructions to cc1's
+// two -- which is measured, not argued.
+def : Pat<(int_dspic_ff1l GR16:$rs), (FF1L16 GR16:$rs)>;
+def : Pat<(int_dspic_ff1r GR16:$rs), (FF1R16 GR16:$rs)>;
 
 
 //===----------------------------------------------------------------------===//

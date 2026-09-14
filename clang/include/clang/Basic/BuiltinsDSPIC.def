@@ -80,4 +80,54 @@ BUILTIN(__builtin_pwrsav, "vIUi", "n")
 BUILTIN(__builtin_clrwdt, "v", "n")
 BUILTIN(__builtin_nop, "v", "n")
 
+// ── trellis session 118 ─────────────────────────────────────────────────────────────────────────
+// The census (steps/frontend/builtin-census.py) put 93 of the vendor's 124 builtins for this
+// device in state MISSING -- our clang refuses the call. These are the ones a shipping firmware
+// NAMES, plus the ones cc1 lowers to a single instruction this backend already emits. Every
+// signature is the vendor's own, from `xc-dsc-gcc -mprint-protos=`
+// (prints/l1f/frontend/builtin-ask.protos.h), and cc1's emission for each is banked at
+// prints/l1f/frontend/builtin2-ask.small.s.
+
+// btg: toggle one bit of a place. ⛔ NO INTRINSIC AND NO BACKEND CHANGE -- `*p ^= (1u << n)` is
+// already the IR shape the backend selects `btg` from (L1f-g), measured before it was written.
+// The bit number is an integer constant expression (`I`): cc1 refuses a variable by name,
+// "Unexpected second argument to __builtin_btg()".
+// ⚠ The vendor's own first spelling takes a PLAIN `uint16_t *`; the _8/_16/_32 family takes a
+// VOLATILE pointer. Both are the vendor's, not a choice here.
+BUILTIN(__builtin_btg, "vUi*IUi", "n")
+BUILTIN(__builtin_btg_8, "vUcD*IUi", "n")
+BUILTIN(__builtin_btg_16, "vUiD*IUi", "n")
+BUILTIN(__builtin_btg_32, "vULiD*IUi", "n")
+
+// The global interrupt enable. cc1 emits `bclr _INTCON2,#15` / `bset _INTCON2,#15` followed by
+// TWO NOPS -- part of the vendor's definition, not padding, exactly as write_NVM's two nops are.
+BUILTIN(__builtin_disable_interrupts, "v", "n")
+BUILTIN(__builtin_enable_interrupts, "v", "n")
+
+// `reset` and `break`, one instruction each.
+BUILTIN(__builtin_software_reset, "v", "n")
+BUILTIN(__builtin_software_breakpoint, "v", "n")
+
+// `repeat #n ; nop` -- ONE instruction of two asm lines, like the divide (L1f-d): nothing may be
+// scheduled between a repeat and the instruction it drives. The vendor accepts a variable count
+// as well as a literal, so both forms exist.
+BUILTIN(__builtin_repeat_nop, "vUi", "n")
+
+// ff1l / ff1r: find the first one from the left / right. ⛔ NOT `clz`+1 IN THE EMITTED CODE even
+// though that is the value: this backend's ctlz pattern is `DEC16rr (FF1L16 x)` and going through
+// it costs `cp0 ; bra z ; ff1l ; dec ; inc` against cc1's two instructions. The HARDWARE result is
+// already the builtin's value -- DS70000157G p.257: 0 when no bit is set, else the shift count
+// starting at 1 -- so each is its own intrinsic straight onto the instruction. The `_16`
+// spellings are the SAME instruction (cc1 emits `ff1l w1,w0` for both), so they are aliases.
+BUILTIN(__builtin_ff1l, "UiUi", "nc")
+BUILTIN(__builtin_ff1r, "UiUi", "nc")
+BUILTIN(__builtin_ff1l_16, "UiUi", "nc")
+BUILTIN(__builtin_ff1r_16, "UiUi", "nc")
+
+// Three the vendor spells twice. fbcl_16 is __builtin_fbcl's instruction; swap_16 is
+// __builtin_swap's; swap_8 is __builtin_swap_byte's. They add no intrinsic and no instruction.
+BUILTIN(__builtin_fbcl_16, "ii", "nc")
+BUILTIN(__builtin_swap_16, "UiUi", "nc")
+BUILTIN(__builtin_swap_8, "UcUc", "nc")
+
 #undef BUILTIN
