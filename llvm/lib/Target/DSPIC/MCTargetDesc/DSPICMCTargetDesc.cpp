@@ -66,9 +66,17 @@ static MCAsmInfo *createDSPICMCAsmInfo(const MCRegisterInfo &MRI,
   return MAI;
 }
 
+StringRef llvm::dspicBackendCPU(StringRef CPU) {
+  if (CPU.empty() || (CPU != "generic" && CPU != "dspic" && CPU != "dspicx"))
+    return "dspic";
+  return CPU;
+}
+
 static MCSubtargetInfo *
 createDSPICMCSubtargetInfo(const Triple &TT, StringRef CPU, StringRef FS) {
-  return createDSPICMCSubtargetInfoImpl(TT, CPU, /*TuneCPU*/ CPU, FS);
+  // trellis session 119: a device name is the generic processor here (see the header)
+  StringRef C = dspicBackendCPU(CPU);
+  return createDSPICMCSubtargetInfoImpl(TT, C, /*TuneCPU*/ C, FS);
 }
 
 static MCInstPrinter *createDSPICMCInstPrinter(const Triple &T,

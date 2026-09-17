@@ -44,9 +44,9 @@ DSPICSubtarget::initializeSubtargetDependencies(StringRef CPU, StringRef FS) {
   LargeCode = false;
   HWMultMode = NoHWMult;
 
-  StringRef CPUName = CPU;
-  if (CPUName.empty())
-    CPUName = "dspic";
+  // trellis session 119: a device name (-mcpu=33CK1024MP705) is the generic processor here; the
+  // empty-name default this line carried since the MSP430 base is one case of the same rule.
+  StringRef CPUName = dspicBackendCPU(CPU);
 
   ParseSubtargetFeatures(CPUName, /*TuneCPU*/ CPUName, FS);
 
@@ -58,7 +58,7 @@ DSPICSubtarget::initializeSubtargetDependencies(StringRef CPU, StringRef FS) {
 
 DSPICSubtarget::DSPICSubtarget(const Triple &TT, const std::string &CPU,
                                  const std::string &FS, const TargetMachine &TM)
-    : DSPICGenSubtargetInfo(TT, CPU, /*TuneCPU*/ CPU, FS),
+    : DSPICGenSubtargetInfo(TT, dspicBackendCPU(CPU), /*TuneCPU*/ dspicBackendCPU(CPU), FS),
       InstrInfo(initializeSubtargetDependencies(CPU, FS)), TLInfo(TM, *this),
       FrameLowering(*this) {
   TSInfo = std::make_unique<DSPICSelectionDAGInfo>();

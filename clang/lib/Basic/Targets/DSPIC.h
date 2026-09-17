@@ -136,6 +136,21 @@ public:
     return llvm::ArrayRef(GCCRegAliases);
   }
 
+  // ── trellis session 119: THE DEVICE, THE VENDOR'S WAY ──────────────────────────────────────
+  // `-mcpu=<device> -mdfp=<pack>/xc16` is the vendor driver's own spelling; until this session
+  // ours refused `-mcpu=` outright. The device is read from ONE file, <dfp>/bin/c30_device.info,
+  // the same file cc1 reads (pic30.c:1637 validate_target_id), and everything the device macros
+  // need comes out of it -- steps/frontend/device-ask.py reproduces them against cc1's own -dM -E
+  // at five devices. The members are `mutable` because validateTarget, the one hook that has a
+  // DiagnosticsEngine AND runs after TargetOpts is attached, is const.
+  std::string CPU;                              // as written, uppercased (cc1 TOUPPERs it too)
+  mutable bool HaveDevice = false;
+  mutable std::string DeviceMacro, FamilyMacro; // __dsPIC33CK1024MP705__, __dsPIC33C__
+  mutable unsigned DeviceFlags = 0;             // the record's flags word (c30_flag_definitions.h)
+  mutable unsigned IVTNum = 0;                  // __IVT_NUM: the vector records for this device
+  bool setCPU(StringRef Name) override { CPU = Name.upper(); return true; }
+  bool validateTarget(DiagnosticsEngine &Diags) const override;
+
   bool validateAsmConstraint(const char *&Name,
                              TargetInfo::ConstraintInfo &info) const override {
     // No target constraints: inline asm is L1f-i's / a later row's (COSTED).

@@ -13,6 +13,7 @@
 #ifndef LLVM_LIB_TARGET_DSPIC_MCTARGETDESC_DSPICMCTARGETDESC_H
 #define LLVM_LIB_TARGET_DSPIC_MCTARGETDESC_DSPICMCTARGETDESC_H
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DataTypes.h"
 #include <memory>
 
@@ -28,6 +29,13 @@ class MCTargetOptions;
 class MCObjectTargetWriter;
 class MCStreamer;
 class MCTargetStreamer;
+
+/// trellis session 119: -mcpu=<device> (33CK1024MP705, ...) reaches the backend as the CPU string.
+/// The device was validated by the FRONT END against the pack's resource file; here every name
+/// that is not one of this target's three processors (DSPIC.td) is the generic "dspic", so the MC
+/// layer's "'X' is not a recognized processor for this target" is not printed for a device name.
+/// Used at both subtarget-creation sites (the MC layer's and the codegen subtarget's).
+StringRef dspicBackendCPU(StringRef CPU);
 
 /// Creates a machine code emitter for DSPIC.
 MCCodeEmitter *createDSPICMCCodeEmitter(const MCInstrInfo &MCII,

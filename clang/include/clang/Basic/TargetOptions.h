@@ -114,6 +114,10 @@ public:
   // architectures.
   uint64_t LargeDataThreshold;
 
+  /// trellis session 119: the dsPIC device family pack (the vendor's -mdfp), whose
+  /// bin/c30_device.info the front end reads to validate -mcpu and derive the device macros.
+  std::string DFP;
+
   /// The version of the SDK which was used during the compilation.
   /// The option is used for two different purposes:
   /// * on darwin the version is propagated to LLVM where it's used

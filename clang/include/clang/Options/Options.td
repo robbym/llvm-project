@@ -6483,6 +6483,14 @@ def mmsa : Flag<["-"], "mmsa">, Group<m_mips_Features_Group>,
   Visibility<[ClangOption, CC1Option, CC1AsOption]>,
   HelpText<"Enable MSA ASE (MIPS only)">,
   MarshallingInfoFlag<CodeGenOpts<"MipsMsa">>;
+// trellis session 119: the device family pack, the vendor driver's own -mdfp. The front end reads
+// <dfp>/bin/c30_device.info for -mcpu (the device and family macros, __IVT_NUM, the __HAS_* set)
+// and the driver derives the backend's #pragma config database from the same path. TargetSpecific:
+// any other target refuses it as unsupported, which is the control.
+def mdfp_EQ : Joined<["-"], "mdfp=">, Group<m_Group>, Flags<[TargetSpecific]>,
+  Visibility<[ClangOption, CC1Option]>,
+  HelpText<"dsPIC: the device family pack's xc16 directory (-mdfp=<pack>/xc16), read for -mcpu">,
+  MarshallingInfoString<TargetOpts<"DFP">>;
 def mno_msa : Flag<["-"], "mno-msa">, Group<m_mips_Features_Group>,
   HelpText<"Disable MSA ASE (MIPS only)">;
 def mmt : Flag<["-"], "mmt">, Group<m_mips_Features_Group>,

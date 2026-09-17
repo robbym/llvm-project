@@ -798,6 +798,16 @@ std::string tools::getCPUName(const Driver &D, const ArgList &Args,
       return A->getValue();
     return "";
 
+  case llvm::Triple::dspic:
+    // trellis session 119: -mcpu=<device> goes to cc1 as -target-cpu, the shape -mmcu takes for
+    // avr above. Taking the arg here is what CLAIMS it; before this arm the driver refused
+    // "-mcpu=" as unsupported for the target. The front end validates the name against the pack's
+    // resource file (DSPIC.cpp validateTarget) and the backend treats any device name as its
+    // "dspic" processor (DSPICMCTargetDesc.cpp dspicBackendCPU).
+    if (const Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
+      return A->getValue();
+    return "";
+
   case llvm::Triple::m68k:
     return m68k::getM68kTargetCPU(Args);
 

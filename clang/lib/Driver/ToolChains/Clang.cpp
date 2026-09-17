@@ -1630,6 +1630,10 @@ void Clang::RenderTargetOptions(const llvm::Triple &EffectiveTriple,
   case llvm::Triple::ve:
     AddVETargetArgs(Args, CmdArgs);
     break;
+
+  case llvm::Triple::dspic:
+    AddDSPICTargetArgs(Args, CmdArgs);
+    break;
   }
 }
 
@@ -2433,6 +2437,28 @@ void Clang::AddVETargetArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
   // Floating point operations and argument passing are hard.
   CmdArgs.push_back("-mfloat-abi");
   CmdArgs.push_back("hard");
+}
+
+void Clang::AddDSPICTargetArgs(const ArgList &Args, ArgStringList &CmdArgs) const {
+  // trellis session 119: the device, the vendor's way. -mcpu= reaches cc1 as -target-cpu through
+  // getCPUName (CommonArgs.cpp); -mdfp= is forwarded as itself, a cc1 option marshalled into
+  // TargetOptions::DFP; and when BOTH are present the backend's configuration database for
+  // `#pragma config` is DERIVED from them -- <dfp>/bin/config/<CPU>/aux_configuration.data, the
+  // path cc1 itself builds from the same two inputs (pic30.c:1909-1918) -- unless the user passed
+  // -mllvm -dspic-config-db= explicitly, which wins. The CPU is uppercased because the pack's
+  // directory is (33CK1024MP705) and cc1 TOUPPERs the name before it looks anything up.
+  Args.AddLastArg(CmdArgs, options::OPT_mdfp_EQ);
+  const Arg *CPU = Args.getLastArg(options::OPT_mcpu_EQ);
+  const Arg *DFP = Args.getLastArg(options::OPT_mdfp_EQ);
+  if (!CPU || !DFP)
+    return;
+  for (const Arg *A : Args.filtered(options::OPT_mllvm))
+    if (StringRef(A->getValue()).starts_with("-dspic-config-db="))
+      return;
+  CmdArgs.push_back("-mllvm");
+  CmdArgs.push_back(Args.MakeArgString(Twine("-dspic-config-db=") + DFP->getValue() +
+                                       "/bin/config/" + StringRef(CPU->getValue()).upper() +
+                                       "/aux_configuration.data"));
 }
 
 void Clang::DumpCompilationDatabase(Compilation &C, StringRef Filename,
