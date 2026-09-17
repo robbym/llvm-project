@@ -176,9 +176,9 @@ bool DSPICTargetInfo::validateTarget(DiagnosticsEngine &Diags) const {
   if (R.Flags & HAS_ISA32V0)
     return Err("device " + CPU + " is a 32-bit dsPIC33A/PIC32A part (HAS_ISA32V0 in the resource "
                "file); this target is the 16-bit dsPIC");
-  // pic30.c:1780-1789 sets the architecture from the record's FLAGS, later tests winning, and
-  // :4256-4273 spells the family macro from it. NOT the name prefix: device-ask.py measured 44
-  // of 1660 device records across 21 packs whose prefix disagrees with their flags, all PIC24F-K.
+  // pic30.c:1789-1798 sets the architecture from the record's FLAGS -- ten overwriting ifs, later
+  // wins -- and ~4255-4280 spells the family macro from it. The flags are cc1's mechanism; a name
+  // rule would agree over every installed pack (device-ask.py P6b) but is not what cc1 does.
   const char *Fam = "__dsPIC30F__";
   if (R.Flags & P30F) Fam = "__dsPIC30F__";
   if (R.Flags & P33E) Fam = "__dsPIC33E__";
@@ -223,8 +223,12 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
     if (DeviceFlags & (HAS_PMP | HAS_PMPV2)) Builder.defineMacro("__HAS_PMP__");
     if (DeviceFlags & HAS_PMPV2) Builder.defineMacro("__HAS_PMPV2__");
     if (DeviceFlags & HAS_EDS) Builder.defineMacro("__HAS_EDS__");
-    // pic30-c.c:228: HAS_5VOLTS, or the dsPIC30F architecture itself (TARGET_ARCH(PIC30F))
-    if ((DeviceFlags & HAS_5VOLTS) || (DeviceFlags & P30F)) Builder.defineMacro("__HAS_5VOLTS__");
+    // pic30-c.c:228: HAS_5VOLTS, or the dsPIC30F architecture itself -- TARGET_ARCH(PIC30F) is
+    // MASK_ARCH_PIC30FXXXX | MASK_ARCH_PIC30F202X (pic30.h:478), set from P30F and from P30FSMPS
+    // (pic30.c:1789,1792). ⚠ The first landing tested P30F alone; a refuter read the second bit
+    // out of the source. Inert over every installed pack (0 P30FSMPS records lack HAS_5VOLTS).
+    if ((DeviceFlags & HAS_5VOLTS) || (DeviceFlags & (P30F | P30FSMPS)))
+      Builder.defineMacro("__HAS_5VOLTS__");
   } else {
     // no device: cc1's own no-device set has __HAS_DSP__ and nothing else of this family
     Builder.defineMacro("__HAS_DSP__");
