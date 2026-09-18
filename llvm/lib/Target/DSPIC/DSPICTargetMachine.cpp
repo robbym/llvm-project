@@ -266,11 +266,22 @@ public:
                     StringRef(pic30Attrs(&G, Kind, "prog")).ltrim(',') + "' and '" +
                     Last->getName() + "' for '" +
                     StringRef(pic30Attrs(Last, Kind, "prog")).ltrim(',') +
-                    "'; a section has one, and the last object's is used (the vendor compiler "
-                    "uses the last one's above -O0 and the first one's at -O0)",
+                    "'; a section has one, and the second object's is used. NOTE: the "
+                    "deciding object here is the last in MODULE order, which is CREATION order -- "
+                    "an extern referenced above the definitions moves its object to the front -- "
+                    "and the vendor compiler decides by its own emission order, so the two can "
+                    "differ on exactly that shape (trellis session 123)",
                 DS_Warning));
+      // ⛔ trellis session 123: `dspic-space` WAS MISSING FROM THIS LIST, so an object with
+      // `space(psv)` and an explicit `section()` and nothing else fell past it and was written
+      // `sq1,"ax",@progbits` -- READONLY, PSV and PAGE dropped, with NO diagnostic -- where cc1
+      // writes `sq1,psv,page`. Adding an unrelated `keep` restored all three, which is the single
+      // axis that names the cause. PAGE is the vendor's own cross-page guard, so this is the
+      // founding defect class of this arm (an attribute dropped without a word) one attribute
+      // over. Found by a refutation pass. Mutant MP10.
       if (Last->hasAttribute("dspic-address") || Last->hasAttribute("dspic-noload") ||
           Last->hasAttribute("dspic-keep") || Last->hasAttribute("dspic-page") ||
+          Last->hasAttribute("dspic-space") ||
           Last->hasAttribute("dspic-priority"))
         return getContext().getELFSection((Name + pic30Attrs(Last, Kind, "prog")).str(),
                                           ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);

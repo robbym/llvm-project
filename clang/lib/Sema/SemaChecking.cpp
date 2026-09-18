@@ -2377,6 +2377,17 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
   // `1 ? &".text"[2] : ".data"` for section_* and still REFUSES `".text" + 1`: it is the FORM
   // `&lit[k]` it accepts, not "any offset" -- the first spelling of this relaxed the evaluator's
   // offset test and row R9 refused it. The fifth iteration; mutant MS5 makes Peel the identity.
+  // trellis session 123: see DSPIC.cpp's dspicSameArm for the measurement behind this. Two arms
+  // are the same when their parens/casts-stripped profiles are, which is equal BYTES for a string
+  // and the same FORM for `&lit[k]`.
+  auto dspicSameArm = [&](const Expr *A, const Expr *B) {
+    A = A->IgnoreParenCasts();
+    B = B->IgnoreParenCasts();
+    llvm::FoldingSetNodeID IA, IB;
+    A->Profile(IA, Ctx, /*Canonical=*/true);
+    B->Profile(IB, Ctx, /*Canonical=*/true);
+    return IA == IB;
+  };
   auto Peel = [&](const Expr *E) {
     for (;;) {
       E = Strip(E);
@@ -2395,6 +2406,17 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
         bool C;
         if (CO->getCond()->EvaluateAsBooleanCondition(C, Ctx)) {
           E = C ? CO->getTrueExpr() : CO->getFalseExpr();
+          continue;
+        }
+        // trellis session 123: EQUAL ARMS under a run-time condition -- see DSPIC.cpp's
+        // dspicPeelArg for the measurement. Arms compared after parens/casts only and NOT
+        // re-peeled (mutant ME3); equality is Expr::Profile, so equal BYTES and not an equal node
+        // (mutant ME2). Mutant ME1 removes the arm.
+        // ⚠ It closes an ACCEPT-MORE as well as an owed cell: `side() ? &s.b : &s.b` walked around
+        // the visibly-bad refusals below, which the sixth iteration taught to see through a COMMA
+        // (its row T2) and not through this.
+        if (dspicSameArm(CO->getTrueExpr(), CO->getFalseExpr())) {
+          E = CO->getTrueExpr();
           continue;
         }
       }

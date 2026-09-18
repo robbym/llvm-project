@@ -46,6 +46,25 @@ static bool dspicArgMustBeEmitted(const Expr *E, ASTContext &Ctx) {
     const Stmt *S = Work.pop_back_val();
     if (isa<StmtExpr>(S))
       return true;
+    // ⛔ trellis session 123, A1 -- THE MISSING RECURSION, and it is the whole defect rather than
+    // one more case. Until here `HasSideEffects` was consulted on the ROOT ONLY, so any node whose
+    // own answer is "false" WITHOUT recursing hid its entire subtree from the effect test.
+    // `OffsetOfExpr` is exactly such a node: clang/lib/AST/Expr.cpp:3762 puts it in the
+    // never-a-side-effect block and returns before the recurse-to-children tail, while clang's own
+    // CodeGen EVALUATES its non-constant index (CGExprScalar.cpp:3783). A refutation pass found
+    // `__builtin_addr((__builtin_offsetof(struct S, a[(vg = 7)]), &x))` losing the volatile store
+    // on six of the eight builtins, at -Os and at -O0, and cc1 emits it. Asking each child
+    // directly cannot be hidden that way. Mutants MA1 and MA3.
+    if (const auto *X = dyn_cast<Expr>(S); X && X->HasSideEffects(Ctx))
+      return true;
+    // ⛔ A2 -- AND RECURSION IS NOT ENOUGH. An `_Atomic` lvalue-to-rvalue conversion is invisible to
+    // `HasSideEffects` at EVERY node, because Expr.cpp:3939 tests `isVolatileQualified` alone, so
+    // `(av, &x)` returned false at the root and at every child. Ours dropped `mov.w _av,w0`, which
+    // ours' OWN CodeGen emits (`rcall ___atomic_load`) in any ordinary context. Mutant MA2.
+    if (const auto *CE = dyn_cast<CastExpr>(S))
+      if (CE->getCastKind() == CK_LValueToRValue &&
+          CE->getSubExpr()->getType()->isAtomicType())
+        return true;
     if (const auto *X = dyn_cast<Expr>(S); X && X->getType()->isVariablyModifiedType())
       return true;
     if (const auto *UE = dyn_cast<UnaryExprOrTypeTraitExpr>(S))
@@ -61,7 +80,23 @@ static bool dspicArgMustBeEmitted(const Expr *E, ASTContext &Ctx) {
 // The dressing cc1's front end folds away before it looks at the argument: parentheses, casts, a
 // comma (its right side), a statement expression (its last expression). Used only to NAME what
 // the argument is; its effects are emitted separately, whole.
-static const Expr *dspicPeelArg(const Expr *P) {
+// trellis session 123. TWO ARMS ARE "THE SAME" TO cc1 WHEN GCC's operand_equal_p SAYS SO AFTER
+// STRIP_NOPS, and that is narrower than it looks. Measured, one axis per cell
+// (prints/l1f/frontend/eqarms/ask.txt): `(const char*)".text"` equals `".text"` (casts stripped);
+// `".text"` equals `".tex" "t"` (equal BYTES, two different AST nodes -- so comparing StringLiteral
+// POINTERS is wrong, mutant ME2); `&".text"[2]` equals neither `".text"` nor `&".text"[3]` (the
+// FORM and the index are part of it). clang's Expr::Profile over the parens/casts-stripped arm is
+// exactly that comparison, because StringLiteral::Profile carries the bytes.
+static bool dspicSameArm(const Expr *A, const Expr *B, const ASTContext &Ctx) {
+  A = A->IgnoreParenCasts();
+  B = B->IgnoreParenCasts();
+  llvm::FoldingSetNodeID IA, IB;
+  A->Profile(IA, Ctx, /*Canonical=*/true);
+  B->Profile(IB, Ctx, /*Canonical=*/true);
+  return IA == IB;
+}
+
+static const Expr *dspicPeelArg(const Expr *P, const ASTContext &Ctx) {
   for (;;) {
     P = P->IgnoreParenCasts();
     if (const auto *BO = dyn_cast<clang::BinaryOperator>(P); BO && BO->getOpcode() == BO_Comma)
@@ -72,6 +107,34 @@ static const Expr *dspicPeelArg(const Expr *P) {
       if (!VS || !VS->getExprStmt())
         return P;
       P = VS->getExprStmt();
+    } else if (const auto *CO = dyn_cast<ConditionalOperator>(P);
+               CO && dspicSameArm(CO->getTrueExpr(), CO->getFalseExpr(), Ctx)) {
+      // ⛔ C -- EQUAL ARMS under a RUN-TIME condition. GCC folds `c ? X : X` to `X` in the FRONT
+      // END, keeping the condition's effects, so cc1 accepts it at -O0 as well as at -Os. That is
+      // why this is NOT the deferred-path cell the session-123 prep grouped it with: at -O0 there
+      // is no optimiser to defer to. The condition is not dropped here and need not be -- the
+      // emission rule above has already emitted the whole argument, once and first. This peel only
+      // NAMES. ⛔ The arms are NOT re-peeled: cc1 REFUSES `side() ? (side(), "X") : "X"` and the
+      // nested spelling at -O0 and accepts them at -Os, because GCC folds one level in the front
+      // end and the optimiser finishes above -O0. Recursing would accept at -O0 what cc1 refuses.
+      // Mutants ME1, ME3.
+      P = CO->getTrueExpr();
+      // ⛔ AND THERE IS NO CONSTANT-CONDITION ARM HERE, WHICH IS A DELETION AND NOT AN OVERSIGHT.
+      // The first landing had one, on the reasoning that Sema's peel carries one and session 122
+      // left "whether CodeGen's reader needs those two arms" open. Mutant MB1 removed it and
+      // LIVED -- twice, the second time against a cell written specifically to discriminate it --
+      // and the mechanism says why it must: for an OBJECT, arm (2) below takes the EMITTED value,
+      // and clang emits only the chosen arm of a constant condition, so the object is already
+      // right; for a STRING, dspicLiteralArg's evaluator fallback folds a constant condition
+      // itself. The arm decided nothing. Session 97's precedent -- a test that cannot have a
+      // mutant is removed, not kept. ⚠ What CodeGen DID need is the GNU `?:` arm below, which
+      // mutant MB2 kills; so the record's open question is answered "one of the two, not both".
+    } else if (const auto *BCO = dyn_cast<BinaryConditionalOperator>(P)) {
+      // GNU `a ?: b`, the other arm session 122 left only in Sema. Mutant MB2.
+      bool Cond;
+      if (!BCO->getCommon()->EvaluateAsBooleanCondition(Cond, const_cast<ASTContext &>(Ctx)))
+        return P;
+      P = Cond ? BCO->getCommon() : BCO->getFalseExpr();
     } else
       return P;
   }
@@ -82,7 +145,7 @@ static bool dspicLiteralArg(CodeGenFunction &CGF, const Expr *Arg, std::string &
   // declaration with a run-time initializer, control flow) still ends in the literal, and Sema
   // accepted it -- so this reader, evaluator-only until the sixth iteration, refused what Sema
   // had let through. Mutant MT13.
-  const Expr *P = dspicPeelArg(Arg);
+  const Expr *P = dspicPeelArg(Arg, CGF.getContext());
   const auto *SL = dyn_cast<clang::StringLiteral>(P);
   if (!SL)
     if (const auto *UO = dyn_cast<clang::UnaryOperator>(P); UO && UO->getOpcode() == UO_AddrOf)
@@ -335,7 +398,7 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     //     AFTER the emission above, so that an automatic declared INSIDE the statement expression
     //     (`({ int t = 1; &t; })`, which cc1 accepts at -Os) is already in the map.
     if (!Ptr && AddrThree && !IsLV) {
-      const Expr *P = dspicPeelArg(A);
+      const Expr *P = dspicPeelArg(A, getContext());
       if (const auto *UO = dyn_cast<UnaryOperator>(P); P != A->IgnoreParenCasts() && UO && UO->getOpcode() == UO_AddrOf)
         if (const auto *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr()->IgnoreParens()))
           if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
