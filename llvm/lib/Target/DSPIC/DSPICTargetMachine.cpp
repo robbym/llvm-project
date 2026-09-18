@@ -308,6 +308,19 @@ public:
         return getContext().getELFSection(Base + pic30Attrs(GO, Kind), Type, Flags);
       }
     }
+    // trellis session 122: ...unless it carries address(N). The placement block above is guarded
+    // `getAddressSpace() != 1`, so a `__prog__` object reached the shared `.const` below with its
+    // address() never read -- dropped without a diagnostic, where cc1 writes
+    // `*_<hash>,address(N),code` (prints/l1f/frontend/progaddr/ask.txt). Found by EXECUTION
+    // against the vendor's image of the same source (relopexec X11-X13). A section PER OBJECT: the
+    // assembler refuses two addresses under one section name. Mutant MP1 removes this arm.
+    if (const auto *PV = dyn_cast<GlobalVariable>(GO);
+        PV && GO->getAddressSpace() == 1 && PV->hasAttribute("dspic-address"))
+      return getContext().getELFSection(
+          (".prog." + GO->getName() + ",address(" +
+           PV->getAttribute("dspic-address").getValueAsString() + "),code")
+              .str(),
+          ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     // L1e prog-space: an addrspace(1) global with no explicit section still goes to program memory.
     if (GO->getAddressSpace() == 1 && !isa<Function>(GO))
       return getContext().getELFSection(".const", ELF::SHT_PROGBITS,
