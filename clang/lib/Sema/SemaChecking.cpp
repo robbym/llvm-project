@@ -2398,11 +2398,22 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
           continue;
         }
       }
+      // GNU `a ?: b` (cc1 accepts `&".text"[2] ?: ".data"`; the sixth iteration). Mutant MS7.
+      if (const auto *BCO = dyn_cast<BinaryConditionalOperator>(E)) {
+        bool C;
+        if (BCO->getCommon()->EvaluateAsBooleanCondition(C, Ctx)) {
+          E = C ? BCO->getCommon() : BCO->getFalseExpr();
+          continue;
+        }
+      }
       return E;
     }
   };
   auto Literal = [&](const Expr *Arg, bool AllowSubscript) -> const StringLiteral * {
-    const Expr *A = AllowSubscript ? Peel(Arg) : Strip(Arg);
+    // vector_offset is peeled too (cc1 accepts `({ int t = side(); ...; "_T1Interrupt"; })` at
+    // -Os) and still takes NO index: `(0, &"_T1Interrupt"[0])` is refused by cc1, and the first
+    // spelling -- no peel for it -- let the evaluator fallback ACCEPT that. The sixth iteration.
+    const Expr *A = Peel(Arg);
     if (const auto *SL = dyn_cast<StringLiteral>(A))
       return SL;
     if (const auto *UO = dyn_cast<UnaryOperator>(A); UO && UO->getOpcode() == UO_AddrOf)
@@ -2425,7 +2436,9 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
     // pointer variable (nothing may assume its value). cc1's sentence says "not in automatic
     // scope" and cc1 ACCEPTS an automatic (it returns the frame address); the sentence is
     // transcribed, the behaviour is matched. Mutant MT4 removes this block.
-    const Expr *A = Strip(TheCall->getArg(0));
+    // PEELED (the sixth iteration): a comma walked around these refusals -- `(side(), &s.b)`,
+    // `(side(), &parm)` -- and cc1 refuses both at every level (asked). Mutant MS6.
+    const Expr *A = Peel(TheCall->getArg(0));
     bool Bad = false;
     if (const auto *UO = dyn_cast<UnaryOperator>(A); UO && UO->getOpcode() == UO_AddrOf) {
       const Expr *Sub = UO->getSubExpr()->IgnoreParens();

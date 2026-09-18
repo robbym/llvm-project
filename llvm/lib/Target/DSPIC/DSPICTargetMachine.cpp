@@ -18,6 +18,7 @@
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetLoweringObjectFileImpl.h"
 #include "llvm/IR/GlobalObject.h"
+#include "llvm/IR/DiagnosticInfo.h"   // trellis session 122: the two-placements warning
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Function.h"
 #include "llvm/BinaryFormat/ELF.h"
@@ -242,11 +243,32 @@ public:
     // assembles, and silently takes the FIRST priority where the vendor's says the last. So the
     // attributes come from the last addrspace(1) object the module places under this name.
     // Mutant MP6 removes the scan.
+    // ⛔ THE FIFTH VERSION, after another refutation pass. "The last object's" is cc1's answer AT
+    // -Os, not its rule: cc1's deciding object is the first one it EMITS, and it emits in reverse
+    // declaration order at -O1 and above and forward at -O0 (asked: the `## cc1-O0` block). The
+    // source is CONTRADICTORY -- one section cannot sit at two addresses -- so the unit gets a
+    // WARNING that names the section, both objects and both placements and says which is used.
+    // And a DECLARATION places nothing: the scan counted an undefined `extern`, which then decided
+    // a defined object's address (a regression the pass found; mutant MP8).
     if (const auto *PV = dyn_cast<GlobalVariable>(GO); PV && GO->getAddressSpace() == 1) {
       const GlobalVariable *Last = PV;
       for (const GlobalVariable &G : PV->getParent()->globals())
-        if (G.getAddressSpace() == 1 && G.hasSection() && G.getSection() == Name)
+        if (G.getAddressSpace() == 1 && G.hasSection() && G.getSection() == Name &&
+            !G.isDeclaration())
           Last = &G;
+      if (GO == Last)   // once per name: when the deciding object itself is placed. Mutant MP9.
+        for (const GlobalVariable &G : PV->getParent()->globals())
+          if (&G != Last && G.getAddressSpace() == 1 && G.hasSection() &&
+              G.getSection() == Name && !G.isDeclaration() &&
+              pic30Attrs(&G, Kind, "prog") != pic30Attrs(Last, Kind, "prog"))
+            GO->getContext().diagnose(DiagnosticInfoGeneric(
+                "section '" + Name + "' is given two placements: '" + G.getName() + "' asks for '" +
+                    StringRef(pic30Attrs(&G, Kind, "prog")).ltrim(',') + "' and '" +
+                    Last->getName() + "' for '" +
+                    StringRef(pic30Attrs(Last, Kind, "prog")).ltrim(',') +
+                    "'; a section has one, and the last object's is used (the vendor compiler "
+                    "uses the last one's above -O0 and the first one's at -O0)",
+                DS_Warning));
       if (Last->hasAttribute("dspic-address") || Last->hasAttribute("dspic-noload") ||
           Last->hasAttribute("dspic-keep") || Last->hasAttribute("dspic-page") ||
           Last->hasAttribute("dspic-priority"))

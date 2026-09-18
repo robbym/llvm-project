@@ -30,12 +30,71 @@ using namespace llvm;
 // it; Sema has already refused everything else), as BYTES UP TO THE FIRST NUL whatever the
 // literal's width (measured: L".text" is `.startof.(.)`, "x\0y" is `x`). Mutant MS4 drops the
 // truncation.
+// The sixth iteration. DOES EMITTING THIS ARGUMENT DO ANYTHING? clang's HasSideEffects says "no"
+// to two things that do: CONTROL FLOW inside a statement expression (`({ if (c) return 5; &x; })`
+// -- return / break / continue / goto are statements, not effects) and an expression evaluated
+// only as a VARIABLY MODIFIED TYPE's bound (`sizeof(int[side()])`, a cast to `int (*)[side()]`).
+// The fifth iteration gated emission on HasSideEffects alone and a refutation pass found both
+// DELETED -- a lost `return`, an infinite loop, a lost call. Conservative on purpose: any
+// statement expression, any VM type. Mutant MT10.
+static bool dspicArgMustBeEmitted(const Expr *E, ASTContext &Ctx) {
+  if (E->HasSideEffects(Ctx))
+    return true;
+  SmallVector<const Stmt *, 8> Work;
+  Work.push_back(E);
+  while (!Work.empty()) {
+    const Stmt *S = Work.pop_back_val();
+    if (isa<StmtExpr>(S))
+      return true;
+    if (const auto *X = dyn_cast<Expr>(S); X && X->getType()->isVariablyModifiedType())
+      return true;
+    if (const auto *UE = dyn_cast<UnaryExprOrTypeTraitExpr>(S))
+      if (UE->getTypeOfArgument()->isVariablyModifiedType())
+        return true;
+    for (const Stmt *C : S->children())
+      if (C)
+        Work.push_back(C);
+  }
+  return false;
+}
+
+// The dressing cc1's front end folds away before it looks at the argument: parentheses, casts, a
+// comma (its right side), a statement expression (its last expression). Used only to NAME what
+// the argument is; its effects are emitted separately, whole.
+static const Expr *dspicPeelArg(const Expr *P) {
+  for (;;) {
+    P = P->IgnoreParenCasts();
+    if (const auto *BO = dyn_cast<clang::BinaryOperator>(P); BO && BO->getOpcode() == BO_Comma)
+      P = BO->getRHS();
+    else if (const auto *SE = dyn_cast<StmtExpr>(P)) {
+      const auto *VS = dyn_cast_or_null<ValueStmt>(
+          SE->getSubStmt()->body_empty() ? nullptr : SE->getSubStmt()->body_back());
+      if (!VS || !VS->getExprStmt())
+        return P;
+      P = VS->getExprStmt();
+    } else
+      return P;
+  }
+}
+
 static bool dspicLiteralArg(CodeGenFunction &CGF, const Expr *Arg, std::string &Out) {
-  Expr::EvalResult R;
-  if (!Arg->EvaluateAsRValue(R, CGF.getContext()) || !R.Val.isLValue())
-    return false;
-  const Expr *B = R.Val.getLValueBase().dyn_cast<const Expr *>();
-  const auto *SL = B ? dyn_cast<clang::StringLiteral>(B->IgnoreParens()) : nullptr;
+  // PEELED first, as Sema peels: a statement expression whose body the evaluator cannot walk (a
+  // declaration with a run-time initializer, control flow) still ends in the literal, and Sema
+  // accepted it -- so this reader, evaluator-only until the sixth iteration, refused what Sema
+  // had let through. Mutant MT13.
+  const Expr *P = dspicPeelArg(Arg);
+  const auto *SL = dyn_cast<clang::StringLiteral>(P);
+  if (!SL)
+    if (const auto *UO = dyn_cast<clang::UnaryOperator>(P); UO && UO->getOpcode() == UO_AddrOf)
+      if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(UO->getSubExpr()->IgnoreParens()))
+        SL = dyn_cast<clang::StringLiteral>(ASE->getBase()->IgnoreParenCasts());
+  if (!SL) {
+    Expr::EvalResult R;
+    if (!Arg->EvaluateAsRValue(R, CGF.getContext()) || !R.Val.isLValue())
+      return false;
+    const Expr *B = R.Val.getLValueBase().dyn_cast<const Expr *>();
+    SL = B ? dyn_cast<clang::StringLiteral>(B->IgnoreParens()) : nullptr;
+  }
   if (!SL)
     return false;
   StringRef Bytes = SL->getBytes();
@@ -233,14 +292,20 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     // (1) it FOLDS to a global object -- `&x`, a cast, `&*&x`, `1 ? &x : &y`, `arr + 0`, a
     //     statement expression: the operator on THAT symbol, at every optimisation level.
     //     Mutant MT1 removes this arm.
-    // ⛔ THE ARGUMENT'S EFFECTS ARE EMITTED, ONCE. The third landing took the evaluator's answer
-    // and never emitted the expression, so `__builtin_addr((side(), &x))` lost its call and
-    // `({ vol_g = 7; &x; })` its store -- WRONG CODE, found by a refutation pass (cc1: `rcall _side ;
-    // mov #addr_lo(_x),w0`). The fold only chooses WHICH OBJECT is named. ⚠ And ONLY when there are
-    // effects: the fourth iteration emitted every argument, which at -O0 left dead code cc1 does
-    // not write (the next refutation pass: six effect-free cells moved). Mutant MT5.
+    // ⛔ THE ARGUMENT IS EMITTED WHOLE, ONCE, FIRST -- whenever emitting it can do anything -- and
+    // every arm below only NAMES the object. Four spellings of this were wrong, each found by a
+    // refutation pass: never emitted (the third landing: `(side(), &x)` lost its call); always
+    // emitted (the fourth: dead code at -O0 cc1 does not write); emitted "when it has effects" by
+    // clang's definition (the fifth: a `return` inside a statement expression DELETED, a VLA
+    // bound's call lost); and emitted in more than one place (so twice was possible). Now one
+    // variable holds the one emission. Mutant MT10 weakens the test.
     Value *Ptr = nullptr;
     bool Auto = false;
+    Value *Emitted = nullptr;
+    if (dspicArgMustBeEmitted(A, getContext())) {
+      Emitted = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
+      EnsureInsertPoint();   // `({ return 5; &x; })` leaves none
+    }
     if (AddrThree && !IsLV) {
       Expr::EvalResult R;
       if (A->EvaluateAsRValue(R, getContext()) && R.Val.isLValue() &&
@@ -250,29 +315,27 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
             VD && VD->hasGlobalStorage() &&
             (R.Val.getLValuePath().empty() ||
              (R.Val.getLValuePath().size() == 1 && VD->getType()->isArrayType() &&
-              R.Val.getLValuePath()[0].getAsArrayIndex() == 0)))
-          Ptr = CGM.GetAddrOfGlobalVar(VD);
+              R.Val.getLValuePath()[0].getAsArrayIndex() == 0))) {
+          // ⛔ A `static` LOCAL is not CGM's to name: GetAddrOfGlobalVar returns a global of the
+          // BARE name, so beside a file-scope `sl`, `static int sl` named the FILE-SCOPE object --
+          // silently another object -- and alone, an undefined symbol (wrong since the third
+          // landing; a refutation pass). The function's own map has the real one. Mutant MT11.
+          if (VD->isStaticLocal()) {
+            if (auto It = LocalDeclMap.find(VD); It != LocalDeclMap.end())
+              Ptr = It->second.emitRawPointer(*this);
+          } else
+            Ptr = CGM.GetAddrOfGlobalVar(VD);
+        }
     }
     // (1b, the fifth iteration) an AUTOMATIC object under a STATEMENT EXPRESSION or a comma
     //     (`({ vol_h = 1; &loc; })`: cc1 accepts at -Os and returns the frame address). The
     //     evaluator gives up on the assignment inside it and the emitted value is a reload of
     //     the statement expression's temporary, so neither (1) nor (2) can see the object. Peeled
     //     syntactically: comma -> right side, statement expression -> last expression. Mutant MT7.
+    //     AFTER the emission above, so that an automatic declared INSIDE the statement expression
+    //     (`({ int t = 1; &t; })`, which cc1 accepts at -Os) is already in the map.
     if (!Ptr && AddrThree && !IsLV) {
-      const Expr *P = A;
-      for (;;) {
-        P = P->IgnoreParenCasts();
-        if (const auto *BO = dyn_cast<BinaryOperator>(P); BO && BO->getOpcode() == BO_Comma)
-          P = BO->getRHS();
-        else if (const auto *SE = dyn_cast<StmtExpr>(P)) {
-          const auto *VS = dyn_cast_or_null<ValueStmt>(
-              SE->getSubStmt()->body_empty() ? nullptr : SE->getSubStmt()->body_back());
-          if (!VS || !VS->getExprStmt())
-            break;
-          P = VS->getExprStmt();
-        } else
-          break;
-      }
+      const Expr *P = dspicPeelArg(A);
       if (const auto *UO = dyn_cast<UnaryOperator>(P); P != A->IgnoreParenCasts() && UO && UO->getOpcode() == UO_AddrOf)
         if (const auto *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr()->IgnoreParens()))
           if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
@@ -282,8 +345,6 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
               Auto = true;
             }
     }
-    if (Ptr && A->HasSideEffects(getContext()))
-      (void)EmitScalarExpr(A);   // the fold arm is !IsLV, so this is a scalar
     if (!Ptr) {
       // (2) the address of an AUTOMATIC object: cc1 accepts `&loc`, `&(T){..}`, an automatic ARRAY
       //     handed over directly, an array compound literal and `(side(), &loc)`, and returns the
@@ -292,8 +353,10 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
       //     of the third landing saw only the first two (a refutation pass; the fifth iteration),
       //     and once this test exists that one decides nothing, so it is gone. Mutant MT8.
       //     addr_high cannot arrive here: a 16-bit pointer "does not have an address high".
-      Ptr = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
-      Auto = isa<llvm::AllocaInst>(Ptr->stripPointerCasts());
+      //     A DYNAMIC alloca is a VLA, which cc1 refuses at every level (asked). Mutant MT12.
+      Ptr = Emitted ? Emitted : (IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A));
+      if (const auto *AI = dyn_cast<llvm::AllocaInst>(Ptr->stripPointerCasts()))
+        Auto = AI->isStaticAlloca();
       // (3) anything else goes to the SAME inline asm as a run-time pointer under the "i"
       //     constraint, which the backend resolves AFTER the optimiser: a `static inline` wrapper
       //     or a local `int *p = &x;` that the optimiser folds to a symbol is accepted at -Os and
@@ -331,16 +394,19 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     // operators. `&"lit"[k]` names the WHOLE literal -- cc1 ignores k, and so does the base of the
     // folded lvalue.
     std::string Name;
-    if (!dspicLiteralArg(*this, E->getArg(0), Name)) {   // Sema refuses this first; defensive
+    if (!dspicLiteralArg(*this, E->getArg(0), Name)) {   // Sema has refused what it can see is not one
       CGM.Error(E->getArg(0)->getExprLoc(),
                 "__builtin_section_* requires a string literal for the section name");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
-    // the argument's EFFECTS are emitted, as cc1 does (`rcall _side` before the mov for
-    // `(side(), ".text")`); the name was read from what it folds to. ONLY effects: emitting a
-    // bare literal materialises its string as a dead `.const` object at -O0. Mutant MT5.
-    if (E->getArg(0)->HasSideEffects(getContext()))
+    // the argument is emitted, whole and once, whenever emitting it can do anything -- as cc1
+    // does (`rcall _side` before the mov for `(side(), ".text")`, the branch for
+    // `({ if (c) return 5; ".text"; })`); the name was read from what it peels or folds to. NOT a
+    // bare literal: that materialises its string as a dead `.const` object at -O0. Mutant MT5.
+    if (dspicArgMustBeEmitted(E->getArg(0), getContext())) {
       (void)EmitScalarExpr(E->getArg(0));
+      EnsureInsertPoint();
+    }
     // Mutant MR2 makes section_end say `.sizeof.`.
     const char *Op = BuiltinID == DSPIC::BI__builtin_section_begin ? "startof"
                    : BuiltinID == DSPIC::BI__builtin_section_end   ? "endof"
@@ -372,11 +438,14 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
       CGM.Error(E->getArg(0)->getExprLoc(), "__builtin_vector_offset requires a string literal");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
-    // the argument's EFFECTS are emitted, as cc1 does (`rcall _side` before the mov for
-    // `(side(), ".text")`); the name was read from what it folds to. ONLY effects: emitting a
-    // bare literal materialises its string as a dead `.const` object at -O0. Mutant MT5.
-    if (E->getArg(0)->HasSideEffects(getContext()))
+    // the argument is emitted, whole and once, whenever emitting it can do anything -- as cc1
+    // does (`rcall _side` before the mov for `(side(), ".text")`, the branch for
+    // `({ if (c) return 5; ".text"; })`); the name was read from what it peels or folds to. NOT a
+    // bare literal: that materialises its string as a dead `.const` object at -O0. Mutant MT5.
+    if (dspicArgMustBeEmitted(E->getArg(0), getContext())) {
       (void)EmitScalarExpr(E->getArg(0));
+      EnsureInsertPoint();
+    }
     const TargetOptions &TO = getTarget().getTargetOpts();
     int Slot = clang::dspic::vectorSlot(TO.DFP, StringRef(TO.CPU).upper(), Name);
     return llvm::ConstantInt::get(Builder.getInt32Ty(), (uint64_t)(int64_t)Slot, /*isSigned=*/true);
