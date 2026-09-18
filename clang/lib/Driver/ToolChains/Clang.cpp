@@ -2457,7 +2457,9 @@ void Clang::AddDSPICTargetArgs(const ArgList &Args, ArgStringList &CmdArgs) cons
   // `../support/<Fam>/h` and `../support/peripheral_<x>`; -nostdinc disables all of it
   // (`if (stdinc == 0) return;`). Until this session ours added the HOST's /usr/include instead
   // (InitHeaderSearch's hosted default for an UnknownOS triple) and no pack directory -- which is
-  // why 60 in-tree scripts pass -nostdinc and hand-spell the pack path. dspic is exempted from the
+  // why 56 in-tree scripts hand-spelled the pack path as -I (54 after session 120 moved the two
+  // firmware builds; the count carrier's rule, trellis session 120 report 6.4) and 85 pass
+  // -nostdinc (session 88 first named the symptom). dspic is exempted from the
   // hosted default now (InitHeaderSearch.cpp, hexagon's precedent), so the resource directory is
   // added here as hexagon's toolchain adds it (unless -nobuiltininc), then the pack's directories
   // (unless -nostdlibinc), each -internal-isystem so a user's -I and -isystem stay ahead of them.

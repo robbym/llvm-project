@@ -395,12 +395,15 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   Builder.defineMacro("__HAS_BUILTINS_16__");
   // __HAS_CODEGUARD__ / __HAS_DSP__: mask-derived since session 119 -- the device block above
   Builder.defineMacro("__LONG_LONG_WIDTH__", "64");
-  // ⚠ THE VERSION MACROS ARE ZERO BECAUSE THE VENDOR'S OWN SHIPPED COMPILER REPORTS ZERO. Asked
-  // of xc-dsc-gcc v4.00 directly: __C30_VERSION__ 0, __XC16_VERSION__ 0, __XC_DSC_VERSION__ 0.
-  // The record already establishes why (the install's __VERSION__ carries the unsubstituted token
-  // MCHP_VERSION -- its version macros are broken, not authoritative), and steps/stn3255/build.sh
-  // deliberately passes -D__C30_VERSION__=4000 over it, measured from the vendor's own ELF. A
-  // command-line -D wins over a target define, so that override still stands.
+  // ⚠ THE VERSION MACROS ARE ZERO BECAUSE THE cc1 THE VENDOR DRIVER RUNS ON THIS MACHINE REPORTS
+  // ZERO -- and (trellis session 120, a refuter's finding) that cc1 is NOT the shipped one:
+  // bin/bin/elf-cc1.exe is a rebuilt GPL binary (2026-08-31, .ident "v4.00 +PR92071 +PR90840",
+  // MCHP_VERSION unsubstituted) sitting over the shipped bin/bin/elf-cc1.exe.orig (2026-06-25),
+  // which defines __C30_VERSION__ 40000, __XC16_VERSION__ 40000, __XC_DSC_VERSION__ 40000. The two
+  // are byte-identical in emitted code over 31 fixtures x 2 levels modulo the .ident line; the
+  // version macros are where they differ. The swap is recorded nowhere before session 120.
+  // steps/stn3255/link.sh passes -D__C30_VERSION__=4000 over these zeros (a command-line -D wins);
+  // whether ours should mirror the SHIPPED value (40000) is session 120's close item 1.
   Builder.defineMacro("__C30_VERSION__", "0");
   Builder.defineMacro("__XC16_VERSION__", "0");
   Builder.defineMacro("__XC16_VERSION", "0");
