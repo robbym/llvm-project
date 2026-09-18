@@ -26,7 +26,7 @@ struct Device {
   unsigned Flags = 0;    // the record's flags word (c30_flag_definitions.h), or the table's device mask
   unsigned Id = 0;       // the device id (0 for a generic)
   unsigned IVT = 0;      // the vector records naming this device (0 for a generic)
-  std::string Macro;     // a generic name's macro, `__GENERIC_16DSP__` (pic30.c:4319-4331); else ""
+  std::string Macro;     // a generic name's macro, `__GENERIC_16DSP__` (pic30.c:4318-4332); else ""
 };
 
 /// Resolve CPU (as written, uppercased -- cc1 TOUPPERs it) against the generic table and then the

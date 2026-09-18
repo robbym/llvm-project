@@ -149,8 +149,9 @@ static std::string readDevice(StringRef Path, StringRef CPU, DeviceRecord &Out) 
 // ── trellis session 120: THE NINE GENERIC NAMES, and the reader's public face ──────────────────
 // pic30.c:1655-1690 generic_devices[] -- matched BEFORE the resource file is opened (:1700-1707),
 // so a generic name needs no pack, reads no record and gets no __IVT_NUM. The name is spelled into
-// ONE macro, `__` + name with `-` -> `_` + `__` (:4319-4331), which cc1 puts in the FAMILY slot
-// with the device slot nulled (:4286-4310); the device mask goes through the ordinary __HAS_*
+// ONE macro, `__` + name with `-` -> `_` + `__` (:4318-4332), which cc1 puts in the FAMILY slot
+// with the device slot nulled (:4315-4316; the six per-name strcmp arms at :4285-4308 compute the
+// same strings and are overwritten by it -- a refuter's reading); the device mask goes through the ordinary __HAS_*
 // emitter (pic30-c.c:215-230), where HAS_ECORE, HAS_GIE, HAS_DUALCORE and HAS_ISAV4 have no
 // macro -- so only HAS_DSP, HAS_EDS and HAS_ISA32V0 are transcribed; the bits with no observable
 // are left out rather than invented. Measured through the vendor driver, name by name:
@@ -276,7 +277,7 @@ bool DSPICTargetInfo::validateTarget(DiagnosticsEngine &Diags) const {
   // rule would agree over every installed pack (device-ask.py P6b) but is not what cc1 does.
   // trellis session 120: the chain lives in clang::dspic::familyMacro now (the driver asks it
   // too, for the pack's per-family include directory); a generic's family slot is its own macro
-  // and it has no device macro and no __IVT_NUM (pic30.c:4286-4310 null the device slot).
+  // and it has no device macro and no __IVT_NUM (pic30.c:4315-4316 null the device slot).
   const char *Fam = clang::dspic::familyMacro(R);
   IsGeneric = R.Generic;
   FamilyMacro = R.Generic ? R.Macro : std::string(Fam);
