@@ -148,6 +148,7 @@ public:
   mutable std::string DeviceMacro, FamilyMacro; // __dsPIC33CK1024MP705__, __dsPIC33C__
   mutable unsigned DeviceFlags = 0;             // the record's flags word (c30_flag_definitions.h)
   mutable unsigned IVTNum = 0;                  // __IVT_NUM: the vector records for this device
+  mutable bool IsGeneric = false;               // session 120: one of the nine GENERIC-* names
   bool setCPU(StringRef Name) override { CPU = Name.upper(); return true; }
   bool validateTarget(DiagnosticsEngine &Diags) const override;
 

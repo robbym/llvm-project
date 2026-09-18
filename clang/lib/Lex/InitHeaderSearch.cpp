@@ -254,6 +254,13 @@ bool InitHeaderSearch::ShouldAddDefaultIncludePaths(
   if (triple.getArch() == llvm::Triple::hexagon)
     return false;
 
+  // trellis session 120: on dspic too. The hosted default handed a 16-bit MCU cross target the
+  // host's /usr/local/include and /usr/include (measured: `clang -target dspic -v -E`); the
+  // driver adds the resource directory and the device pack's directories (Clang.cpp
+  // AddDSPICTargetArgs), cc1's own list, and nothing else.
+  if (triple.getArch() == llvm::Triple::dspic)
+    return false;
+
   return true; // Everything else uses AddDefaultIncludePaths().
 }
 

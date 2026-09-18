@@ -46,6 +46,7 @@ DSPICTargetInfo::getTargetBuiltins() const {
 #include "llvm/Support/IOSandbox.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include <cstring>
+#include "clang/Basic/DSPICDevice.h" // trellis session 120: the reader's public face
 
 const char *const DSPICTargetInfo::GCCRegNames[] = {
     "w0", "w1", "w2",  "w3",  "w4",  "w5",  "w6",  "w7",
@@ -145,6 +146,95 @@ static std::string readDevice(StringRef Path, StringRef CPU, DeviceRecord &Out) 
 }
 } // namespace
 
+// ── trellis session 120: THE NINE GENERIC NAMES, and the reader's public face ──────────────────
+// pic30.c:1655-1690 generic_devices[] -- matched BEFORE the resource file is opened (:1700-1707),
+// so a generic name needs no pack, reads no record and gets no __IVT_NUM. The name is spelled into
+// ONE macro, `__` + name with `-` -> `_` + `__` (:4319-4331), which cc1 puts in the FAMILY slot
+// with the device slot nulled (:4286-4310); the device mask goes through the ordinary __HAS_*
+// emitter (pic30-c.c:215-230), where HAS_ECORE, HAS_GIE, HAS_DUALCORE and HAS_ISAV4 have no
+// macro -- so only HAS_DSP, HAS_EDS and HAS_ISA32V0 are transcribed; the bits with no observable
+// are left out rather than invented. Measured through the vendor driver, name by name:
+// prints/l1f/frontend/generic/<NAME>.cc1.txt (steps/frontend/generic-ask.sh).
+namespace {
+struct GenericDevice { const char *Name; unsigned Mask; };
+static const GenericDevice GenericDevices[] = {
+  {"GENERIC-16BIT",    0},                                  // :1661
+  {"GENERIC-16BIT-DA", HAS_EDS},                            // :1664
+  {"GENERIC-16BIT-EP", HAS_EDS},                            // :1667  (+ HAS_ECORE | HAS_GIE, no macro)
+  {"GENERIC-16DSP",    HAS_DSP},                            // :1670
+  {"GENERIC-16DSP-EP", HAS_DSP | HAS_EDS},                  // :1673  (+ ECORE, GIE)
+  {"GENERIC-16DSP-CH", HAS_DSP | HAS_EDS},                  // :1676  (+ ISAV4, DUALCORE, GIE -- and NO __dsPIC33C__: banked)
+  {"GENERIC-16DSP-AA", HAS_DSP | HAS_EDS | HAS_ISA32V0},    // :1680  "obsolete, do not use"; the 33A family
+  {"GENERIC-32DSP-AK", HAS_DSP | HAS_EDS | HAS_ISA32V0},    // :1683
+  {"GENERIC-32PIC-AK", HAS_DSP | HAS_EDS | HAS_ISA32V0},    // :1686  (+ HAS_EXTENDED_DEVID; PIC32A)
+};
+} // namespace
+
+std::string clang::dspic::describeDevice(StringRef DFP, StringRef CPU, Device &Out) {
+  Out = Device();
+  for (const GenericDevice &G : GenericDevices)
+    if (CPU == G.Name) {
+      Out.Known = Out.Generic = true;
+      Out.Flags = G.Mask;
+      Out.Macro = "__";
+      for (char C : CPU) Out.Macro.push_back(C == '-' ? '_' : C);
+      Out.Macro += "__";
+      return "";
+    }
+  if (DFP.empty())
+    return "nodfp";
+  DeviceRecord R;
+  std::string E = readDevice((DFP + "/bin/c30_device.info").str(), CPU, R);
+  if (!E.empty())
+    return E;
+  Out.Known = true; Out.Flags = R.Flags; Out.Id = R.Id; Out.IVT = R.IVT;
+  return "";
+}
+
+const char *clang::dspic::familyMacro(const Device &R) {
+  if (R.Generic)
+    return "";
+  // pic30.c:1789-1798 sets the architecture from the record's FLAGS -- ten overwriting ifs, later
+  // wins -- and ~4255-4280 spells the family macro from it. The flags are cc1's mechanism; a name
+  // rule would agree over every installed pack (device-ask.py P6b) but is not what cc1 does.
+  // (Session 119's chain, moved here unchanged so the driver can ask the same question.)
+  const char *Fam = "__dsPIC30F__";
+  if (R.Flags & P30F) Fam = "__dsPIC30F__";
+  if (R.Flags & P33E) Fam = "__dsPIC33E__";
+  if (R.Flags & P33F) Fam = "__dsPIC33F__";
+  if (R.Flags & P30FSMPS) Fam = "__dsPIC30F__";
+  if (R.Flags & P24F) Fam = "__PIC24F__";
+  if (R.Flags & P24E) Fam = "__PIC24E__";
+  if (R.Flags & P24H) Fam = "__PIC24H__";
+  if (R.Flags & P24FK) Fam = "__PIC24FK__";
+  if (R.Flags & HAS_ISAV4) Fam = "__dsPIC33C__";
+  return Fam;
+}
+
+void clang::dspic::packIncludeDirs(const Device &D, llvm::SmallVectorImpl<std::string> &Out) {
+  // c30_flag_definitions.h:262-267 (the C99 common list) then :279-335 (per family), in
+  // pic30_default_include_path's order: common first, then the family's two. The candidates a
+  // pack lacks (<dfp>/include and every peripheral_* -- 0 of 42 in the 21 installed packs) are
+  // passed like cc1 passes them and dropped the way GCC drops them: a nonexistent -internal-isystem
+  // is ignored at lookup.
+  Out.push_back("include");
+  Out.push_back("support/generic/h");
+  if (!D.Known || D.Generic)
+    return;
+  StringRef Fam = familyMacro(D);
+  // the directory is the family macro without its underscores, except that PIC24FK shares
+  // PIC24F's (measured at 24F16KA102: support/PIC24F/h) -- c30_flag_definitions.h:279 is ONE
+  // entry for MASK_ARCH_PIC24F | MASK_ARCH_PIC24FK (pic30.c:25983-25984)
+  std::string Dir = Fam.drop_front(2).drop_back(2).str();
+  if (Dir == "PIC24FK")
+    Dir = "PIC24F";
+  Out.push_back("support/" + Dir + "/h");
+  if (Dir == "PIC24F")
+    Out.push_back("support/peripheral_24F");                 // :285
+  else if (Dir != "dsPIC33A" && Dir != "PIC32A")
+    Out.push_back("support/peripheral_30F_24H_33F");         // :292-320; 33A/32A have none (:328-335)
+}
+
 bool DSPICTargetInfo::validateTarget(DiagnosticsEngine &Diags) const {
   if (CPU.empty())
     return true;
@@ -158,13 +248,14 @@ bool DSPICTargetInfo::validateTarget(DiagnosticsEngine &Diags) const {
   // Every refusal below carries cc1's OWN sentence for the case (elf-cc1: "Invalid -mcpu option.
   // CPU X not recognized." / "Could not open resource file: P"), never a silent default.
   const std::string &DFP = getTargetOpts().DFP;
-  if (DFP.empty())
+  std::string Path = DFP + "/bin/c30_device.info";
+  // trellis session 120: the nine GENERIC-* names first (no pack needed), then the file
+  clang::dspic::Device R;
+  std::string E = clang::dspic::describeDevice(DFP, CPU, R);
+  if (E == "nodfp")
     return Err("Invalid -mcpu option.  CPU " + CPU + " not recognized: no device family pack -- "
                "pass -mdfp=<pack>/xc16 (the vendor driver's own -mdfp), whose bin/c30_device.info "
                "names the devices");
-  std::string Path = DFP + "/bin/c30_device.info";
-  DeviceRecord R;
-  std::string E = readDevice(Path, CPU, R);
   if (E == "open")
     return Err("Could not open resource file: " + Path);
   if (E == "format")
@@ -173,26 +264,26 @@ bool DSPICTargetInfo::validateTarget(DiagnosticsEngine &Diags) const {
     return Err("Invalid -mcpu option.  CPU " + CPU + " not recognized.");
   // COSTED, not parity: cc1 compiles the dsPIC33A/PIC32A parts; this backend is the 16-bit dsPIC
   // and a silent 16-bit compile of a 32-bit part is the wrong-answer class.
+  if (R.Generic && (R.Flags & HAS_ISA32V0))
+    // trellis session 120: the table's three 32-bit names, DECISION 6 extended -- a DIVERGENCE
+    return Err("cpu " + CPU + " is a 32-bit dsPIC33A/PIC32A configuration (HAS_ISA32V0 in the "
+               "vendor's generic-device table, pic30.c:1680-1688); this target is the 16-bit dsPIC");
   if (R.Flags & HAS_ISA32V0)
     return Err("device " + CPU + " is a 32-bit dsPIC33A/PIC32A part (HAS_ISA32V0 in the resource "
                "file); this target is the 16-bit dsPIC");
   // pic30.c:1789-1798 sets the architecture from the record's FLAGS -- ten overwriting ifs, later
   // wins -- and ~4255-4280 spells the family macro from it. The flags are cc1's mechanism; a name
   // rule would agree over every installed pack (device-ask.py P6b) but is not what cc1 does.
-  const char *Fam = "__dsPIC30F__";
-  if (R.Flags & P30F) Fam = "__dsPIC30F__";
-  if (R.Flags & P33E) Fam = "__dsPIC33E__";
-  if (R.Flags & P33F) Fam = "__dsPIC33F__";
-  if (R.Flags & P30FSMPS) Fam = "__dsPIC30F__";
-  if (R.Flags & P24F) Fam = "__PIC24F__";
-  if (R.Flags & P24E) Fam = "__PIC24E__";
-  if (R.Flags & P24H) Fam = "__PIC24H__";
-  if (R.Flags & P24FK) Fam = "__PIC24FK__";
-  if (R.Flags & HAS_ISAV4) Fam = "__dsPIC33C__";
-  FamilyMacro = Fam;
+  // trellis session 120: the chain lives in clang::dspic::familyMacro now (the driver asks it
+  // too, for the pack's per-family include directory); a generic's family slot is its own macro
+  // and it has no device macro and no __IVT_NUM (pic30.c:4286-4310 null the device slot).
+  const char *Fam = clang::dspic::familyMacro(R);
+  IsGeneric = R.Generic;
+  FamilyMacro = R.Generic ? R.Macro : std::string(Fam);
   // pic30.c:4229 spells "__dsPIC<CPU>__" and :4262 respells it "__PIC<CPU>__" for the PIC24
   // families -- measured at 24F16KA102: cc1 defines __PIC24F16KA102__.
-  DeviceMacro = (StringRef(Fam).starts_with("__PIC24") ? "__PIC" : "__dsPIC") + CPU + "__";
+  DeviceMacro = R.Generic ? std::string()
+                          : (StringRef(Fam).starts_with("__PIC24") ? "__PIC" : "__dsPIC") + CPU + "__";
   DeviceFlags = R.Flags;
   IVTNum = R.IVT;
   HaveDevice = true;
@@ -211,9 +302,13 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   // own order; __HAS_DSP__ and __HAS_CODEGUARD__ were session 118's unconditional "family" macros
   // and are the device's -- their two lines in the session-118 block below are a comment now.
   if (HaveDevice) {
-    Builder.defineMacro(DeviceMacro);
+    // trellis session 120: a GENERIC-* name has no device macro and no __IVT_NUM (banked:
+    // prints/l1f/frontend/generic/); its family slot is the name's own macro
+    if (!DeviceMacro.empty())
+      Builder.defineMacro(DeviceMacro);
     Builder.defineMacro(FamilyMacro);
-    Builder.defineMacro("__IVT_NUM", Twine(IVTNum));
+    if (!IsGeneric)
+      Builder.defineMacro("__IVT_NUM", Twine(IVTNum));
     if (DeviceFlags & HAS_DSP) Builder.defineMacro("__HAS_DSP__");
     if (DeviceFlags & HAS_EEDATA) Builder.defineMacro("__HAS_EEDATA__");
     if (DeviceFlags & (HAS_DMA | HAS_DMAV2)) Builder.defineMacro("__HAS_DMA__");

@@ -17,6 +17,7 @@
 #include "Arch/SystemZ.h"
 #include "Hexagon.h"
 #include "PS4CPU.h"
+#include "clang/Basic/DSPICDevice.h" // trellis session 120: the pack's include directories
 #include "ToolChains/Cuda.h"
 #include "clang/Basic/CLWarnings.h"
 #include "clang/Basic/CodeGenOptions.h"
@@ -2450,6 +2451,42 @@ void Clang::AddDSPICTargetArgs(const ArgList &Args, ArgStringList &CmdArgs) cons
   Args.AddLastArg(CmdArgs, options::OPT_mdfp_EQ);
   const Arg *CPU = Args.getLastArg(options::OPT_mcpu_EQ);
   const Arg *DFP = Args.getLastArg(options::OPT_mdfp_EQ);
+  // ── trellis session 120: THE INCLUDE DIRECTORIES, cc1's way ────────────────────────────────
+  // cc1 adds, relative to <dfp>/bin/ (pic30.c:25665 pic30_system_include_paths, the list from
+  // :25960 pic30_default_include_path), `../include`, `../support/generic/h`, then per family
+  // `../support/<Fam>/h` and `../support/peripheral_<x>`; -nostdinc disables all of it
+  // (`if (stdinc == 0) return;`). Until this session ours added the HOST's /usr/include instead
+  // (InitHeaderSearch's hosted default for an UnknownOS triple) and no pack directory -- which is
+  // why 60 in-tree scripts pass -nostdinc and hand-spell the pack path. dspic is exempted from the
+  // hosted default now (InitHeaderSearch.cpp, hexagon's precedent), so the resource directory is
+  // added here as hexagon's toolchain adds it (unless -nobuiltininc), then the pack's directories
+  // (unless -nostdlibinc), each -internal-isystem so a user's -I and -isystem stay ahead of them.
+  // The compiler-prefix half of cc1's list (`<prefix>/include`, `<prefix>/support/generic/h`) is
+  // NOT added: ours has no such install layout and links picolibc; a build passes the vendor's
+  // libc headers itself (blfw-build.sh says how and why).
+  if (!Args.hasArg(options::OPT_nostdinc)) {
+    auto Add = [&](const Twine &Dir) {
+      CmdArgs.push_back("-internal-isystem");
+      CmdArgs.push_back(Args.MakeArgString(Dir));
+    };
+    if (!Args.hasArg(options::OPT_nobuiltininc)) {
+      SmallString<128> Res(getToolChain().getDriver().ResourceDir);
+      llvm::sys::path::append(Res, "include");
+      Add(Res);
+    }
+    if (DFP && !Args.hasArg(options::OPT_nostdlibinc)) {
+      // the family from the resource record's FLAGS, by the same reader and chain validateTarget
+      // uses (DSPICDevice.h). A name the file does not know, or a backend processor name, gets
+      // the common two; the front end owns the diagnostic for a bad name.
+      clang::dspic::Device Dev;
+      if (CPU)
+        clang::dspic::describeDevice(DFP->getValue(), StringRef(CPU->getValue()).upper(), Dev);
+      SmallVector<std::string, 4> Dirs;
+      clang::dspic::packIncludeDirs(Dev, Dirs);
+      for (const std::string &Sub : Dirs)
+        Add(Twine(DFP->getValue()) + "/" + Sub);
+    }
+  }
   if (!CPU || !DFP)
     return;
   for (const Arg *A : Args.filtered(options::OPT_mllvm))
