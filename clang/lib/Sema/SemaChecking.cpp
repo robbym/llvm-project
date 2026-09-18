@@ -2371,8 +2371,38 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
   // text at IR generation -- so `const char *lp = ".text"` and a string wrapper are refused at
   // every level, where cc1 accepts them at -Os. Closing it needs an intrinsic that carries the
   // string to the backend; no customer.
+  // ...and the DRESSING cc1's front end folds away before it looks: a comma (its right side), a
+  // statement expression (its last expression), a conditional whose condition is a constant (the
+  // chosen arm). cc1 accepts `(side(), &".text"[2])`, `({ &".text"[2]; })` and
+  // `1 ? &".text"[2] : ".data"` for section_* and still REFUSES `".text" + 1`: it is the FORM
+  // `&lit[k]` it accepts, not "any offset" -- the first spelling of this relaxed the evaluator's
+  // offset test and row R9 refused it. The fifth iteration; mutant MS5 makes Peel the identity.
+  auto Peel = [&](const Expr *E) {
+    for (;;) {
+      E = Strip(E);
+      if (const auto *BO = dyn_cast<BinaryOperator>(E); BO && BO->getOpcode() == BO_Comma) {
+        E = BO->getRHS();
+        continue;
+      }
+      if (const auto *SE = dyn_cast<StmtExpr>(E))
+        if (const auto *VS = dyn_cast_or_null<ValueStmt>(
+                SE->getSubStmt()->body_empty() ? nullptr : SE->getSubStmt()->body_back()))
+          if (const Expr *LE = VS->getExprStmt()) {
+            E = LE;
+            continue;
+          }
+      if (const auto *CO = dyn_cast<ConditionalOperator>(E)) {
+        bool C;
+        if (CO->getCond()->EvaluateAsBooleanCondition(C, Ctx)) {
+          E = C ? CO->getTrueExpr() : CO->getFalseExpr();
+          continue;
+        }
+      }
+      return E;
+    }
+  };
   auto Literal = [&](const Expr *Arg, bool AllowSubscript) -> const StringLiteral * {
-    const Expr *A = Strip(Arg);
+    const Expr *A = AllowSubscript ? Peel(Arg) : Strip(Arg);
     if (const auto *SL = dyn_cast<StringLiteral>(A))
       return SL;
     if (const auto *UO = dyn_cast<UnaryOperator>(A); UO && UO->getOpcode() == UO_AddrOf)

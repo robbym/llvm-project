@@ -178,7 +178,9 @@ public:
         S += ",near";
     }
     // trellis session 109: page (`bss,page`), keep (`data,near,keep`), noload -- the trailing set.
-    if (GV && GV->hasAttribute("dspic-page"))
+    // trellis session 122: ...once. space(psv|auto_psv) has already written `psv,page`, and a
+    // page attribute on top of it printed `psv,page,page` (cc1: `psv,page`). Mutant MP7.
+    if (GV && GV->hasAttribute("dspic-page") && Space != "psv" && Space != "auto_psv")
       S += ",page";
     if (Noload)
       S += ",noload";
@@ -232,13 +234,25 @@ public:
     // must say so -- cc1: `mysec,address(75520),code`. This arm returned the bare name, so the
     // address was dropped without a word (the same defect as the default-section arm below,
     // behind the same `!= 1` guard; a refutation pass found the second copy). Mutant MP2.
-    if (const auto *PV = dyn_cast<GlobalVariable>(GO);
-        PV && GO->getAddressSpace() == 1 &&
-        (PV->hasAttribute("dspic-address") || PV->hasAttribute("dspic-noload") ||
-         PV->hasAttribute("dspic-keep") || PV->hasAttribute("dspic-page") ||
-         PV->hasAttribute("dspic-priority")))
-      return getContext().getELFSection((Name + pic30Attrs(GO, Kind, "prog")).str(),
-                                        ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+    // ⛔ AND TWO `__prog__` OBJECTS UNDER ONE NAME (the fourth version): cc1 writes ONE `.section`
+    // line per name and it is the LAST object's -- two address()es: the last; two priorities: the
+    // last; `keep` on the first only: no keep; on the second only: keep for both (progaddr-ask
+    // d1-d8). Spelling each object's own attributes gave the assembler two lines for one name,
+    // and it REFUSES two addresses ("conflicts with previous value") where the vendor's output
+    // assembles, and silently takes the FIRST priority where the vendor's says the last. So the
+    // attributes come from the last addrspace(1) object the module places under this name.
+    // Mutant MP6 removes the scan.
+    if (const auto *PV = dyn_cast<GlobalVariable>(GO); PV && GO->getAddressSpace() == 1) {
+      const GlobalVariable *Last = PV;
+      for (const GlobalVariable &G : PV->getParent()->globals())
+        if (G.getAddressSpace() == 1 && G.hasSection() && G.getSection() == Name)
+          Last = &G;
+      if (Last->hasAttribute("dspic-address") || Last->hasAttribute("dspic-noload") ||
+          Last->hasAttribute("dspic-keep") || Last->hasAttribute("dspic-page") ||
+          Last->hasAttribute("dspic-priority"))
+        return getContext().getELFSection((Name + pic30Attrs(Last, Kind, "prog")).str(),
+                                          ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+    }
     if (GO->getAddressSpace() == 1)
       return getContext().getELFSection(Name, ELF::SHT_PROGBITS,
                                         ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);

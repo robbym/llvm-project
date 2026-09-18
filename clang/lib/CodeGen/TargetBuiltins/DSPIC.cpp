@@ -233,13 +233,14 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     // (1) it FOLDS to a global object -- `&x`, a cast, `&*&x`, `1 ? &x : &y`, `arr + 0`, a
     //     statement expression: the operator on THAT symbol, at every optimisation level.
     //     Mutant MT1 removes this arm.
-    // ⛔ THE ARGUMENT IS ALWAYS EMITTED, ONCE, FOR ITS EFFECTS. The first spelling of this arm took
-    // the evaluator's answer and never emitted the expression, so `__builtin_addr((side(), &x))`
-    // lost its call and `({ vol_g = 7; &x; })` its store -- a wrong-code regression a refutation
-    // pass found (cc1: `rcall _side ; mov #addr_lo(_x),w0`). The fold only chooses WHICH SYMBOL
-    // the operator names; when it fires, the emitted value is dead and folds away. Mutant MT5.
-    Value *Emitted = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
+    // ⛔ THE ARGUMENT'S EFFECTS ARE EMITTED, ONCE. The third landing took the evaluator's answer
+    // and never emitted the expression, so `__builtin_addr((side(), &x))` lost its call and
+    // `({ vol_g = 7; &x; })` its store -- WRONG CODE, found by a refutation pass (cc1: `rcall _side ;
+    // mov #addr_lo(_x),w0`). The fold only chooses WHICH OBJECT is named. ⚠ And ONLY when there are
+    // effects: the fourth iteration emitted every argument, which at -O0 left dead code cc1 does
+    // not write (the next refutation pass: six effect-free cells moved). Mutant MT5.
     Value *Ptr = nullptr;
+    bool Auto = false;
     if (AddrThree && !IsLV) {
       Expr::EvalResult R;
       if (A->EvaluateAsRValue(R, getContext()) && R.Val.isLValue() &&
@@ -252,28 +253,55 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
               R.Val.getLValuePath()[0].getAsArrayIndex() == 0)))
           Ptr = CGM.GetAddrOfGlobalVar(VD);
     }
+    // (1b, the fifth iteration) an AUTOMATIC object under a STATEMENT EXPRESSION or a comma
+    //     (`({ vol_h = 1; &loc; })`: cc1 accepts at -Os and returns the frame address). The
+    //     evaluator gives up on the assignment inside it and the emitted value is a reload of
+    //     the statement expression's temporary, so neither (1) nor (2) can see the object. Peeled
+    //     syntactically: comma -> right side, statement expression -> last expression. Mutant MT7.
+    if (!Ptr && AddrThree && !IsLV) {
+      const Expr *P = A;
+      for (;;) {
+        P = P->IgnoreParenCasts();
+        if (const auto *BO = dyn_cast<BinaryOperator>(P); BO && BO->getOpcode() == BO_Comma)
+          P = BO->getRHS();
+        else if (const auto *SE = dyn_cast<StmtExpr>(P)) {
+          const auto *VS = dyn_cast_or_null<ValueStmt>(
+              SE->getSubStmt()->body_empty() ? nullptr : SE->getSubStmt()->body_back());
+          if (!VS || !VS->getExprStmt())
+            break;
+          P = VS->getExprStmt();
+        } else
+          break;
+      }
+      if (const auto *UO = dyn_cast<UnaryOperator>(P); P != A->IgnoreParenCasts() && UO && UO->getOpcode() == UO_AddrOf)
+        if (const auto *DRE = dyn_cast<DeclRefExpr>(UO->getSubExpr()->IgnoreParens()))
+          if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
+              VD && VD->hasLocalStorage() && !isa<ParmVarDecl>(VD))
+            if (auto It = LocalDeclMap.find(VD); It != LocalDeclMap.end()) {
+              Ptr = It->second.emitRawPointer(*this);
+              Auto = true;
+            }
+    }
+    if (Ptr && A->HasSideEffects(getContext()))
+      (void)EmitScalarExpr(A);   // the fold arm is !IsLV, so this is a scalar
     if (!Ptr) {
-      // (2) VISIBLY the address of an AUTOMATIC object: cc1 accepts `&loc` and `&(T){..}` and
-      //     returns the frame address zero-extended (`dec2.w w15,w2 ; mov w2,w0 ; clr w1`).
+      // (2) the address of an AUTOMATIC object: cc1 accepts `&loc`, `&(T){..}`, an automatic ARRAY
+      //     handed over directly, an array compound literal and `(side(), &loc)`, and returns the
+      //     frame address zero-extended (`dec2.w w15,w2 ; mov w2,w0 ; clr w1`). Recognised from
+      //     what the argument EMITS -- an alloca -- and not from its syntax: the syntactic test
+      //     of the third landing saw only the first two (a refutation pass; the fifth iteration),
+      //     and once this test exists that one decides nothing, so it is gone. Mutant MT8.
       //     addr_high cannot arrive here: a 16-bit pointer "does not have an address high".
-      const Expr *S = A->IgnoreParenCasts();
-      bool Auto = false;
-      if (const auto *UO = dyn_cast<UnaryOperator>(S); UO && UO->getOpcode() == UO_AddrOf) {
-        const Expr *Sub = UO->getSubExpr()->IgnoreParens();
-        if (const auto *DRE = dyn_cast<DeclRefExpr>(Sub))
-          if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl()))
-            Auto = VD->hasLocalStorage();
-        Auto = Auto || isa<CompoundLiteralExpr>(Sub);
-      }
-      Ptr = Emitted;
-      if (Auto && AddrThree && BuiltinID != DSPIC::BI__builtin_addr_high) {
-        Value *V = Builder.CreatePtrToInt(Ptr, I16);
-        return BuiltinID == DSPIC::BI__builtin_addr ? Builder.CreateZExt(V, I32) : V;
-      }
+      Ptr = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
+      Auto = isa<llvm::AllocaInst>(Ptr->stripPointerCasts());
       // (3) anything else goes to the SAME inline asm as a run-time pointer under the "i"
       //     constraint, which the backend resolves AFTER the optimiser: a `static inline` wrapper
       //     or a local `int *p = &x;` that the optimiser folds to a symbol is accepted at -Os and
       //     refused at -O0 -- which is cc1's own level dependence (it checks at expand).
+    }
+    if (Auto && AddrThree && BuiltinID != DSPIC::BI__builtin_addr_high) {
+      Value *V = Builder.CreatePtrToInt(Ptr, I16);
+      return BuiltinID == DSPIC::BI__builtin_addr ? Builder.CreateZExt(V, I32) : V;
     }
     if (BuiltinID == DSPIC::BI__builtin_addr) {
       // cc1: `mov #addr_lo(_x),w0 ; mov #addr_hi(_x),w1`. Mutant MR1 exchanges the two operators.
@@ -308,9 +336,11 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
                 "__builtin_section_* requires a string literal for the section name");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
-    // the argument is emitted for its EFFECTS, as cc1 does (`rcall _side` before the mov for
-    // `(side(), ".text")`); the name was read from what it folds to. Mutant MT5.
-    (void)EmitScalarExpr(E->getArg(0));
+    // the argument's EFFECTS are emitted, as cc1 does (`rcall _side` before the mov for
+    // `(side(), ".text")`); the name was read from what it folds to. ONLY effects: emitting a
+    // bare literal materialises its string as a dead `.const` object at -O0. Mutant MT5.
+    if (E->getArg(0)->HasSideEffects(getContext()))
+      (void)EmitScalarExpr(E->getArg(0));
     // Mutant MR2 makes section_end say `.sizeof.`.
     const char *Op = BuiltinID == DSPIC::BI__builtin_section_begin ? "startof"
                    : BuiltinID == DSPIC::BI__builtin_section_end   ? "endof"
@@ -342,9 +372,11 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
       CGM.Error(E->getArg(0)->getExprLoc(), "__builtin_vector_offset requires a string literal");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
-    // the argument is emitted for its EFFECTS, as cc1 does (`rcall _side` before the mov for
-    // `(side(), ".text")`); the name was read from what it folds to. Mutant MT5.
-    (void)EmitScalarExpr(E->getArg(0));
+    // the argument's EFFECTS are emitted, as cc1 does (`rcall _side` before the mov for
+    // `(side(), ".text")`); the name was read from what it folds to. ONLY effects: emitting a
+    // bare literal materialises its string as a dead `.const` object at -O0. Mutant MT5.
+    if (E->getArg(0)->HasSideEffects(getContext()))
+      (void)EmitScalarExpr(E->getArg(0));
     const TargetOptions &TO = getTarget().getTargetOpts();
     int Slot = clang::dspic::vectorSlot(TO.DFP, StringRef(TO.CPU).upper(), Name);
     return llvm::ConstantInt::get(Builder.getInt32Ty(), (uint64_t)(int64_t)Slot, /*isSigned=*/true);
