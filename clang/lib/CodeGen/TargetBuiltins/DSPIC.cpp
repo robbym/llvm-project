@@ -233,6 +233,12 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     // (1) it FOLDS to a global object -- `&x`, a cast, `&*&x`, `1 ? &x : &y`, `arr + 0`, a
     //     statement expression: the operator on THAT symbol, at every optimisation level.
     //     Mutant MT1 removes this arm.
+    // ⛔ THE ARGUMENT IS ALWAYS EMITTED, ONCE, FOR ITS EFFECTS. The first spelling of this arm took
+    // the evaluator's answer and never emitted the expression, so `__builtin_addr((side(), &x))`
+    // lost its call and `({ vol_g = 7; &x; })` its store -- a wrong-code regression a refutation
+    // pass found (cc1: `rcall _side ; mov #addr_lo(_x),w0`). The fold only chooses WHICH SYMBOL
+    // the operator names; when it fires, the emitted value is dead and folds away. Mutant MT5.
+    Value *Emitted = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
     Value *Ptr = nullptr;
     if (AddrThree && !IsLV) {
       Expr::EvalResult R;
@@ -259,7 +265,7 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
             Auto = VD->hasLocalStorage();
         Auto = Auto || isa<CompoundLiteralExpr>(Sub);
       }
-      Ptr = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
+      Ptr = Emitted;
       if (Auto && AddrThree && BuiltinID != DSPIC::BI__builtin_addr_high) {
         Value *V = Builder.CreatePtrToInt(Ptr, I16);
         return BuiltinID == DSPIC::BI__builtin_addr ? Builder.CreateZExt(V, I32) : V;
@@ -302,6 +308,9 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
                 "__builtin_section_* requires a string literal for the section name");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
+    // the argument is emitted for its EFFECTS, as cc1 does (`rcall _side` before the mov for
+    // `(side(), ".text")`); the name was read from what it folds to. Mutant MT5.
+    (void)EmitScalarExpr(E->getArg(0));
     // Mutant MR2 makes section_end say `.sizeof.`.
     const char *Op = BuiltinID == DSPIC::BI__builtin_section_begin ? "startof"
                    : BuiltinID == DSPIC::BI__builtin_section_end   ? "endof"
@@ -333,6 +342,9 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
       CGM.Error(E->getArg(0)->getExprLoc(), "__builtin_vector_offset requires a string literal");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
+    // the argument is emitted for its EFFECTS, as cc1 does (`rcall _side` before the mov for
+    // `(side(), ".text")`); the name was read from what it folds to. Mutant MT5.
+    (void)EmitScalarExpr(E->getArg(0));
     const TargetOptions &TO = getTarget().getTargetOpts();
     int Slot = clang::dspic::vectorSlot(TO.DFP, StringRef(TO.CPU).upper(), Name);
     return llvm::ConstantInt::get(Builder.getInt32Ty(), (uint64_t)(int64_t)Slot, /*isSigned=*/true);

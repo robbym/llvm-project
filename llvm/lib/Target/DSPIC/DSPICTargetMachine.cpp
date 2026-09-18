@@ -235,7 +235,8 @@ public:
     if (const auto *PV = dyn_cast<GlobalVariable>(GO);
         PV && GO->getAddressSpace() == 1 &&
         (PV->hasAttribute("dspic-address") || PV->hasAttribute("dspic-noload") ||
-         PV->hasAttribute("dspic-keep")))
+         PV->hasAttribute("dspic-keep") || PV->hasAttribute("dspic-page") ||
+         PV->hasAttribute("dspic-priority")))
       return getContext().getELFSection((Name + pic30Attrs(GO, Kind, "prog")).str(),
                                         ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     if (GO->getAddressSpace() == 1)
@@ -330,7 +331,10 @@ public:
     // assembler refuses two addresses under one section name. The attributes come from
     // pic30Attrs, so `noload`, `keep` and space(psv)'s `psv,page` survive. Mutant MP1.
     if (const auto *PV = dyn_cast<GlobalVariable>(GO);
-        PV && GO->getAddressSpace() == 1 && PV->hasAttribute("dspic-address"))
+        PV && GO->getAddressSpace() == 1 &&
+        (PV->hasAttribute("dspic-address") || PV->hasAttribute("dspic-noload") ||
+         PV->hasAttribute("dspic-keep") || PV->hasAttribute("dspic-page") ||
+         PV->hasAttribute("dspic-priority")))
       return getContext().getELFSection(
           (".prog." + GO->getName() + pic30Attrs(GO, Kind, "prog")).str(), ELF::SHT_PROGBITS,
           ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
