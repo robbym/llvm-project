@@ -128,11 +128,12 @@ BUILTIN(__builtin_ff1r_16, "UiUi", "nc")
 // The four that take an OBJECT are custom-typechecked ("t") for the reason session 121's nine are:
 // the argument is a pointer of ANY address space (addr_high exists for a `__prog__` object), and
 // the vendor's <builtins.h> declares them unprototyped. `Ui`/`ULi`, not `Us`, to merge with the
-// pack's uint16_t = unsigned int. The argument rules are cc1's (pic30.c:9987-10045), checked in
-// CGBuiltinDSPIC.cpp beside the lowering: `&VAR_DECL` exactly for the addr three, a pointer wider
-// than 16 bits for addr_high; dataflashoffset IS tbloffset (pic30.c:7521) and is checked no
-// further than tbloffset is. The four that take a STRING are ordinary prototyped builtins whose
-// types are the vendor header's own (uint32_t f(const char *); int32_t f(char *)).
+// pack's uint16_t = unsigned int. The argument rules are cc1's (pic30.c:9987-10045) and live in
+// Sema (SemaChecking.cpp, CheckDSPICBuiltinCall): after GCC's folds, `&VAR_DECL` exactly for the
+// addr three, a pointer wider than 16 bits for addr_high; dataflashoffset IS tbloffset
+// (pic30.c:7521) and is checked no further than tbloffset is. The four that take a STRING are
+// ordinary prototyped builtins whose types are the vendor header's own
+// (uint32_t f(const char *); int32_t f(char *)).
 BUILTIN(__builtin_addr,            "ULi", "nct")
 BUILTIN(__builtin_addr_low,        "Ui",  "nct")
 BUILTIN(__builtin_addr_high,       "Ui",  "nct")

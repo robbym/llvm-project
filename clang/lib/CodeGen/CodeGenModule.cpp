@@ -1168,6 +1168,40 @@ void CodeGenModule::Release() {
   EmitVTablesOpportunistically();
   applyGlobalValReplacements();
   applyReplacements();
+  // trellis session 122 (dsPIC ROW U): A REFERENCE TO A VENDOR BUILTIN THIS COMPILER LACKS MUST BE
+  // LOUD. Since the session-121 version mirror, <xc.h> opens the vendor's <builtins.h>, which
+  // DECLARES every vendor builtin -- so a call to one this compiler does not implement stopped
+  // being "use of unknown builtin" and became an ordinary external call (`bra ___builtin_divsd`),
+  // silent at -Wall, failing only at the link. `__builtin_` is the implementation's namespace, and
+  // no vendor library defines a symbol in it (40 archives, 0). The test is made HERE, on the
+  // finished module, because the property is "an undefined reference is EMITTED": a function
+  // defined LATER in the unit, an uncalled inline and dead code are all fine (cc1 compiles them),
+  // and an INDIRECT call is not -- the first landing tested `!isDefined()` at the call in Sema and
+  // got all four wrong. Mutants MU1' (isDeclaration), MU2' (the triple), MU3' (the whole check).
+  if (getTriple().getArch() == llvm::Triple::dspic)
+    for (llvm::Function &F : getModule()) {
+      if (!F.isDeclaration() || F.use_empty() || !F.getName().starts_with("__builtin_"))
+        continue;
+      SourceLocation Loc;
+      GlobalDecl GD;
+      if (lookupRepresentativeDecl(F.getName(), GD))
+        if (const auto *FD = dyn_cast_or_null<FunctionDecl>(GD.getDecl())) {
+          // An IMPLICIT declaration has already drawn clang's own "use of unknown builtin" -- a
+          // RECOVERABLE error, so CodeGen still runs and this check said it a second time. (The
+          // second landing's expectation retired mutant MU4 on the premise that an implicit
+          // declaration never reaches CodeGen; the comparer's U3 said otherwise. MU4 stands.)
+          if (FD->isImplicit())
+            continue;
+          auto It = DSPICBuiltinRefs.find(FD->getCanonicalDecl());
+          Loc = It != DSPICBuiltinRefs.end() ? It->second : FD->getLocation();
+        }
+      getDiags().Report(Loc, getDiags().getCustomDiagID(
+                                 DiagnosticsEngine::Error,
+                                 "'%0' is a vendor builtin this compiler does not implement: it is "
+                                 "only DECLARED (the vendor's <builtins.h> declares every one), so "
+                                 "this reference would fail at link as an undefined '_%0'"))
+          << F.getName();
+    }
   emitMultiVersionFunctions();
   emitPFPFieldsWithEvaluatedOffset();
   emitGlobalDeleteForwardingBodies();

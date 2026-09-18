@@ -25,18 +25,33 @@ using namespace clang;
 using namespace CodeGen;
 using namespace llvm;
 
+// trellis session 122: the string argument of section_* / vector_offset, as cc1 reads it -- the
+// literal the argument FOLDS to (a cast, `&*`, `+0`, a constant ternary and `&"lit"[k]` all fold to
+// it; Sema has already refused everything else), as BYTES UP TO THE FIRST NUL whatever the
+// literal's width (measured: L".text" is `.startof.(.)`, "x\0y" is `x`). Mutant MS4 drops the
+// truncation.
+static bool dspicLiteralArg(CodeGenFunction &CGF, const Expr *Arg, std::string &Out) {
+  Expr::EvalResult R;
+  if (!Arg->EvaluateAsRValue(R, CGF.getContext()) || !R.Val.isLValue())
+    return false;
+  const Expr *B = R.Val.getLValueBase().dyn_cast<const Expr *>();
+  const auto *SL = B ? dyn_cast<clang::StringLiteral>(B->IgnoreParens()) : nullptr;
+  if (!SL)
+    return false;
+  StringRef Bytes = SL->getBytes();
+  Out = Bytes.substr(0, Bytes.find('\0')).str();
+  return true;
+}
+
 Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
                                              const CallExpr *E) {
-  // trellis session 122: every custom-typechecked dsPIC builtin takes exactly ONE argument, and
-  // custom typechecking means Sema counted nothing. Without this, `__builtin_tblpage()` asserted
-  // in getArg(0) (session 121's nine) and a second argument was silently dropped. cc1's sentences.
-  if (getContext().BuiltinInfo.hasCustomTypechecking(BuiltinID) && E->getNumArgs() != 1) {
-    CGM.Error(E->getExprLoc(),
-              (llvm::Twine(E->getNumArgs() < 1 ? "too few" : "too many") +
-               " arguments to function '" + getContext().BuiltinInfo.getName(BuiltinID) + "'")
-                  .str());
-    return llvm::PoisonValue::get(ConvertType(E->getType()));
-  }
+  // trellis session 122: the UNPROTOTYPED vendor builtins (the thirteen custom-typechecked ones)
+  // take one argument, and cc1 ACCEPTS more: it evaluates the extras for their side effects, in
+  // order and before the builtin's own instruction (`rcall _side ; mov #tblpage(_cst),w0`), and
+  // drops their values. Sema has warned and has refused the no-argument call. Mutant MS3.
+  if (getContext().BuiltinInfo.hasCustomTypechecking(BuiltinID))
+    for (unsigned I = 1, N = E->getNumArgs(); I < N; ++I)
+      EmitIgnoredExpr(E->getArg(I));
   switch (BuiltinID) {
   default:
     return nullptr;
@@ -201,48 +216,26 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
         CGM.getIntrinsic(L ? Intrinsic::dspic_ff1l : Intrinsic::dspic_ff1r), X);
   }
   // ── trellis session 122: the eight RELOCATION builtins ──────────────────────────────────────
+  // The ARGUMENT RULES are Sema's (SemaChecking.cpp CheckDSPICBuiltinCall). What is left here is
+  // one question: is the address a link-time constant, or the run-time address of an automatic?
   case DSPIC::BI__builtin_addr:
   case DSPIC::BI__builtin_addr_low:
   case DSPIC::BI__builtin_addr_high:
   case DSPIC::BI__builtin_dataflashoffset: {
-    const char *Name = BuiltinID == DSPIC::BI__builtin_addr        ? "__builtin_addr"
-                     : BuiltinID == DSPIC::BI__builtin_addr_low    ? "__builtin_addr_low"
-                     : BuiltinID == DSPIC::BI__builtin_addr_high   ? "__builtin_addr_high"
-                     :                                               "__builtin_dataflashoffset";
-    // (the argument COUNT is checked once, at the head of this function, for every
-    // custom-typechecked builtin)
     const Expr *A = E->getArg(0);
-    bool IsArray = A->getType()->isArrayType() || A->getType()->isFunctionType();
-    if (BuiltinID != DSPIC::BI__builtin_dataflashoffset) {
-      // pic30.c:10021-10035: the argument must be ADDR_EXPR of a VAR_DECL -- `&obj` or an array's
-      // name. `&arr[3]`, `&s.b`, a function and a runtime pointer are each refused, in one sentence.
-      const Expr *S = A->IgnoreParens();
-      if (const auto *UO = dyn_cast<UnaryOperator>(S))
-        S = UO->getOpcode() == UO_AddrOf ? UO->getSubExpr()->IgnoreParens() : nullptr;
-      else if (!S->getType()->isArrayType())
-        S = nullptr;
-      const auto *DRE = S ? dyn_cast<DeclRefExpr>(S) : nullptr;
-      const auto *VD = DRE ? dyn_cast<VarDecl>(DRE->getDecl()) : nullptr;
-      if (!VD || !VD->hasGlobalStorage()) {
-        CGM.Error(A->getExprLoc(), (llvm::Twine("Argument to ") + Name +
-                                    " is not the address of an object not in automatic scope; "
-                                    "the object must not be qualified with any form of index").str());
-        return llvm::PoisonValue::get(ConvertType(E->getType()));
-      }
-      // pic30.c:10039: addr_high needs a pointer wider than a word -- a `__prog__`, `__eds__` or
-      // `__pack_upper_byte` object. Mutant MR4 removes this test.
-      if (BuiltinID == DSPIC::BI__builtin_addr_high &&
-          getTarget().getPointerWidth(VD->getType().getAddressSpace()) <= 16) {
-        CGM.Error(A->getExprLoc(), (llvm::Twine("Argument to ") + Name +
-                                    " does not have an address high.").str());
-        return llvm::PoisonValue::get(ConvertType(E->getType()));
-      }
-    }
-    Value *Ptr = IsArray ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
+    bool IsLV = A->getType()->isArrayType() || A->getType()->isFunctionType();
+    Value *Ptr = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
     llvm::Type *I16 = Builder.getInt16Ty();
+    llvm::Type *I32 = Builder.getInt32Ty();
+    if (!isa<llvm::Constant>(Ptr) && BuiltinID != DSPIC::BI__builtin_dataflashoffset) {
+      // An AUTOMATIC object: cc1 accepts `&loc` and returns the frame address, zero-extended
+      // (`dec2.w w15,w2 ; mov w2,w0 ; clr w1`). addr_high never arrives here -- a 16-bit pointer
+      // "does not have an address high", Sema's sentence and cc1's.
+      Value *V = Builder.CreatePtrToInt(Ptr, I16);
+      return BuiltinID == DSPIC::BI__builtin_addr ? Builder.CreateZExt(V, I32) : V;
+    }
     if (BuiltinID == DSPIC::BI__builtin_addr) {
       // cc1: `mov #addr_lo(_x),w0 ; mov #addr_hi(_x),w1`. Mutant MR1 exchanges the two operators.
-      llvm::Type *I32 = Builder.getInt32Ty();
       llvm::StructType *STy = llvm::StructType::get(I16, I16);
       llvm::FunctionType *FT = llvm::FunctionType::get(STy, {Ptr->getType()}, false);
       llvm::InlineAsm *IA = llvm::InlineAsm::get(
@@ -266,15 +259,10 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
   case DSPIC::BI__builtin_section_size: {
     // pic30.c:9883-9925 and the three section_*_16 insns (pic30-classic.md:50765): the NAME is
     // spliced into `mov.w #.startof.(name),w0 ; mov.w #.startof_hi.(name),w1`, the LINKER's
-    // operators. cc1 accepts a string literal, or `&"lit"[k]` -- and IGNORES k (it takes the
-    // literal whole). Transcribed because cc1 accepts it; `"lit" + 1` and everything else is refused.
-    const Expr *A = E->getArg(0)->IgnoreParenImpCasts();
-    const auto *SL = dyn_cast<StringLiteral>(A);
-    if (!SL)
-      if (const auto *UO = dyn_cast<UnaryOperator>(A); UO && UO->getOpcode() == UO_AddrOf)
-        if (const auto *ASE = dyn_cast<ArraySubscriptExpr>(UO->getSubExpr()->IgnoreParens()))
-          SL = dyn_cast<StringLiteral>(ASE->getBase()->IgnoreParenImpCasts());
-    if (!SL || !SL->isOrdinary()) {
+    // operators. `&"lit"[k]` names the WHOLE literal -- cc1 ignores k, and so does the base of the
+    // folded lvalue.
+    std::string Name;
+    if (!dspicLiteralArg(*this, E->getArg(0), Name)) {   // Sema refuses this first; defensive
       CGM.Error(E->getArg(0)->getExprLoc(),
                 "__builtin_section_* requires a string literal for the section name");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
@@ -284,7 +272,7 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
                    : BuiltinID == DSPIC::BI__builtin_section_end   ? "endof"
                    :                                                 "sizeof";
     std::string Sec;
-    for (char C : SL->getString()) {   // `$` is the inline-asm operand sigil
+    for (char C : Name) {   // `$` is the inline-asm operand sigil
       if (C == '$') Sec.push_back('$');
       Sec.push_back(C);
     }
@@ -301,17 +289,17 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
     return Builder.CreateOr(Builder.CreateShl(Hi, llvm::ConstantInt::get(I32, 16)), Lo);
   }
   case DSPIC::BI__builtin_vector_offset: {
-    // pic30.c:10771-10795: a string literal ONLY (`&"lit"[0]`, which section_* accepts, is refused
-    // here), and the value is a CONSTANT -- the slot of the device's vector record of that name,
-    // -1 when the device has none or there is no device. The device is the one -mcpu / -mdfp named
-    // (session 119's channel); the reader is the front end's own (clang::dspic, DSPICDevice.h).
-    const auto *SL = dyn_cast<StringLiteral>(E->getArg(0)->IgnoreParenImpCasts());
-    if (!SL || !SL->isOrdinary()) {
+    // pic30.c:10771-10795: the value is a CONSTANT -- the slot of the device's vector record of
+    // that name, -1 when the device has none or there is no device. The device is the one
+    // -mcpu / -mdfp named (session 119's channel); the reader is the front end's own
+    // (clang::dspic, DSPICDevice.h).
+    std::string Name;
+    if (!dspicLiteralArg(*this, E->getArg(0), Name)) {   // Sema refuses this first; defensive
       CGM.Error(E->getArg(0)->getExprLoc(), "__builtin_vector_offset requires a string literal");
       return llvm::PoisonValue::get(ConvertType(E->getType()));
     }
     const TargetOptions &TO = getTarget().getTargetOpts();
-    int Slot = clang::dspic::vectorSlot(TO.DFP, StringRef(TO.CPU).upper(), SL->getString());
+    int Slot = clang::dspic::vectorSlot(TO.DFP, StringRef(TO.CPU).upper(), Name);
     return llvm::ConstantInt::get(Builder.getInt32Ty(), (uint64_t)(int64_t)Slot, /*isSigned=*/true);
   }
   case DSPIC::BI__builtin_fbcl_16: {

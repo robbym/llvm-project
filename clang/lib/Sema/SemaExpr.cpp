@@ -7143,29 +7143,6 @@ ExprResult Sema::BuildResolvedCallExpr(Expr *Fn, NamedDecl *NDecl,
   FunctionDecl *FDecl = dyn_cast_or_null<FunctionDecl>(NDecl);
   unsigned BuiltinID = (FDecl ? FDecl->getBuiltinID() : 0);
 
-  // trellis session 122: A CALL TO A VENDOR BUILTIN THIS COMPILER LACKS MUST BE LOUD. Since the
-  // session-121 version mirror, <xc.h> opens the vendor's <builtins.h>, which DECLARES every
-  // vendor builtin -- so a call to one this compiler does not implement stopped being "use of
-  // unknown builtin" and became an ordinary call to a declared external (`bra ___builtin_divsd`),
-  // silent at -Wall, failing only at the link. `__builtin_` is the implementation's namespace; a
-  // function of that name with no body in the unit is nobody's to call. The shim's static inlines
-  // (dspic-builtins.h) HAVE a body and pass. Mutants MU1 (the body test), MU2 (the triple), MU3.
-  // An IMPLICIT declaration is exempt: with no <xc.h> clang has already said "use of unknown
-  // builtin" for it, and the first build of this check said so a SECOND time (RELOP.expected
-  // .first U3 predicted one error and the comparer counted two).
-  if (FDecl && !BuiltinID && FDecl->getIdentifier() && !FDecl->isImplicit() &&
-      Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic &&
-      FDecl->getName().starts_with("__builtin_") && !FDecl->isDefined()) {
-    Diag(Fn->getExprLoc(),
-         Diags.getCustomDiagID(
-             DiagnosticsEngine::Error,
-             "call to '%0', a vendor builtin this compiler does not implement: it is only "
-             "DECLARED (the vendor's <builtins.h> declares every one), so the call would fail at "
-             "link as an undefined '_%0'"))
-        << FDecl->getName();
-    return ExprError();
-  }
-
   auto IsSJLJ = [&] {
     switch (BuiltinID) {
     case Builtin::BI__builtin_longjmp:

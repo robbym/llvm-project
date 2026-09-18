@@ -6673,6 +6673,10 @@ CGCallee CodeGenFunction::EmitCallee(const Expr *E) {
   // Resolve direct calls.
   } else if (auto DRE = dyn_cast<DeclRefExpr>(E)) {
     if (auto FD = dyn_cast<FunctionDecl>(DRE->getDecl())) {
+      // trellis session 122 (dsPIC ROW U): remember where a non-builtin `__builtin_*` is called.
+      if (!FD->getBuiltinID() && FD->getIdentifier() &&
+          FD->getName().starts_with("__builtin_"))
+        CGM.DSPICBuiltinRefs.insert({FD->getCanonicalDecl(), DRE->getLocation()});
       return EmitDirectCallee(*this, getGlobalDeclForDirectCall(FD));
     }
   } else if (auto ME = dyn_cast<MemberExpr>(E)) {
