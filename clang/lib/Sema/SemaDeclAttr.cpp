@@ -6709,6 +6709,19 @@ static void handleDSPICAddressAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   uint32_t Addr = 0;
   if (!S.checkUInt32Argument(AL, AL.getArgAsExpr(0), Addr))
     return;
+  // trellis session 122: an ODD address. cc1 says two things and IGNORES the attribute -- of a
+  // `__prog__` object, a data int, a data char and a function alike (progaddr/ask.txt b5-b7, f8):
+  // the object is placed as if it had no address(). Ours passed the odd number to the assembler,
+  // which refuses it ("section address must be even") -- a build the vendor compiles. Mutant MP3.
+  if (Addr & 1) {
+    S.Diag(AL.getLoc(), S.Diags.getCustomDiagID(DiagnosticsEngine::Warning,
+                                                 "invalid address argument for %0"))
+        << cast<NamedDecl>(D);
+    S.Diag(AL.getLoc(),
+           S.Diags.getCustomDiagID(DiagnosticsEngine::Warning,
+                                   "odd addresses are not permitted, ignoring attribute"));
+    return;
+  }
   D->addAttr(::new (S.Context) DSPICAddressAttr(S.Context, AL, Addr));
 }
 

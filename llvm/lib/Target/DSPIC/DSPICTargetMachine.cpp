@@ -115,7 +115,11 @@ public:
     return Buf;
   }
 
-  static std::string pic30Attrs(const GlobalObject *GO, SectionKind Kind) {
+  // trellis session 122: ProgDefault -- the space to assume when the object names none. A `__prog__`
+  // object lives in program memory whether or not it says space(prog), and both of its section
+  // arms spell their attributes through here so that noload / keep / psv,page are not lost.
+  static std::string pic30Attrs(const GlobalObject *GO, SectionKind Kind,
+                                StringRef ProgDefault = StringRef()) {
     if (const auto *F = dyn_cast<Function>(GO)) {
       // trellis session 109: the function placement attributes, cc1's forms (fn.cc1.s):
       // `address(4096),code` / `priority(0x0003),keep,code` / `code,noload` / `code,keep`.
@@ -136,7 +140,7 @@ public:
     StringRef Space =
         GV && GV->hasAttribute("dspic-space")
             ? GV->getAttribute("dspic-space").getValueAsString()
-            : StringRef();
+            : ProgDefault;
     std::string S;
     // cc1 puts address() FIRST, ahead of the space attribute, and in decimal.
     if (GV && GV->hasAttribute("dspic-address"))
@@ -224,6 +228,16 @@ public:
     StringRef Name = GO->getSection();
     // L1e prog-space: a program-memory global (addrspace 1) goes in a CODE section (cc1's `,code`)
     // so it lands in program memory and the assembler accepts tbloffset on its symbol.
+    // trellis session 122: ...and when it also carries address() / noload / keep, the section line
+    // must say so -- cc1: `mysec,address(75520),code`. This arm returned the bare name, so the
+    // address was dropped without a word (the same defect as the default-section arm below,
+    // behind the same `!= 1` guard; a refutation pass found the second copy). Mutant MP2.
+    if (const auto *PV = dyn_cast<GlobalVariable>(GO);
+        PV && GO->getAddressSpace() == 1 &&
+        (PV->hasAttribute("dspic-address") || PV->hasAttribute("dspic-noload") ||
+         PV->hasAttribute("dspic-keep")))
+      return getContext().getELFSection((Name + pic30Attrs(GO, Kind, "prog")).str(),
+                                        ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     if (GO->getAddressSpace() == 1)
       return getContext().getELFSection(Name, ELF::SHT_PROGBITS,
                                         ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
@@ -313,14 +327,13 @@ public:
     // address() never read -- dropped without a diagnostic, where cc1 writes
     // `*_<hash>,address(N),code` (prints/l1f/frontend/progaddr/ask.txt). Found by EXECUTION
     // against the vendor's image of the same source (relopexec X11-X13). A section PER OBJECT: the
-    // assembler refuses two addresses under one section name. Mutant MP1 removes this arm.
+    // assembler refuses two addresses under one section name. The attributes come from
+    // pic30Attrs, so `noload`, `keep` and space(psv)'s `psv,page` survive. Mutant MP1.
     if (const auto *PV = dyn_cast<GlobalVariable>(GO);
         PV && GO->getAddressSpace() == 1 && PV->hasAttribute("dspic-address"))
       return getContext().getELFSection(
-          (".prog." + GO->getName() + ",address(" +
-           PV->getAttribute("dspic-address").getValueAsString() + "),code")
-              .str(),
-          ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+          (".prog." + GO->getName() + pic30Attrs(GO, Kind, "prog")).str(), ELF::SHT_PROGBITS,
+          ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     // L1e prog-space: an addrspace(1) global with no explicit section still goes to program memory.
     if (GO->getAddressSpace() == 1 && !isa<Function>(GO))
       return getContext().getELFSection(".const", ELF::SHT_PROGBITS,
