@@ -316,6 +316,60 @@ struct CfgWord {
 // masked in. An unknown setting or value is a fatal error naming the pragma's file:line -- cc1
 // refuses those too, and silence was the defect this row repairs.
 void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
+  // trellis session 122 (ROW U): A REFERENCE TO A VENDOR BUILTIN THIS COMPILER DOES NOT IMPLEMENT.
+  // Since the session-121 version mirror, <xc.h> opens the vendor's <builtins.h>, which DECLARES
+  // every vendor builtin -- so a call to one this compiler lacks stopped being clang's "use of
+  // unknown builtin" and became an ordinary external call (`bra ___builtin_divsd`), silent at
+  // -Wall, failing only at the link. The test is made HERE because the property is "an undefined
+  // reference is EMITTED": this is the OPTIMISED module, so an optimiser-dead call, an uncalled
+  // inline and a function defined later in the unit are all fine, as they are for the vendor's
+  // toolchain (the first landing tested at the call in Sema, the second on clang's
+  // pre-optimisation module; both refused programs the vendor links). A WEAK declaration is the
+  // program's own guard. And only a name THE VENDOR REGISTERS (-mprint-builtins, identical over
+  // eight installed 16-bit device families; trc steps/frontend/vendor-names.sh) is refused: a
+  // user's own `__builtin_mine`, defined in another unit, is the linker's business and links.
+  // Mutants MU1' (isDeclaration), MU5 (weak), MU6 (the vendor table), MU3' (the whole check).
+  {
+    static const char *const VendorBuiltins[] = {
+        "ACCH", "ACCL", "ACCU", "add", "add_16", "addab", "addr", "addr_high", "addr_low",
+        "ashiftrt_32_16", "bitcopy", "btg", "btg_16", "btg_32", "btg_8", "clr", "clr_prefetch",
+        "clrwdt", "dataflashoffset", "disable_interrupts", "disi", "divf", "divmodsd",
+        "divmodud", "divsd", "divud", "dmaoffset", "dmapage", "ed", "edac", "edsoffset",
+        "edspage", "enable_interrupts", "fbcl", "fbcl_16", "ff1l", "ff1l_16", "ff1r",
+        "ff1r_16", "flim", "flim_16", "flim_excess", "flim_excess_16", "flimv_excess",
+        "flimv_excess_16", "get_isr_state", "lac", "lac_16", "lac_32", "lacd",
+        "lshiftrt_32_16", "mac", "mac_16", "max", "max_excess", "maxv_excess", "min",
+        "min_excess", "minv_excess", "modsd", "modud", "movsac", "mpy", "mpy_16", "mpyn",
+        "mpyn_16", "msc", "msc_16", "mulss", "mulsu", "mulus", "muluu", "nop", "psvoffset",
+        "psvpage", "pwrsav", "readsfr", "repeat_nop", "sac", "sac_16", "sac_32", "sacd",
+        "sacr", "sacr_16", "sat_abs_s16", "sat_add_s16", "sat_sub_s16", "section_begin",
+        "section_end", "section_size", "set_isr_state", "sftac", "software_breakpoint",
+        "software_reset", "subab", "swap", "swap_16", "swap_8", "swap_byte", "tbladdress",
+        "tbloffset", "tblpage", "tblrdh", "tblrdhb", "tblrdl", "tblrdlb", "tblwth", "tblwthb",
+        "tblwtl", "tblwtlb", "vector_offset", "write_CRYOTP", "write_DATAFLASH",
+        "write_DATAFLASH_secure", "write_DISICNT", "write_NVM", "write_NVM_secure",
+        "write_OSCCONH", "write_OSCCONL", "write_PWMSFR", "write_RPCON", "write_RTCC_WRLOCK",
+        "write_RTCWEN", "writesfr",
+    };
+    for (const Function &F : M) {
+      if (!F.isDeclaration() || F.use_empty() || F.hasExternalWeakLinkage())
+        continue;
+      StringRef N = F.getName();
+      if (!N.consume_front("__builtin_") ||
+          llvm::none_of(VendorBuiltins, [&](const char *V) { return N == V; }))
+        continue;
+      std::string At = F.hasFnAttribute("dspic-builtin-ref")
+                           ? (" (called at " +
+                              F.getFnAttribute("dspic-builtin-ref").getValueAsString() + ")")
+                                 .str()
+                           : std::string();
+      M.getContext().emitError(
+          "'" + F.getName() + "'" + At +
+          " is a vendor builtin this compiler does not implement: it is only DECLARED (the "
+          "vendor's <builtins.h> declares every one), so this reference would fail at link as an "
+          "undefined '_" + F.getName() + "'");
+    }
+  }
   // trellis session 109: `sfr(ADDR)` on an extern declaration is an ABSOLUTE symbol -- cc1
   // (var.cc1.s): `.equ _v_sfr_at,512`. A declaration emits nothing else, so this is where it goes.
   for (const GlobalVariable &GV : M.globals())

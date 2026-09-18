@@ -6673,11 +6673,25 @@ CGCallee CodeGenFunction::EmitCallee(const Expr *E) {
   // Resolve direct calls.
   } else if (auto DRE = dyn_cast<DeclRefExpr>(E)) {
     if (auto FD = dyn_cast<FunctionDecl>(DRE->getDecl())) {
-      // trellis session 122 (dsPIC ROW U): remember where a non-builtin `__builtin_*` is called.
-      if (!FD->getBuiltinID() && FD->getIdentifier() &&
-          FD->getName().starts_with("__builtin_"))
-        CGM.DSPICBuiltinRefs.insert({FD->getCanonicalDecl(), DRE->getLocation()});
-      return EmitDirectCallee(*this, getGlobalDeclForDirectCall(FD));
+      CGCallee DirectCallee = EmitDirectCallee(*this, getGlobalDeclForDirectCall(FD));
+      // trellis session 122 (dsPIC ROW U): a call to a `__builtin_*` function that is NOT a builtin
+      // of this compiler and has no body here. The backend decides, on OPTIMISED code, whether the
+      // reference survives and whether the vendor registers that name (DSPICAsmPrinter,
+      // emitEndOfAsmFile); all it lacks there is WHERE the call was, so the declaration carries it.
+      if (getTarget().getTriple().getArch() == llvm::Triple::dspic && !FD->getBuiltinID() &&
+          FD->getIdentifier() && FD->getName().starts_with("__builtin_") && !FD->isDefined() &&
+          DirectCallee.isOrdinary())
+        if (auto *Fn = dyn_cast<llvm::Function>(
+                DirectCallee.getFunctionPointer()->stripPointerCasts());
+            Fn && !Fn->hasFnAttribute("dspic-builtin-ref")) {
+          PresumedLoc PL = getContext().getSourceManager().getPresumedLoc(DRE->getLocation());
+          if (PL.isValid())
+            Fn->addFnAttr("dspic-builtin-ref", (llvm::Twine(PL.getFilename()) + ":" +
+                                                llvm::Twine(PL.getLine()) + ":" +
+                                                llvm::Twine(PL.getColumn()))
+                                                   .str());
+        }
+      return DirectCallee;
     }
   } else if (auto ME = dyn_cast<MemberExpr>(E)) {
     if (auto FD = dyn_cast<FunctionDecl>(ME->getMemberDecl())) {

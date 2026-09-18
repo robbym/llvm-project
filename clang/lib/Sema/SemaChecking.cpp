@@ -2271,15 +2271,17 @@ CheckBuiltinTargetInSupported(Sema &S, CallExpr *TheCall,
 static void CheckNonNullArgument(Sema &S, const Expr *ArgExpr,
                                  SourceLocation CallSiteLoc);
 
-// ── trellis session 122: THE dsPIC VENDOR BUILTINS' ARGUMENT RULES ─────────────────────────────
-// cc1's, asked cell by cell (trc steps/frontend/addrop-ask.sh, relop-ask.sh) and read at
+// ── trellis session 122: THE dsPIC VENDOR BUILTINS' ARGUMENT RULES, the part that is Sema's ────
+// cc1's rules were asked cell by cell (trc steps/frontend/addrop-ask.sh, relop-ask.sh) and read at
 // pic30.c:9987-10045 (addr / addr_low / addr_high), :9883-9925 (section_*), :10771-10795
-// (vector_offset). ⛔ cc1 tests the FOLDED tree: GCC has already removed parentheses, no-op
-// pointer casts, `&*`, `+0` and constant ternaries before `TREE_CODE(arg0) == ADDR_EXPR` runs. The
-// first landing of this row walked clang's UNFOLDED syntax and refused every one of those, which
-// the vendor compiles. So each rule is syntactic first and then asks clang's constant evaluator
-// the same question GCC's folder answered. They are HERE, not in CodeGen, so that -fsyntax-only,
-// dead code and an unevaluated operand see them and a unit reports every bad call, not the first.
+// (vector_offset). ⛔ cc1 applies them at EXPAND, AFTER GIMPLE OPTIMISATION, so what it accepts
+// depends on the OPTIMISATION LEVEL: a `static inline` wrapper or a local `int *p = &x;` is
+// accepted at -Os and refused at -O0 (relop/ask.txt, the level table). No rule in Sema can say
+// that, and this row got it wrong twice -- first by walking clang's unfolded syntax in CodeGen,
+// then by moving the whole rule here "after GCC's folds". So Sema refuses ONLY what no
+// optimisation can rescue and cc1 refuses at every level; everything else is decided where cc1
+// decides it, after the optimiser (CGBuiltin hands the run-time pointer to an inline-asm "i"
+// operand, which the backend resolves -- or refuses -- on optimised code).
 #include "clang/Basic/TargetBuiltins.h" // DSPIC::BI__builtin_* (here, so this block is one edit)
 static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall) {
   ASTContext &Ctx = S.Context;
@@ -2288,23 +2290,57 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
     S.Diag(L, S.Diags.getCustomDiagID(DiagnosticsEngine::Error, "%0")) << M;
     return true;
   };
-  // The UNPROTOTYPED vendor builtins (custom-typechecked here, so Sema counted nothing). cc1 says
-  // "too few arguments to function" with none -- for ten of the thirteen; on the addr three it
-  // takes an internal compiler error -- and ACCEPTS more than one: the extras are evaluated and
-  // their values dropped (CGBuiltin does that). Session 121's nine ASSERTED in CodeGen on a call
-  // with no argument. Mutant MR6' removes the too-few test.
+  const bool AddrThree = BuiltinID == DSPIC::BI__builtin_addr ||
+                         BuiltinID == DSPIC::BI__builtin_addr_low ||
+                         BuiltinID == DSPIC::BI__builtin_addr_high;
+  // cc1 spells the addr three's sentence `Argument to __builtin_addr is ...` and the other ten's
+  // `Argument to __builtin_tblpage() is ...`.
+  const std::string NotAddr = "Argument to " + Name + (AddrThree ? "" : "()") +
+                              " is not the address of an object";
+  // The UNPROTOTYPED vendor builtins (custom-typechecked here, so Sema counted and converted
+  // nothing). cc1 says "too few arguments to function" with none -- for ten of the thirteen; on
+  // the addr three it takes an internal compiler error -- and ACCEPTS more than one: the extras
+  // are evaluated, a volatile one READ, and their values dropped. Session 121's nine ASSERTED in
+  // CodeGen on a call with no argument and on a struct argument. Mutant MR6' removes the too-few
+  // test, MT2 the conversion that makes a volatile extra argument a read.
   if (Ctx.BuiltinInfo.hasCustomTypechecking(BuiltinID)) {
     if (TheCall->getNumArgs() < 1)
       return Err(TheCall->getRParenLoc(), "too few arguments to function '" + Name + "'");
+    for (unsigned I = 1, N = TheCall->getNumArgs(); I < N; ++I) {
+      ExprResult R = S.DefaultFunctionArrayLvalueConversion(TheCall->getArg(I));
+      if (R.isInvalid())
+        return true;
+      TheCall->setArg(I, R.get());
+    }
     if (TheCall->getNumArgs() > 1)
       S.Diag(TheCall->getArg(1)->getExprLoc(),
              S.Diags.getCustomDiagID(DiagnosticsEngine::Warning,
                                      "'%0' takes one argument; the extra one is evaluated and its "
                                      "value ignored, as the vendor compiler does"))
           << Name;
+    // An ADDRESS: a pointer, an array or a function. A struct value and an integer VALUE
+    // (`cst_arr[1]`) are refused by cc1 at every level; the second landing turned the integer into
+    // `tblpage(2)` and every landing CRASHED on the struct (session 121's nine included).
+    // ⚠ ONE INTEGER IS AN ADDRESS, and it is measured, not reasoned (relop/ask.txt, the fold
+    // table): the ten RTL-checked builtins ACCEPT `(unsigned)&cst` -- a cast to an integer of the
+    // pointer's own width is a no-op by the time cc1 looks -- and refuse `(unsigned long)&cst`;
+    // the addr three check the TREE for ADDR_EXPR and refuse both. Mutant MT3 removes this test.
+    const Expr *Arg0 = TheCall->getArg(0);
+    QualType T0 = Arg0->getType();
+    bool IsAddr = T0->isPointerType() || T0->isArrayType() || T0->isFunctionType();
+    if (!IsAddr && !AddrThree && T0->isIntegerType()) {
+      QualType U = Arg0->IgnoreParenCasts()->getType();
+      IsAddr = (U->isPointerType() || U->isArrayType() || U->isFunctionType()) &&
+               Ctx.getTypeSize(T0) ==
+                   Ctx.getTargetInfo().getPointerWidth(
+                       (U->isPointerType() ? U->getPointeeType() : Ctx.getBaseElementType(U))
+                           .getAddressSpace());
+    }
+    if (!IsAddr)
+      return Err(Arg0->getExprLoc(), NotAddr + " (it has type '" + T0.getAsString() + "')");
   }
-  // parentheses and NO-OP casts. A cast that changes the ADDRESS SPACE is not a no-op and stays:
-  // cc1 refuses `__builtin_addr_high((void *)&prog_g)`.
+  // parentheses and the casts that change nothing: decay, lvalue conversion, and a pointer cast
+  // that keeps the ADDRESS SPACE (cc1 refuses `__builtin_addr_high((void *)&prog_g)`).
   auto Strip = [](const Expr *E) {
     for (;;) {
       E = E->IgnoreParens();
@@ -2312,8 +2348,12 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
       if (!CE)
         return E;
       QualType F = CE->getSubExpr()->getType(), T = CE->getType();
-      if (F->isPointerType() && T->isPointerType() &&
-          F->getPointeeType().getAddressSpace() != T->getPointeeType().getAddressSpace())
+      bool Same = CE->getCastKind() == CK_ArrayToPointerDecay ||
+                  CE->getCastKind() == CK_FunctionToPointerDecay ||
+                  CE->getCastKind() == CK_NoOp || CE->getCastKind() == CK_LValueToRValue ||
+                  (F->isPointerType() && T->isPointerType() &&
+                   F->getPointeeType().getAddressSpace() == T->getPointeeType().getAddressSpace());
+      if (!Same)
         return E;
       E = CE->getSubExpr();
     }
@@ -2327,6 +2367,10 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
   };
   // the literal a string argument folds to, or null. `&"lit"[k]` is cc1's ARRAY_REF arm, which
   // section_* has (and ignores k) and vector_offset has not.
+  // ⚠ COSTED: the STRING four cannot wait for the optimiser -- the name is spliced into the asm
+  // text at IR generation -- so `const char *lp = ".text"` and a string wrapper are refused at
+  // every level, where cc1 accepts them at -Os. Closing it needs an intrinsic that carries the
+  // string to the backend; no customer.
   auto Literal = [&](const Expr *Arg, bool AllowSubscript) -> const StringLiteral * {
     const Expr *A = Strip(Arg);
     if (const auto *SL = dyn_cast<StringLiteral>(A))
@@ -2346,38 +2390,39 @@ static bool CheckDSPICBuiltinCall(Sema &S, unsigned BuiltinID, CallExpr *TheCall
   case DSPIC::BI__builtin_addr:
   case DSPIC::BI__builtin_addr_low:
   case DSPIC::BI__builtin_addr_high: {
-    // ADDR_EXPR of a VAR_DECL: `&obj`, an array's name, `&(T){...}` -- of ANY storage. cc1's own
-    // sentence says "not in automatic scope" and cc1 accepts an automatic (it returns the frame
-    // address); the sentence is transcribed, the BEHAVIOUR is what is matched. A parameter is a
-    // PARM_DECL, not a VAR_DECL, and is refused (relop/ask.txt, the fold table's `&parm`).
+    // VISIBLY not `&object`, whatever the optimiser does: an indexed or member address, a function,
+    // a parameter's address (a PARM_DECL is not a VAR_DECL), and an EXTERNALLY visible non-const
+    // pointer variable (nothing may assume its value). cc1's sentence says "not in automatic
+    // scope" and cc1 ACCEPTS an automatic (it returns the frame address); the sentence is
+    // transcribed, the behaviour is matched. Mutant MT4 removes this block.
     const Expr *A = Strip(TheCall->getArg(0));
-    auto IsVar = [](const ValueDecl *D) { return isa<VarDecl>(D) && !isa<ParmVarDecl>(D); };
-    QualType ObjTy;
+    bool Bad = false;
     if (const auto *UO = dyn_cast<UnaryOperator>(A); UO && UO->getOpcode() == UO_AddrOf) {
       const Expr *Sub = UO->getSubExpr()->IgnoreParens();
-      if (const auto *DRE = dyn_cast<DeclRefExpr>(Sub); DRE && IsVar(DRE->getDecl()))
-        ObjTy = DRE->getType();
-      else if (isa<CompoundLiteralExpr>(Sub))
-        ObjTy = Sub->getType();
-    } else if (const auto *DRE = dyn_cast<DeclRefExpr>(A);
-               DRE && A->getType()->isArrayType() && IsVar(DRE->getDecl())) {
-      ObjTy = A->getType();
+      Bad = isa<ArraySubscriptExpr>(Sub) || isa<MemberExpr>(Sub);
+      if (const auto *DRE = dyn_cast<DeclRefExpr>(Sub))
+        Bad = isa<ParmVarDecl>(DRE->getDecl()) || isa<FunctionDecl>(DRE->getDecl());
+    } else if (const auto *DRE = dyn_cast<DeclRefExpr>(A)) {
+      if (isa<FunctionDecl>(DRE->getDecl()))
+        Bad = true;
+      else if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl());
+               VD && VD->getType()->isPointerType())
+        Bad = isa<ParmVarDecl>(VD)
+                  ? false   // a wrapper's parameter: the optimiser's to decide
+                  : (VD->hasGlobalStorage() && VD->hasExternalFormalLinkage() &&
+                     !VD->getType().isConstQualified());
     }
-    if (ObjTy.isNull()) {   // what GCC would have folded: `&*&x`, `1 ? &x : &y`
-      APValue V;
-      if (Folded(TheCall->getArg(0), V) && V.getLValueOffset().isZero() && V.hasLValuePath() &&
-          V.getLValuePath().empty())
-        if (const auto *VD = V.getLValueBase().dyn_cast<const ValueDecl *>(); VD && IsVar(VD))
-          ObjTy = VD->getType();
-    }
-    if (ObjTy.isNull())
+    if (Bad)
       return Err(TheCall->getArg(0)->getExprLoc(),
                  "Argument to " + Name + " is not the address of an object not in automatic "
                  "scope; the object must not be qualified with any form of index");
     // pic30.c:10039: addr_high needs a pointer wider than a word -- a `__prog__`, `__eds__` or
-    // `__pack_upper_byte` object. Mutant MR4 removes this test.
+    // `__pack_upper_byte` object. Read off the ARGUMENT's own type, so it needs no object.
+    // Mutant MR4 removes this test.
+    QualType T0 = TheCall->getArg(0)->getType();
+    QualType Pointee = T0->isPointerType() ? T0->getPointeeType() : Ctx.getBaseElementType(T0);
     if (BuiltinID == DSPIC::BI__builtin_addr_high &&
-        Ctx.getTargetInfo().getPointerWidth(Ctx.getBaseElementType(ObjTy).getAddressSpace()) <= 16)
+        Ctx.getTargetInfo().getPointerWidth(Pointee.getAddressSpace()) <= 16)
       return Err(TheCall->getArg(0)->getExprLoc(),
                  "Argument to " + Name + " does not have an address high.");
     return false;

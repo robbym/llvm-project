@@ -866,11 +866,6 @@ public:
   bool lookupRepresentativeDecl(StringRef MangledName,
                                 GlobalDecl &Result) const;
 
-  /// trellis session 122 (dsPIC): the first CALL SITE of each function named `__builtin_*` that is
-  /// not a builtin of this compiler, so Release() can report an undefined one where it was called
-  /// rather than in the vendor header that declared it.
-  llvm::MapVector<const FunctionDecl *, SourceLocation> DSPICBuiltinRefs;
-
   llvm::Constant *getAtomicSetterHelperFnMap(QualType Ty) {
     return AtomicSetterHelperFnMap[Ty];
   }

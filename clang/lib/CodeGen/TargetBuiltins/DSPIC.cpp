@@ -216,23 +216,58 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
         CGM.getIntrinsic(L ? Intrinsic::dspic_ff1l : Intrinsic::dspic_ff1r), X);
   }
   // ── trellis session 122: the eight RELOCATION builtins ──────────────────────────────────────
-  // The ARGUMENT RULES are Sema's (SemaChecking.cpp CheckDSPICBuiltinCall). What is left here is
-  // one question: is the address a link-time constant, or the run-time address of an automatic?
+  // Sema (SemaChecking.cpp CheckDSPICBuiltinCall) has refused what no optimisation can rescue.
+  // What is left is where cc1 itself decides: after the optimiser.
   case DSPIC::BI__builtin_addr:
   case DSPIC::BI__builtin_addr_low:
   case DSPIC::BI__builtin_addr_high:
   case DSPIC::BI__builtin_dataflashoffset: {
     const Expr *A = E->getArg(0);
     bool IsLV = A->getType()->isArrayType() || A->getType()->isFunctionType();
-    Value *Ptr = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
     llvm::Type *I16 = Builder.getInt16Ty();
     llvm::Type *I32 = Builder.getInt32Ty();
-    if (!isa<llvm::Constant>(Ptr) && BuiltinID != DSPIC::BI__builtin_dataflashoffset) {
-      // An AUTOMATIC object: cc1 accepts `&loc` and returns the frame address, zero-extended
-      // (`dec2.w w15,w2 ; mov w2,w0 ; clr w1`). addr_high never arrives here -- a 16-bit pointer
-      // "does not have an address high", Sema's sentence and cc1's.
-      Value *V = Builder.CreatePtrToInt(Ptr, I16);
-      return BuiltinID == DSPIC::BI__builtin_addr ? Builder.CreateZExt(V, I32) : V;
+    const bool AddrThree = BuiltinID != DSPIC::BI__builtin_dataflashoffset;
+    // THREE WAYS an argument reaches an address, decided in this order (the third landing; the
+    // second decided "automatic" from "the emitted IR value is not a Constant", which is also true
+    // of `({ &prog_g; })`, and MISCOMPILED it: addr_high returned tbloffset's low word).
+    // (1) it FOLDS to a global object -- `&x`, a cast, `&*&x`, `1 ? &x : &y`, `arr + 0`, a
+    //     statement expression: the operator on THAT symbol, at every optimisation level.
+    //     Mutant MT1 removes this arm.
+    Value *Ptr = nullptr;
+    if (AddrThree && !IsLV) {
+      Expr::EvalResult R;
+      if (A->EvaluateAsRValue(R, getContext()) && R.Val.isLValue() &&
+          R.Val.getLValueOffset().isZero() && R.Val.hasLValuePath())
+        if (const auto *VD = dyn_cast_or_null<VarDecl>(
+                R.Val.getLValueBase().dyn_cast<const ValueDecl *>());
+            VD && VD->hasGlobalStorage() &&
+            (R.Val.getLValuePath().empty() ||
+             (R.Val.getLValuePath().size() == 1 && VD->getType()->isArrayType() &&
+              R.Val.getLValuePath()[0].getAsArrayIndex() == 0)))
+          Ptr = CGM.GetAddrOfGlobalVar(VD);
+    }
+    if (!Ptr) {
+      // (2) VISIBLY the address of an AUTOMATIC object: cc1 accepts `&loc` and `&(T){..}` and
+      //     returns the frame address zero-extended (`dec2.w w15,w2 ; mov w2,w0 ; clr w1`).
+      //     addr_high cannot arrive here: a 16-bit pointer "does not have an address high".
+      const Expr *S = A->IgnoreParenCasts();
+      bool Auto = false;
+      if (const auto *UO = dyn_cast<UnaryOperator>(S); UO && UO->getOpcode() == UO_AddrOf) {
+        const Expr *Sub = UO->getSubExpr()->IgnoreParens();
+        if (const auto *DRE = dyn_cast<DeclRefExpr>(Sub))
+          if (const auto *VD = dyn_cast<VarDecl>(DRE->getDecl()))
+            Auto = VD->hasLocalStorage();
+        Auto = Auto || isa<CompoundLiteralExpr>(Sub);
+      }
+      Ptr = IsLV ? EmitLValue(A).getPointer(*this) : EmitScalarExpr(A);
+      if (Auto && AddrThree && BuiltinID != DSPIC::BI__builtin_addr_high) {
+        Value *V = Builder.CreatePtrToInt(Ptr, I16);
+        return BuiltinID == DSPIC::BI__builtin_addr ? Builder.CreateZExt(V, I32) : V;
+      }
+      // (3) anything else goes to the SAME inline asm as a run-time pointer under the "i"
+      //     constraint, which the backend resolves AFTER the optimiser: a `static inline` wrapper
+      //     or a local `int *p = &x;` that the optimiser folds to a symbol is accepted at -Os and
+      //     refused at -O0 -- which is cc1's own level dependence (it checks at expand).
     }
     if (BuiltinID == DSPIC::BI__builtin_addr) {
       // cc1: `mov #addr_lo(_x),w0 ; mov #addr_hi(_x),w1`. Mutant MR1 exchanges the two operators.
