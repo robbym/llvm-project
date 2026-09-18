@@ -124,6 +124,24 @@ BUILTIN(__builtin_ff1r, "UiUi", "nc")
 BUILTIN(__builtin_ff1l_16, "UiUi", "nc")
 BUILTIN(__builtin_ff1r_16, "UiUi", "nc")
 
+// ── trellis session 122: the eight RELOCATION builtins ──────────────────────────────────────────
+// The four that take an OBJECT are custom-typechecked ("t") for the reason session 121's nine are:
+// the argument is a pointer of ANY address space (addr_high exists for a `__prog__` object), and
+// the vendor's <builtins.h> declares them unprototyped. `Ui`/`ULi`, not `Us`, to merge with the
+// pack's uint16_t = unsigned int. The argument rules are cc1's (pic30.c:9987-10045), checked in
+// CGBuiltinDSPIC.cpp beside the lowering: `&VAR_DECL` exactly for the addr three, a pointer wider
+// than 16 bits for addr_high; dataflashoffset IS tbloffset (pic30.c:7521) and is checked no
+// further than tbloffset is. The four that take a STRING are ordinary prototyped builtins whose
+// types are the vendor header's own (uint32_t f(const char *); int32_t f(char *)).
+BUILTIN(__builtin_addr,            "ULi", "nct")
+BUILTIN(__builtin_addr_low,        "Ui",  "nct")
+BUILTIN(__builtin_addr_high,       "Ui",  "nct")
+BUILTIN(__builtin_dataflashoffset, "Ui",  "nct")
+BUILTIN(__builtin_section_begin,   "ULicC*", "nc")
+BUILTIN(__builtin_section_end,     "ULicC*", "nc")
+BUILTIN(__builtin_section_size,    "ULicC*", "nc")
+BUILTIN(__builtin_vector_offset,   "Lic*",   "nc")
+
 // Three the vendor spells twice. fbcl_16 is __builtin_fbcl's instruction; swap_16 is
 // __builtin_swap's; swap_8 is __builtin_swap_byte's. They add no intrinsic and no instruction.
 BUILTIN(__builtin_fbcl_16, "ii", "nc")

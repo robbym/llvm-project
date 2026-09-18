@@ -89,7 +89,11 @@ static uint32_t rd32(const unsigned char *P) {
 struct DeviceRecord { unsigned Flags = 0; unsigned Id = 0; unsigned IVT = 0; };
 
 // "" on success; "open" / "format" / "cpu" otherwise, each a different sentence at the caller.
-static std::string readDevice(StringRef Path, StringRef CPU, DeviceRecord &Out) {
+// trellis session 122: WantVec/Slot -- the slot of the device's vector record named WantVec, for
+// __builtin_vector_offset (pic30.c:1841: `(flags >> VECTOR_IDX_SHIFT) & ((1 << (WIDTH+1)) - 1)`,
+// c30_flag_definitions.h:97-98, SHIFT 9 and WIDTH 9). The FIRST matching record in file order.
+static std::string readDevice(StringRef Path, StringRef CPU, DeviceRecord &Out,
+                              StringRef WantVec = StringRef(), int *Slot = nullptr) {
   auto BypassSandbox = llvm::sys::sandbox::scopedDisable();
   auto Buf = llvm::MemoryBuffer::getFile(Path);
   if (!Buf)
@@ -134,6 +138,11 @@ static std::string readDevice(StringRef Path, StringRef CPU, DeviceRecord &Out) 
   // device and its flags meet the device's mask. (Measured: in every installed pack every vector
   // record names a device, so the second clause contributes 0 -- it is transcribed, not relied on.)
   const unsigned Mask = Out.Flags & ~IS_DEVICE_ID;
+  std::string WantV;   // session 122: the packed vector name, with its NUL
+  if (Slot && !WantVec.empty()) {
+    for (char C : WantVec) WantV.push_back((char)packByte((unsigned char)C));
+    WantV.push_back('\0');
+  }
   for (size_t R = P; R + Rec <= N; R += Rec) {
     uint32_t F = rd32(B + R + Off1);
     if ((F & RECORD_TYPE_MASK) != IS_VECTOR_ID)
@@ -141,9 +150,36 @@ static std::string readDevice(StringRef Path, StringRef CPU, DeviceRecord &Out) 
     uint32_t Dev = rd32(B + R + Off2);
     if ((Dev && Dev == Out.Id) || (Dev == 0 && (F & Mask)))
       ++Out.IVT;
+    else
+      continue;
+    // session 122: the packed name field is NUL-terminated, so comparing WantV (which carries
+    // its own NUL) over its whole length is an exact-name match. Mutant MR3 drops the shift.
+    if (Slot && *Slot < 0 && !WantV.empty() && WantV.size() <= Sizes[0] &&
+        memcmp(B + R, WantV.data(), WantV.size()) == 0)
+      *Slot = (int)((F >> 9) & ((1u << 10) - 1));
   }
   return "";
 }
+} // namespace
+
+// ── trellis session 122: a vector's slot, for __builtin_vector_offset ──────────────────────────
+// -1 when there is no device, no pack, an unreadable file, a name the file does not know, a
+// GENERIC-* name (cc1 returns before it loads any vector: pic30.c:1808) or no such vector --
+// every one of which cc1 also answers with -1 (relop/ask.txt: no -mcpu, "_NoSuchVector", "").
+// ⚠ It sits HERE, closing and reopening the reader's anonymous namespace, because the text from
+// that namespace's own closing brace to validateTarget is generic-edit.py's block and an insertion
+// there would make session 120's script unrevertible (steps/roundtrip.py).
+int clang::dspic::vectorSlot(StringRef DFP, StringRef CPU, StringRef Name) {
+  if (DFP.empty() || CPU.empty() || Name.empty())
+    return -1;
+  DeviceRecord R;
+  int Slot = -1;
+  if (!readDevice((DFP + "/bin/c30_device.info").str(), CPU, R, Name, &Slot).empty())
+    return -1;
+  return Slot;
+}
+
+namespace {
 } // namespace
 
 // ── trellis session 120: THE NINE GENERIC NAMES, and the reader's public face ──────────────────

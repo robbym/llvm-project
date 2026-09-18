@@ -10480,6 +10480,15 @@ bool ASTContext::canBuiltinBeRedeclared(const FunctionDecl *FD) const {
       BuiltinInfo.isTSBuiltin(FD->getBuiltinID()) &&
       BuiltinInfo.hasCustomTypechecking(FD->getBuiltinID()))
     return true;
+  // trellis session 122: and for dsPIC. The vendor's <builtins.h> (opened by <xc.h> since the
+  // session-121 version mirror) redeclares EVERY vendor builtin, the unprototyped object-argument
+  // ones included, and those are custom-typechecked here so they take a pointer of any address
+  // space. A rule beside upstream's own SPIR-V arm, where session 121 kept a list of nine names
+  // in Builtins.cpp. Mutant MR5 removes it.
+  if (getTargetInfo().getTriple().getArch() == llvm::Triple::dspic &&
+      BuiltinInfo.isTSBuiltin(FD->getBuiltinID()) &&
+      BuiltinInfo.hasCustomTypechecking(FD->getBuiltinID()))
+    return true;
   return BuiltinInfo.canBeRedeclared(FD->getBuiltinID());
 }
 

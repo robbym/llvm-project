@@ -44,6 +44,10 @@ const char *familyMacro(const Device &D);
 /// an unknown name get the common two only.
 void packIncludeDirs(const Device &D, llvm::SmallVectorImpl<std::string> &Out);
 
+/// trellis session 122: the slot of the device's vector record named Name -- what cc1's
+/// __builtin_vector_offset returns (pic30.c:10771) -- or -1. CPU uppercased, as describeDevice.
+int vectorSlot(llvm::StringRef DFP, llvm::StringRef CPU, llvm::StringRef Name);
+
 } // namespace dspic
 } // namespace clang
 
