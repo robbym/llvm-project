@@ -130,4 +130,24 @@ BUILTIN(__builtin_fbcl_16, "ii", "nc")
 BUILTIN(__builtin_swap_16, "UiUi", "nc")
 BUILTIN(__builtin_swap_8, "UcUc", "nc")
 
+// ── trellis session 121: the nine vendor ADDRESS OPERATORS as real builtins ──────────────────────
+// Forced by the version-macro mirror: at __XC16_VERSION__ >= 1059 xc.h includes <builtins.h>, whose
+// unprototyped prototypes for these nine collided with dspic-builtins.h's `overloadable` shims.
+// "t" = custom typechecking, so each takes a pointer of ANY address space exactly as cc1's own
+// unprototyped MD builtins do (bl_fw passes __prog__-qualified objects to edspage/edsoffset), and
+// canBeRedeclared (Builtins.cpp) lists them so <builtins.h> REDECLARES rather than erroring. The
+// return type is `Ui`/`ULi` -- unsigned int / unsigned long -- to MATCH the vendor's own uint16_t /
+// uint32_t IN THE FIRMWARE CONTEXT: the pack's include/bits/stdint.h typedefs uint16_t = unsigned
+// int (not clang's default unsigned short), so `Us` conflicts and `Ui` merges. Measured (probe4b).
+// Lowered in CGBuiltinDSPIC.cpp to the shim's exact inline asm (`mov #<op>(${1:c}),$0`), byte-for-byte.
+BUILTIN(__builtin_tblpage,   "Ui", "nct")
+BUILTIN(__builtin_tbloffset, "Ui", "nct")
+BUILTIN(__builtin_psvpage,   "Ui", "nct")
+BUILTIN(__builtin_psvoffset, "Ui", "nct")
+BUILTIN(__builtin_edspage,   "Ui", "nct")
+BUILTIN(__builtin_edsoffset, "Ui", "nct")
+BUILTIN(__builtin_dmapage,   "Ui", "nct")
+BUILTIN(__builtin_dmaoffset, "Ui", "nct")
+BUILTIN(__builtin_tbladdress, "ULi", "nct")
+
 #undef BUILTIN

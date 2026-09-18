@@ -17,6 +17,7 @@
 #include "CGBuiltin.h"
 #include "clang/Basic/TargetBuiltins.h"
 #include "llvm/IR/IntrinsicsDSPIC.h"
+#include "llvm/IR/InlineAsm.h"  // session 121: the address operators emit inline asm
 
 using namespace clang;
 using namespace CodeGen;
@@ -199,6 +200,65 @@ Value *CodeGenFunction::EmitDSPICBuiltinExpr(unsigned BuiltinID,
   case DSPIC::BI__builtin_swap_8: {
     Value *X = EmitScalarExpr(E->getArg(0));
     return Builder.CreateCall(CGM.getIntrinsic(Intrinsic::dspic_swapb), X);
+  }
+  // ── trellis session 121: the nine vendor ADDRESS OPERATORS ──────────────────────────────────
+  // Real builtins now (BuiltinsDSPIC.def), lowered to the SAME inline asm the shim (dspic-builtins.h)
+  // emitted, so the code is byte-identical: `mov #<op>(${1:c}),$0`, "=r,i". The pointer reaches the
+  // asm through an "i" (immediate/symbol) constraint, which is what refuses a runtime pointer --
+  // the shim's own refusal ("invalid operand for inline asm constraint 'i'"), one layer down.
+  case DSPIC::BI__builtin_tblpage:
+  case DSPIC::BI__builtin_tbloffset:
+  case DSPIC::BI__builtin_psvpage:
+  case DSPIC::BI__builtin_psvoffset:
+  case DSPIC::BI__builtin_edspage:
+  case DSPIC::BI__builtin_edsoffset:
+  case DSPIC::BI__builtin_dmapage:
+  case DSPIC::BI__builtin_dmaoffset: {
+    const char *Op =
+        BuiltinID == DSPIC::BI__builtin_tblpage   ? "tblpage"
+      : BuiltinID == DSPIC::BI__builtin_tbloffset ? "tbloffset"
+      : BuiltinID == DSPIC::BI__builtin_psvpage   ? "psvpage"
+      : BuiltinID == DSPIC::BI__builtin_psvoffset ? "psvoffset"
+      : BuiltinID == DSPIC::BI__builtin_edspage   ? "edspage"
+      : BuiltinID == DSPIC::BI__builtin_edsoffset ? "edsoffset"
+      : BuiltinID == DSPIC::BI__builtin_dmapage   ? "dmapage"
+      :                                             "dmaoffset";
+    const Expr *A = E->getArg(0);
+    // custom-typechecked builtins skip array/function decay, so an array or function
+    // argument (bl_fw passes gFlashEepromDataStore, _flashEeprom, gCanMessageBuffers)
+    // reaches here as an lvalue; take its address rather than EmitScalarExpr (which
+    // asserts on a non-scalar type).
+    Value *Ptr = (A->getType()->isArrayType() || A->getType()->isFunctionType())
+                     ? EmitLValue(A).getPointer(*this)
+                     : EmitScalarExpr(A);
+    llvm::Type *I16 = Builder.getInt16Ty();
+    llvm::FunctionType *FT = llvm::FunctionType::get(I16, {Ptr->getType()}, false);
+    std::string Tmpl = (llvm::Twine("mov\t#") + Op + "(${1:c}),$0").str();
+    llvm::InlineAsm *IA =
+        llvm::InlineAsm::get(FT, Tmpl, "=r,i", /*hasSideEffects=*/false);
+    return Builder.CreateCall(IA, {Ptr});
+  }
+  case DSPIC::BI__builtin_tbladdress: {
+    // The 24-bit program address as an unsigned long: the shim's two-output asm, then (hi<<16)|lo.
+    const Expr *A = E->getArg(0);
+    // custom-typechecked builtins skip array/function decay, so an array or function
+    // argument (bl_fw passes gFlashEepromDataStore, _flashEeprom, gCanMessageBuffers)
+    // reaches here as an lvalue; take its address rather than EmitScalarExpr (which
+    // asserts on a non-scalar type).
+    Value *Ptr = (A->getType()->isArrayType() || A->getType()->isFunctionType())
+                     ? EmitLValue(A).getPointer(*this)
+                     : EmitScalarExpr(A);
+    llvm::Type *I16 = Builder.getInt16Ty();
+    llvm::Type *I32 = Builder.getInt32Ty();
+    llvm::StructType *STy = llvm::StructType::get(I16, I16);
+    llvm::FunctionType *FT = llvm::FunctionType::get(STy, {Ptr->getType()}, false);
+    llvm::InlineAsm *IA = llvm::InlineAsm::get(
+        FT, "mov\t#tbloffset(${2:c}),$0\n\tmov\t#tblpage(${2:c}),$1", "=r,=r,i",
+        /*hasSideEffects=*/false);
+    Value *Pair = Builder.CreateCall(IA, {Ptr});
+    Value *Lo = Builder.CreateZExt(Builder.CreateExtractValue(Pair, 0), I32);
+    Value *Hi = Builder.CreateZExt(Builder.CreateExtractValue(Pair, 1), I32);
+    return Builder.CreateOr(Builder.CreateShl(Hi, llvm::ConstantInt::get(I32, 16)), Lo);
   }
   }
 }

@@ -395,19 +395,19 @@ void DSPICTargetInfo::getTargetDefines(const LangOptions &Opts,
   Builder.defineMacro("__HAS_BUILTINS_16__");
   // __HAS_CODEGUARD__ / __HAS_DSP__: mask-derived since session 119 -- the device block above
   Builder.defineMacro("__LONG_LONG_WIDTH__", "64");
-  // ⚠ THE VERSION MACROS ARE ZERO BECAUSE THE cc1 THE VENDOR DRIVER RUNS ON THIS MACHINE REPORTS
-  // ZERO -- and (trellis session 120, a refuter's finding) that cc1 is NOT the shipped one:
-  // bin/bin/elf-cc1.exe is a rebuilt GPL binary (2026-08-31, .ident "v4.00 +PR92071 +PR90840",
-  // MCHP_VERSION unsubstituted) sitting over the shipped bin/bin/elf-cc1.exe.orig (2026-06-25),
-  // which defines __C30_VERSION__ 40000, __XC16_VERSION__ 40000, __XC_DSC_VERSION__ 40000. The two
-  // are byte-identical in emitted code over 31 fixtures x 2 levels modulo the .ident line; the
-  // version macros are where they differ. The swap is recorded nowhere before session 120.
-  // steps/stn3255/link.sh passes -D__C30_VERSION__=4000 over these zeros (a command-line -D wins);
-  // whether ours should mirror the SHIPPED value (40000) is session 120's close item 1.
-  Builder.defineMacro("__C30_VERSION__", "0");
-  Builder.defineMacro("__XC16_VERSION__", "0");
-  Builder.defineMacro("__XC16_VERSION", "0");
-  Builder.defineMacro("__XC_DSC_VERSION__", "0");
+  // trellis session 121: the zero-explaining comment was superseded by the mirror comment below.
+  // trellis session 121: MIRROR THE SHIPPED cc1's version macros. Two cc1 binaries sit in
+  // bin/bin/: elf-cc1.exe.orig (2026-06-25, the shipped compiler) defines these as 40000, and
+  // elf-cc1.exe (2026-08-31, a rebuilt GPL binary the driver actually runs) defines them 0. The
+  // session-120 post-close RULED ours mirrors the SHIPPED value; version-ask.sh banks both.
+  // ⛔ THE MIRROR OPENS <builtins.h> (xc.h:45, `>= 1059`), which is why the nine address operators
+  // below become real builtins this same row -- their overloadable shims collided with the vendor
+  // header at 40000. __XC16_BUILD_DATE__ / __XC_DSC_BUILD_DATE__ stay COSTED (a date string, zero
+  // customers; the shipped value "Jun 24 2026" is recorded, not invented into the compiler).
+  Builder.defineMacro("__C30_VERSION__", "40000");
+  Builder.defineMacro("__XC16_VERSION__", "40000");
+  Builder.defineMacro("__XC16_VERSION", "40000");
+  Builder.defineMacro("__XC_DSC_VERSION__", "40000");
   // __XC16_BUILD_DATE__ / __XC_DSC_BUILD_DATE__ are COSTED, not implemented: a vendor build date
   // ("Aug 31 2026" on this install), with zero customers measured in the vendor libc headers, the
   // device pack's support headers or either firmware tree. Inventing one is a claim about a build

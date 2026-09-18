@@ -458,11 +458,25 @@ bool Builtin::Context::performsCallback(unsigned ID,
   return true;
 }
 
+// trellis session 121: the nine dsPIC address operators (__builtin_tblpage ...) are
+// custom-typechecked so they accept a pointer of any address space, as cc1's own unprototyped MD
+// builtins do; the vendor's <builtins.h> redeclares them unprototyped (uint16_t __builtin_tblpage();)
+// and must be allowed to, exactly as cc1's own builtins.h redeclares its MD builtins. Without this
+// the redeclaration hits err_builtin_redeclare and every firmware unit that includes <xc.h> fails.
+static bool isDSPICRedeclarableAddrOp(llvm::StringRef N) {
+  return N == "__builtin_tblpage" || N == "__builtin_tbloffset" ||
+         N == "__builtin_tbladdress" || N == "__builtin_psvpage" ||
+         N == "__builtin_psvoffset" || N == "__builtin_edspage" ||
+         N == "__builtin_edsoffset" || N == "__builtin_dmapage" ||
+         N == "__builtin_dmaoffset";
+}
+
 bool Builtin::Context::canBeRedeclared(unsigned ID) const {
   return ID == Builtin::NotBuiltin || ID == Builtin::BI__va_start ||
          ID == Builtin::BI__builtin_assume_aligned ||
          (!hasReferenceArgsOrResult(ID) && !hasCustomTypechecking(ID)) ||
-         isInStdNamespace(ID);
+         isInStdNamespace(ID) ||
+         (ID != Builtin::NotBuiltin && isDSPICRedeclarableAddrOp(getName(ID)));
 }
 
 bool Builtin::evaluateRequiredTargetFeatures(
