@@ -250,6 +250,72 @@ public:
         GV && GV->hasAttribute("dspic-space")
             ? GV->getAttribute("dspic-space").getValueAsString()
             : ProgDefault;
+    // trellis session 129 (ITEM 2): THE NAME'S OWN TOKENS. Measured from cc1 over the vendor's
+    // valid_section_flags[] table, 78 cells across three asks banked under
+    // prints/l1f/frontend/seckind/. FIVE shapes assemble under cc1 and not under ours today
+    // (code psv dma info persist) and three more place the object elsewhere in silence
+    // (xmemory ymemory, and `near` written on a far object).
+    // `bss` FORCES the kind and `data` DOES NOT -- BSS beats WRITE in the printed kind, so
+    // `int a sec("sy,data");` is `sy,data,bss,near` in cc1, not `...,data,near`. Mutant MK3 makes
+    // them symmetric and dies on that one cell.
+    // No precedence rule: of fifteen multi-token names cc1 compile-errors on twelve and the
+    // three it accepts are order-independent. Measured, not assumed.
+    // ⛔ THE NAME IS READ OFF THE OBJECT, NOT PASSED IN, and that is a decision with two
+    // grounds rather than a convenience. (1) THE CALL SITES ALL AGREE: the explicit addrspace-0
+    // site hands `Dec`, the DECIDING object, whose section equals `GO`'s by construction (the
+    // decider is found by name equality), and dspicDecider's own two calls hand objects its scan
+    // has already filtered on `getSection() == Name`. So a parameter would carry the same string
+    // every time. (2) IT IS ALSO RIGHT ON THE PATH WHERE THE NAME IS DISCARDED, which is the
+    // cell that decides it: ASKED of cc1 (seckind2-ask4), `__attribute__((unordered,
+    // section("sy,code"))) int a = 41;` is `*_<hex>,code` -- cc1 throws the NAME away and KEEPS
+    // its tokens -- against `*_<hex>,data,near` for the same object with `section("sy")`. So
+    // session 128's delegation path wants these tokens too, and an unnamed object has no section
+    // at all, so every other caller is unaffected by construction.
+    // ⚠ And it is what let this row leave session 128's edit block alone: `roundtrip.py` REFUSED
+    // a first version that rewrote `std::string Name = (GO->getSection() + pic30Attrs(...))`,
+    // which is the last line of discard-edit.py's `new` -- the prep's must-not 2, caught before
+    // a commit rather than after one.
+    StringRef WrittenName = GO->getSection();
+    bool NameBss = false, NameNear = false, NamePersist = false;
+    StringRef NameSpace;
+    size_t NameComma = WrittenName.find(',');
+    if (NameComma != StringRef::npos) {
+      SmallVector<StringRef, 8> Toks;
+      WrittenName.substr(NameComma + 1).split(Toks, ',');
+      for (StringRef T : Toks) {
+        T = T.trim();
+        if (T == "bss")
+          NameBss = true;
+        else if (T == "near")
+          NameNear = true;
+        else if (T == "persist")
+          NamePersist = true;
+        else if (T == "code")
+          NameSpace = "prog";      // cc1 spells the prog space `code` in a section line
+        else if (T == "psv" || T == "eedata" || T == "dma" || T == "info" ||
+                 T == "xmemory" || T == "ymemory")
+          NameSpace = T;
+      }
+    }
+    // The name's space wins over the object's own. Untested where the two DISAGREE and both are
+    // written (`space(psv)` plus a `,code` name); cc1 errors on every incompatible pair it was
+    // asked, so that cell is expected to be a cc1 error and is not claimed here.
+    if (!NameSpace.empty())
+      Space = NameSpace;
+    // `near` in the name forces near ON even where the object is `far`: cc1 gives
+    // `__attribute__((far, section("sy,near")))` the line `sy,near,data,near` (B-near-on-far)
+    // and ours dropped it. Both assemble, so this one was SILENT. Mutant MK4.
+    if (NameNear)
+      Near = true;
+    // `info` suppresses `near` exactly as `dma` does -- cc1 writes `sy,info,data` and
+    // `sy,info,bss` and never a `near` beside either, and both are listed incompatible with
+    // SECTION_NEAR in the vendor's own table. ⚠ IT IS DONE HERE, by clearing Near, rather than by
+    // widening the `Space != "dma"` guard further down: that line is the last line of session
+    // 110's edsplace-edit.py `new` string, and roundtrip.py REFUSED the version that rewrote it.
+    // The two spellings are equivalent -- mutant MK5 removes this clause and dies on the info
+    // cells alone -- and this one leaves another script's block whole.
+    if (NameSpace == "info")
+      Near = false;
     std::string S;
     // cc1 puts address() FIRST, ahead of the space attribute, and in decimal.
     if (GV && GV->hasAttribute("dspic-address"))
@@ -259,7 +325,7 @@ public:
     if (GV && GV->hasAttribute("dspic-reverse"))
       S += ",reverse(" + GV->getAttribute("dspic-reverse").getValueAsString().str() + ")";
     S += pic30Priority(GO);
-    if (GV && GV->hasAttribute("dspic-persistent")) {
+    if ((GV && GV->hasAttribute("dspic-persistent")) || NamePersist) {
       if (Near)
         S += ",near";
       S += ",persist";
@@ -267,10 +333,16 @@ public:
       S += ",code";
     } else if (Space == "psv" || Space == "auto_psv") {
       S += ",psv,page";
+    } else if (Space == "eedata") {
+      // trellis session 129: a name-borne `eedata` prints the space ALONE -- no kind, no near
+      // (A-eedata `sy,eedata,eedata`). The pic30 assembler REFUSES cc1's own line here, so this
+      // is parity with an output the vendor toolchain does not accept either; both compilers
+      // refused it before this row and both refuse it after, and only the TEXT moves.
+      S += ",eedata";
     } else {
       bool Zero = !GV || !GV->hasInitializer() ||
                   (GV->getInitializer() && GV->getInitializer()->isNullValue());
-      S += Zero ? ",bss" : ",data";
+      S += (Zero || NameBss) ? ",bss" : ",data";
       // trellis session 109: space(xmemory|ymemory) keep `near`; space(dma) has none (measured,
       // space-*.cc1.s: `data,xmemory,near` / `data,dma`); page/reverse objects have none either.
       // trellis session 110: `eds` joins the spelled-out spaces. Measured at all three memory
