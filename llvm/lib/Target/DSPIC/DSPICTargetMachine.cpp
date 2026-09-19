@@ -549,9 +549,14 @@ public:
                                           ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     }
     // trellis session 96 (follow-up 14): a placement attribute with NO section() names cc1's
-    // own default -- `.prog,code` for space(prog), and for a bare `persistent` a per-object
-    // section, where cc1 generates a hashed name and this uses the symbol, which the linker
-    // script's `*(.pbss*)` rule collects the same way.
+    // own default -- and for a bare `persistent` a per-object section, where cc1 generates a
+    // hashed name and this uses the symbol.
+    // ⛔ trellis session 130 corrects the rest of this comment, which had been here since 96 and
+    // which nothing had checked. There is NO `*(.pbss*)` rule in p33CK1024MP705.gld and none in
+    // any of the pack's 82 dsPIC33C scripts: `.pbss.<sym>` is placed by its ATTRIBUTES, like
+    // every other data section. And `.prog,code` is NOT cc1's default for space(prog) -- cc1
+    // gives such an object its own section (~60 cells in perobj-ask.py; `.prog` was never once
+    // cc1's answer), which is what the chain below now does.
     if (const auto *GVar = dyn_cast<GlobalVariable>(GO)) {
       bool Placed = GVar->hasAttribute("dspic-space") ||
                     GVar->hasAttribute("dspic-persistent") ||
@@ -574,14 +579,63 @@ public:
                     (GVar->getInitializer() && GVar->getInitializer()->isNullValue());
         bool Near = !GVar->hasAttribute("far");
         bool PerObject = !GVar->hasAttribute("dspic-space") && !GVar->hasAttribute("dspic-persistent");
+        // ⛔ trellis session 130: THE BASE FOLLOWS cc1's LADDER, WHICH TESTS THE u/a/r ARMS
+        // BEFORE THE SPACE.  This block used to test the space first, so an object with an
+        // explicit space landed in the SHARED `.const` / `.prog` / `.ndata` where cc1 gives it
+        // its own section -- and that is not a placement difference but a BUILD FAILURE and a
+        // SILENT MERGE.  Measured on the banked pre-change binary (perobj-compare.py, 303/61):
+        // the spelled tokens contradict the implied attributes of the EXACT names `.const` and
+        // `.ndata`, so the pic30 assembler REFUSED ours' output for `auto_psv+address`,
+        // `psv+address`, `data+reverse`, `data+page` and `prog+page` -- all of which cc1
+        // compiles; and in eight further shapes ours emitted TWO CONTRADICTORY `.section` LINES
+        // NAMING ONE SECTION, which the assembler ACCEPTS (`.prog,code` beside
+        // `.prog,code,noload`, where noload means do not load into the device).
+        //
+        // WHEN cc1 USES A SHARED BASE AT ALL, measured in perobj-ask2.py over the eight accepted
+        // spaces and every attribute in the `Placed` predicate, at -Os and -O0:
+        //    `.const` iff space(auto_psv) and no reverse and no address -- keep, page, priority,
+        //             unordered and noload all STAY shared (cc1 reaches its `else if (psv)` arm)
+        //    `.ndata` iff space(data) and NO other placement attribute at all (cc1 reaches its
+        //             final `else`, where each of those clears `is_default`)
+        // ⛔ The two arms do NOT have one trigger set -- `keep` sends space(data) per-object and
+        // leaves space(auto_psv) shared -- which is why the rule cannot be written from either.
+        //
+        // THE NAME COSTS NOTHING HERE, AND THAT IS MEASURED, NOT ASSUMED: pic30's implied
+        // attributes are matched EXACTLY (bfd/pic30-attributes.c:83 compares strlen AND strcmp
+        // against 14 MASK4 names), so `.const.<sym>`, `.psv.<sym>` and `.nbss.<sym>` are
+        // byte-identical to each other and to cc1's own `*_<hex>` over 26 token strings, and the
+        // device linker has no name rule for any data section in any of the pack's 82 scripts.
+        // ⛔ TWO NAMES ARE EXCLUDED AND THE REASON IS A SECOND MECHANISM: BFD's own
+        // _bfd_elf_get_special_section (bfd/elf.c:3110) is PREFIX-matched on a dot boundary, so
+        // `.text.<sym>` derives CODE and `.data.<sym>` derives DATA, and it UNIONS with the
+        // spelled token instead of yielding to it (`.data.a,bss` is DATA).  The tail arm below
+        // still spells `.data.`, and it is safe only because `.data.` is reached exactly when
+        // !Zero and `,bss` exactly when Zero -- a coincidence between two decisions, asserted by
+        // a cell rather than left to hold by luck.
+        // ⛔ AND THE SHARED `.const` MUST KEEP EXISTING: pic30_elf32.em:5291 computes
+        // `__const_psvpage` / `__const_length` from the output section of EXACTLY that name and
+        // falls back to page 1 when it is absent, and our codegen and the vendor libc read it.
+        // space(auto_psv) without reverse/address still lands there, and no ordinary `const`
+        // object reaches this block at all.
+        bool HasRev = GVar->hasAttribute("dspic-reverse");
+        bool HasAddr = GVar->hasAttribute("dspic-address");
+        bool OnlySpace = !GVar->hasAttribute("dspic-persistent") &&
+                         !GVar->hasAttribute("dspic-noload") && !HasAddr && !HasRev &&
+                         !GVar->hasAttribute("dspic-keep") && !GVar->hasAttribute("dspic-page") &&
+                         !GVar->hasAttribute("dspic-unordered") &&
+                         !GVar->hasAttribute("dspic-priority");
+        bool SharedConst = Space == "auto_psv" && !HasRev && !HasAddr;
+        bool SharedNData = Space == "data" && OnlySpace;
         std::string Base = GVar->hasAttribute("dspic-persistent")
                                ? (".pbss." + GO->getName()).str()
-                               : (Space == "prog" ? std::string(".prog")
-                                  : (Space == "psv" || Space == "auto_psv") ? std::string(".const")
+                               : (SharedConst ? std::string(".const")
+                                  : SharedNData ? std::string(".ndata")
+                                  : Space == "prog" ? (".prog." + GO->getName()).str()
+                                  : (Space == "psv" || Space == "auto_psv")
+                                      ? (".const." + GO->getName()).str()
                                   : Space == "dma" ? (".dma." + GO->getName()).str()
                                   : (Space == "xmemory" || Space == "ymemory" || Space == "eds")
                                       ? ("." + Space + "." + GO->getName()).str()
-                                  : !PerObject ? std::string(".ndata")
                                   : ((Zero ? (Near ? ".nbss." : ".bss.") : (Near ? ".ndata." : ".data.")) +
                                      GO->getName()).str());
         unsigned Flags = ELF::SHF_ALLOC;
