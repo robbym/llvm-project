@@ -335,7 +335,9 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       bool TrigReverse = VD->hasAttr<DSPICReverseAttr>();
       bool TrigUnordered = VD->hasAttr<DSPICUnorderedAttr>();
       bool TrigAutoPsv = SpA && SpA->getSpace()->isStr("auto_psv");
-      if (GVar->hasSection() && (TrigReverse || TrigUnordered || TrigAutoPsv)) {
+      bool TrigAddress = VD->hasAttr<DSPICAddressAttr>();
+      if (GVar->hasSection() &&
+          (TrigReverse || TrigUnordered || TrigAutoPsv || TrigAddress)) {
         // ⛔ THE TWO VENDOR SITES ARE NOT ONE CONDITION, and the session-128 PREP's warning about
         // that is RIGHT -- on an axis neither the prep nor this row's first landing considered.
         // They compare the written name against DIFFERENT STRINGS:
@@ -357,7 +359,13 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // ⚠ cc1 warns twice, from two call sites; ours warns once and the count is not asserted.
         // Guarded on the definition so a declaration of the same object does not report it twice
         // -- session 127's guard, same reason.
-        if (VD->isThisDeclarationADefinition())
+        // ⛔ trellis session 130: THE WARNING KEEPS THE OLD TRIGGER SET. `address` now enters
+        // this block so that a `"*"` name can be DISCARDED, and cc1 discards it SILENTLY there
+        // -- 0 warnings at space(psv) and at no space, against 4 at space(auto_psv), measured
+        // through the vendor driver at -Wall. Warning on the address-only cells would be a
+        // diagnostic cc1 does not issue, on code it compiles.
+        if (VD->isThisDeclarationADefinition() &&
+            (TrigReverse || TrigUnordered || TrigAutoPsv))
           M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
         // trellis session 129 (ITEM 0), TWO CORRECTIONS, both found by a refutation pass sent at
         // the LANDED DIFF rather than at a claim -- the first pass ever aimed at this code -- and
@@ -383,9 +391,18 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // `section("*")` is the vendor's own spelling for GIVE ME MY OWN SECTION, and the first
         // landing merged such an object into the shared `.const`.
         bool UnordEff = TrigUnordered && !TrigAutoPsv;      // pic30.c:3425
+        // ⛔ trellis session 130 (D5): `address` BELONGS IN THE `"*"` ARM AND ONLY THERE, and
+        // it is not a psv question -- which is how the record carried it. Measured over the
+        // whole named cross product (perobj-ask3.py, 48 cells): the three cells where ours
+        // wrongly keeps `*` are space(auto_psv), space(psv) AND space(none), so the trigger is
+        // the NAME's spelling and nothing else. cc1's `else if (a)` arm (pic30.c:3455)
+        // substitutes its generated name only when the written name is absent or is itself the
+        // default `"*"`; with any other name it keeps it, which is why all EIGHT
+        // `section("sy")` + address cells agree today and must keep agreeing. Putting the
+        // trigger in both arms would break those eight -- mutant N3m, not a sentence.
         bool NameDiscarded = GVar->getSection() != "*"
                                  ? (TrigReverse || TrigUnordered || TrigAutoPsv)
-                                 : (UnordEff || TrigReverse);
+                                 : (UnordEff || TrigReverse || TrigAddress);
         // (2) ⛔ A SECOND REGRESSION, AND THIS ONE IS NARROWED RATHER THAN FIXED, DELIBERATELY.
         // The delegation's stated ground is that "the name cc1 gives a triggering object is the
         // name its UNNAMED path gives it". That is FALSE for `reverse` + `space(auto_psv)`: cc1's
@@ -405,8 +422,15 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // What IS done is to stop the harm: the shape keeps its named section, which is ALSO
         // divergent from cc1 and is at least ISOLATED to the object that asked for it.
         // ⚠ COSTED, not decided, and it is in the close question with its measurement.
-        bool DelegationAgrees = !(TrigReverse && TrigAutoPsv);
-        if (NameDiscarded && DelegationAgrees)
+        // ⛔ trellis session 130 (D2): `DelegationAgrees` IS DELETED, NOT WEAKENED. Session
+        // 129 suppressed the discard for `reverse` + `space(auto_psv)` because ours' unnamed
+        // path tested the SPACE before the u/a/r arms and so answered with the shared `.const`,
+        // where cc1 gives a per-object section -- delegating would have dragged every plain
+        // const in the translation unit into a reverse(64), 64-byte-aligned section. That base
+        // chain now follows cc1's ladder (perobj-edit.py), so delegation answers with a
+        // per-object section and there is no shape left for which it disagrees. The suppression
+        // was COSTED at its site, not decided, and its cost is now paid rather than carried.
+        if (NameDiscarded)
           GVar->addAttribute("dspic-ignore-section-name");
         // ⚠ D5, MEASURED AND NOT THIS ROW'S REGRESSION: `space(auto_psv) + address(0x2000) +
         // section("*")` is `*_<hex>_at_address_...` in cc1 and `*,address(8192),psv,page` in
