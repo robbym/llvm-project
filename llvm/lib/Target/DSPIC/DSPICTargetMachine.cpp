@@ -127,16 +127,48 @@ public:
   // deliberately NOT part of it. Mutants MO2 and MO3 take a fact back out.
   // ⚠ `page` vs absent was not asked; it is not classified, and nothing here quantifies over it.
   static std::string dspicSecType(StringRef Attrs) {
-    std::string T;
+    // ⛔ trellis session 125: AN EXCLUSION LIST, NOT AN INCLUSION LIST, and the direction of the
+    // default is the repair. Session 124 kept four tokens and thereby DEFINED every other token --
+    // including every one nobody had asked cc1 about -- to be a reconcilable attribute, so an
+    // unreconcilable pair was silently unified into one `.section` line that the assembler then
+    // ACCEPTED, where before P3 two conflicting lines made it refuse the file. Measured regression
+    // on three classes (space(prog)/space(psv) vs far, persistent vs plain) with cc1 refusing all
+    // three; the only signal was a warning, and `-w` removes it.
+    //
+    // ⛔ THE FOUR BELOW ARE FITTED FROM cc1, WHICH PRINTS ITS OWN PREDICATE on a conflict
+    // ("note: a variable flags: near, persist" / "note: sy section flags: near").
+    // steps/frontend/sectype-ask.sh asks 21 attributes against ABSENCE and 10 pairs of differing
+    // VALUES, plus the bss/data axis: cc1 RESOLVES exactly address()'s VALUE, priority(),
+    // reverse() and keep, and REFUSES everything else -- bss vs data, persist, xmemory vs absent,
+    // xmemory vs ymemory, dma vs eds among them. Mutants MS1 (back to the inclusion list), MS2
+    // (address presence dropped too) and MS3 (the address VALUE kept).
+    //
+    // ⚠ Complete over pic30Attrs's TOKEN UNIVERSE, read from that function rather than from the
+    // cells I thought of: address(N) reverse(N) priority(0xNNNN) keep near persist code psv page
+    // bss data xmemory ymemory dma eds noload -- sixteen, all sixteen asked.
+    // ⚠ `far` is not in it: far is the ABSENCE of near, so session 124's `P == "far"` arm was dead.
     SmallVector<StringRef, 8> Parts;
     Attrs.split(Parts, ',');
+    SmallVector<std::string, 8> Keep;
     for (StringRef P : Parts) {
       P = P.trim();
-      if (P == "near" || P == "far" || P == "noload")
-        T += (P + ",").str();
-      else if (P.starts_with("address("))
-        T += "address,";
+      if (P.empty())
+        continue;
+      if (P == "keep" || P.starts_with("priority(") || P.starts_with("reverse("))
+        continue;                      // cc1 resolves these outright
+      if (P.starts_with("address("))
+        Keep.push_back("address");     // the PRESENCE is a type fact, the VALUE is not
+      else
+        Keep.push_back(P.str());
     }
+    // ⚠ A SET comparison, as cc1's is. ⛔ THE SORT IS UNWITNESSED: pic30Attrs emits in a fixed
+    // sequence, so no two reachable attribute sets give the same kept SET in two ORDERS, and
+    // mutant MS4 is PREDICTED TO LIVE. Kept as defence -- relying on emission order would couple
+    // this function to pic30Attrs's statement order, which nothing checks.
+    llvm::sort(Keep);
+    std::string T;
+    for (const std::string &K : Keep)
+      T += K + ",";
     return T;
   }
 
