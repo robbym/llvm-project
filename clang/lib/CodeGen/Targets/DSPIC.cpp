@@ -311,6 +311,37 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         if (VD->hasAttr<DSPICPageAttr>())
           GVar->addAttribute("dspic-page");
       }
+      // ⛔ trellis session 128: THREE ATTRIBUTES MAKE cc1 IGNORE A WRITTEN SECTION NAME, and
+      // ours honoured it in silence -- so the object landed somewhere the vendor compiler would
+      // not have put it, with no word from the compiler, the assembler or the linker. The set is
+      // reverse(N), unordered and space(auto_psv), MEASURED from cc1 over every attribute and
+      // every space argument the device accepts (steps/frontend/discard-ask.sh), and it is the
+      // vendor's `if (r || u || psv)` where `psv` is IDENT_CONST -- which matches the `auto_psv`
+      // space argument and NOT the `psv` one. space(psv) KEEPS its name; mutant MD4 is the
+      // mistake of reading that C variable's name for its meaning, and it dies on one cell.
+      //
+      // ⛔ THE SECTION STRING IS LEFT ALONE AND A MARKER IS ADDED INSTEAD. The first landing of
+      // this row cleared it here (`GVar->setSection("")`), which is semantically "the name is
+      // ignored" and passed every row of the comparer and every mutant -- and was still wrong:
+      // dspicDecider finds siblings by `hasSection() && getSection() == Name`, so an erased
+      // object LEFT THE CONFLICT SCAN and a space(auto_psv)+plain pair sharing a name went from
+      // REFUSED (cc1's answer) to silently accepted, one object in program memory and the other
+      // in data. The ask had already measured the right answer: cc1 warns AND THEN REPORTS THE
+      // CONFLICT ANYWAY. It discards the name when it COMPUTES it, not by forgetting there was
+      // one. sectype-compare is what named it, 40/0 -> 38/2.
+      //
+      // The marker also keeps the trigger set in ONE place: the TLOF reads the marker and never
+      // these three attributes, so there is no second copy to drift.
+      if (GVar->hasSection() &&
+          (VD->hasAttr<DSPICReverseAttr>() || VD->hasAttr<DSPICUnorderedAttr>() ||
+           (SpA && SpA->getSpace()->isStr("auto_psv")))) {
+        // cc1 warns twice, from two call sites of one condition; ours warns once, and the count
+        // is deliberately not asserted. Guarded on the definition so a declaration of the same
+        // object does not report it a second time -- session 127's guard, same reason.
+        if (VD->isThisDeclarationADefinition())
+          M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
+        GVar->addAttribute("dspic-ignore-section-name");
+      }
     }
     return;
   }

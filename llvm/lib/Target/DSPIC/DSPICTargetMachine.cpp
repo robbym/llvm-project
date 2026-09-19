@@ -322,6 +322,40 @@ public:
         // scan back to addrspace 1.
         const GlobalObject *Dec = GV ? cast<GlobalObject>(dspicDecider(GV, Kind, GO->getSection()))
                                      : GO;
+        // ⛔ trellis session 128: reverse(N), unordered and space(auto_psv) make cc1 IGNORE a
+        // written section name. Delegation is right because the NAME TARGET coincides -- over
+        // every named/unnamed pair measured, the name cc1 gives a triggering object is the name
+        // its UNNAMED path gives it: the same generated `*_<hex>` for reverse and unordered, the
+        // same fixed `.const` for space(auto_psv). So this delegates rather than reimplementing: the
+        // `Placed` block in SelectSectionForGlobal already handles all three, and has said in its
+        // own comment since session 109 that cc1 ignores an explicit section for space(auto_psv).
+        //
+        // ⛔ IT IS NOT "THE OBJECT BEHAVES AS THOUGH NO NAME HAD BEEN WRITTEN", and this comment
+        // asserted exactly that until a refutation pass broke it. `pic30.c:3415` clears
+        // `implied_psv` INSIDE the named branch and the unnamed path does not, so for a READ-ONLY
+        // object carrying no explicit `space()` cc1's two paths DIVERGE:
+        //     unordered + const    named `*_hex,data`   unnamed `.const,psv,page`
+        //     reverse(64) + const  named `...,data`     unnamed `...,psv,page`
+        // RAM against program memory, at both levels and every memory model. cc1 discards the
+        // NAME; the PSV decision stays the NAMED path's.
+        // ⚠ Ours agrees with cc1 on that shape anyway -- measured pre-row and post-row -- because
+        // ours implements neither `implied_psv` nor cc1's `if (u && psv) u = 0`, so ours' named
+        // and unnamed answers coincide. But the GROUND is the name target, not the behaviour: the
+        // day ours grows an implied-psv rule, this delegation must be re-asked, and
+        // discard-compare's `const` cells are what would say so.
+        //
+        // ⛔ AFTER the dspicDecider call above, NOT before, and that ordering is the fix's second
+        // half. The conflict diagnostic fires once per section name, when the LAST object
+        // carrying it is placed; returning early would skip it whenever that last object is the
+        // triggering one -- and cc1 reports the conflict for exactly that case (it warns
+        // "Ignoring explicit section name" and then errors). `Dec` is deliberately computed and
+        // discarded on this path: the call is wanted for its diagnostic, not its result.
+        //
+        // The trigger set is NOT repeated here. clang marks the object
+        // (Targets/DSPIC.cpp) and this reads the marker, so the three attributes are named in one
+        // place and cannot drift apart in two.
+        if (GV && GV->hasAttribute("dspic-ignore-section-name"))
+          return SelectSectionForGlobal(GO, Kind, TM);
         std::string Name = (GO->getSection() + pic30Attrs(Dec, Kind)).str();
         unsigned Flags = ELF::SHF_ALLOC;
         unsigned Type = ELF::SHT_PROGBITS;

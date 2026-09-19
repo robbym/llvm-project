@@ -333,6 +333,21 @@ def err_function_always_inline_new_zt0
 def warn_dspic_address_overrides_near : Warning<
   "address() attribute over-rides near attribute for %0">, InGroup<Attributes>;
 
+// trellis session 128 (dsPIC): cc1's own sentence. pic30.c warning_at(..., OPT_Wattributes) is
+// `"%D Ignoring explicit section name for '%s'"`, which renders as
+//     warning: b Ignoring explicit section name for 'b' [-Wattributes]
+// -- the decl name twice, because %D prints it and %s prints it again. ⚠ Ours matches the
+// SENTENCE and not that duplication, which is a vendor formatting artifact and not information.
+// ⛔ AND OURS LOWERCASES THE FIRST WORD, WHICH IS NOT A CHOICE: clang-tblgen REFUSES a capital
+// initial ("Diagnostics should not start with a capital letter; 'Ignoring' is invalid"), so cc1's
+// exact capitalisation is unreachable through clang's diagnostic machinery. COSTED, and asserted
+// by discard-compare so the departure stays visible rather than being assumed away.
+// Same -Wattributes group as cc1's, so one flag silences both compilers. It is HERE rather than
+// in DiagnosticSemaKinds.td for session 127's reason: it is emitted from CodeGen, which cannot
+// see the Sema kinds.
+def warn_dspic_section_name_ignored : Warning<
+  "ignoring explicit section name for %0">, InGroup<Attributes>;
+
 def warn_avx_calling_convention
     : Warning<"AVX vector %select{return|argument}0 of type %1 without '%2' "
               "enabled changes the ABI">,
