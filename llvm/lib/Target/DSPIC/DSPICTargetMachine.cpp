@@ -624,12 +624,30 @@ public:
                          !GVar->hasAttribute("dspic-keep") && !GVar->hasAttribute("dspic-page") &&
                          !GVar->hasAttribute("dspic-unordered") &&
                          !GVar->hasAttribute("dspic-priority");
+        // ⛔ trellis session 130, THE SHAPE AXIS -- and this is a correction to the first version
+        // of this very edit, found by `steps/placement/compare.sh`, an instrument I had not run.
+        // The asks that produced the rule above varied every ATTRIBUTE against every SPACE and
+        // held the OBJECT SHAPE fixed at one literal each, and cc1's answer depends on it
+        // (perobj-ask4.py, 8 spaces x 6 shapes):
+        //    space(psv)      per-object in ALL SIX shapes
+        //    space(auto_psv) `.const`    in ALL SIX shapes
+        //    space(prog)     per-object when INITIALISED, shared `.prog` when NOT -- which is
+        //                    what steps/placement/ask.c:24 has asserted since session 96
+        //    space(data)     the object's OWN DEFAULT BASE, by zero-ness and near-ness:
+        //                    `.ndata` / `.nbss` / `.data` / `.bss`, never a fixed `.ndata`
+        // "A shape asked at one literal is a shape not asked" is session 127's own must-not,
+        // and the first version of this block committed it.
         bool SharedConst = Space == "auto_psv" && !HasRev && !HasAddr;
+        bool SharedProg = Space == "prog" && Zero;
         bool SharedNData = Space == "data" && OnlySpace;
+        // the default base for this object, WITHOUT the symbol -- what cc1's own default section
+        // machinery picks, and what `space(data)` alone therefore gets.
+        std::string DefBase = Zero ? (Near ? ".nbss" : ".bss") : (Near ? ".ndata" : ".data");
         std::string Base = GVar->hasAttribute("dspic-persistent")
                                ? (".pbss." + GO->getName()).str()
                                : (SharedConst ? std::string(".const")
-                                  : SharedNData ? std::string(".ndata")
+                                  : SharedProg ? std::string(".prog")
+                                  : SharedNData ? DefBase
                                   : Space == "prog" ? (".prog." + GO->getName()).str()
                                   : (Space == "psv" || Space == "auto_psv")
                                       ? (".const." + GO->getName()).str()
