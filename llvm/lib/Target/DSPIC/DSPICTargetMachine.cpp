@@ -138,10 +138,23 @@ public:
     // ⛔ THE FOUR BELOW ARE FITTED FROM cc1, WHICH PRINTS ITS OWN PREDICATE on a conflict
     // ("note: a variable flags: near, persist" / "note: sy section flags: near").
     // steps/frontend/sectype-ask.sh asks 21 attributes against ABSENCE and 10 pairs of differing
-    // VALUES, plus the bss/data axis: cc1 RESOLVES exactly address()'s VALUE, priority(),
-    // reverse() and keep, and REFUSES everything else -- bss vs data, persist, xmemory vs absent,
-    // xmemory vs ymemory, dma vs eds among them. Mutants MS1 (back to the inclusion list), MS2
-    // (address presence dropped too) and MS3 (the address VALUE kept).
+    // VALUES, plus the bss/data axis: cc1 RESOLVES exactly address(), priority(), reverse()
+    // and keep, and REFUSES everything else -- bss vs data, persist, xmemory vs absent, xmemory
+    // vs ymemory, dma vs eds among them. Mutant MS1 takes it back to the inclusion list.
+    //
+    // ⛔ trellis session 127: `address` IS MASKED OUT WHOLE, PRESENCE AND VALUE ALIKE, and that
+    // is READ OFF cc1's OWN PREDICATE rather than fitted from verdicts. pic30.c:28153
+    // pic30_check_section_flags_save computes `f1 = flag1 & ~IGNORE; f2 = flag2 & ~IGNORE;
+    // return f1 != f2;` with IGNORE = SECTION_CONST_NAME | SECTION_DECLARED | SECTION_ADDRESS |
+    // SECTION_REVERSE | SECTION_KEEP | SECTION_ALIGN.
+    // ⛔ Session 125 kept the PRESENCE because its ladder asked address(0x2000) AND NOTHING ELSE
+    // -- a literal OUTSIDE the near data range, where cc1 refuses for an entirely different
+    // reason (it has cleared `near`, pic30.c:2984). Re-asked at 0x100 the same upper triangle
+    // gives cc1=accept and ours=REFUSE on TEN partners. A shape asked at one literal is a shape
+    // not asked. Mutant MA1 restores the presence token and dies on those ten.
+    // ⚠ The same mask ALSO ignores SECTION_ALIGN, which is not in this list: `aligned(N)` reaches
+    // no token in pic30Attrs at all, so the two agree by two different routes. Recorded because a
+    // reader comparing this list with the mask will notice, and not relied on.
     //
     // ⚠ Complete over pic30Attrs's TOKEN UNIVERSE, read from that function rather than from the
     // cells I thought of: address(N) reverse(N) priority(0xNNNN) keep near persist code psv page
@@ -157,9 +170,8 @@ public:
       if (P == "keep" || P.starts_with("priority(") || P.starts_with("reverse("))
         continue;                      // cc1 resolves these outright
       if (P.starts_with("address("))
-        Keep.push_back("address");     // the PRESENCE is a type fact, the VALUE is not
-      else
-        Keep.push_back(P.str());
+        continue;                      // session 127: masked out WHOLE -- see the block above
+      Keep.push_back(P.str());
     }
     // ⚠ A SET comparison, as cc1's is. ⛔ THE SORT IS UNWITNESSED: pic30Attrs emits in a fixed
     // sequence, so no two reachable attribute sets give the same kept SET in two ORDERS, and

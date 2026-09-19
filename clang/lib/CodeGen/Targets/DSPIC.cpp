@@ -30,6 +30,9 @@
 
 #include "ABIInfoImpl.h"
 #include "TargetInfo.h"
+// trellis session 127: the address-over-rides-near warning is emitted from CodeGen, as
+// upstream AArch64.cpp emits its own; this is the header that route needs.
+#include "clang/Basic/DiagnosticFrontend.h"
 #include "llvm/ADT/StringExtras.h"
 
 using namespace clang;
@@ -266,6 +269,42 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       }
       bool ForcedFar = IsEds || VD->hasAttr<DSPICPageAttr>() ||
                        (SpA && SpA->getSpace()->isStr("dma"));
+      // ⛔ trellis session 127: AN address() OUTSIDE THE NEAR DATA RANGE CLEARS `near`.
+      // pic30.c:2984 -- boundary 0x1FFF (0xFFFF under pic30_isa32_target()), START ADDRESS ONLY
+      // and size-independent: measured, a `long long` at 0x1FFC ENDS at 0x2004 and cc1 keeps near.
+      //
+      // ⛔ IT IS HERE AND NOT IN pic30Attrs, WHERE THE SESSION-127 PREP PUTS IT, BUT NOT FOR THE
+      // REASON FIRST WRITTEN -- a refutation pass broke that one, and steps/frontend/
+      // addrnear-edit.py records it as broken. `near` is read at twelve sites in seven files (the
+      // section line in pic30Attrs, the section-name arms, isNearFileSymbol and SelectFileAddr in
+      // DSPICISelDAGToDAG.cpp, session 94's remat, the byte-file peephole); clearing it in
+      // pic30Attrs alone moves ONE. It would NOT be silent -- the 13-bit file form carries a
+      // FILE REG relocation and the pic30 linker range-checks it at exactly 8192 ("Cannot access
+      // symbol with file register addressing") -- so the ground is not danger but these three: a
+      // compiler should not emit an instruction it knows the linker will reject; this is the only
+      // site that can still tell an EXPLICIT `near` from the data model's default, which is what
+      // cc1 warns on; and ForcedFar above already clears near for eds/page/dma, so this is a
+      // fourth condition and not a new mechanism. Told `far` at address(0x14000), ours ALREADY
+      // matched cc1 on both observables -- that control is why one attribute is enough.
+      //
+      // ⚠ It is OR-ed in below rather than written into the statement above, which belongs to
+      // session 110's edsplace-edit.py: splitting another script's `new` string makes its
+      // --revert a silent no-op, and steps/roundtrip.py caught exactly that here.
+      // ⚠ Domain: addrspace-0 VARIABLES. A function's address() section carries no near, and
+      // __prog__/space(eds) objects are already far. ⚠ An ODD address() never reaches here (cc1
+      // discards it at any width), so 0x1FFF is unaskable and a strict and a non-strict
+      // comparison are extensionally equal over the reachable domain. ⚠ The ISA32 boundary is
+      // deliberately unwritten: every HAS_ISA32V0 device is refused at validateTarget, so that
+      // branch would be a second, unexecutable model of this rule. COSTED, far side named.
+      const auto *AddrA = VD->getAttr<DSPICAddressAttr>();
+      bool AddrOutsideNear = AddrA && AddrA->getAddr() > 0x1FFFu;
+      // cc1 warns only when `near` was WRITTEN; the data model's default is silent. Emitted from
+      // CodeGen as upstream AArch64.cpp does, and guarded on the definition so a declaration of
+      // the same object does not report it twice.
+      if (AddrOutsideNear && VD->hasAttr<DSPICNearAttr>() &&
+          VD->isThisDeclarationADefinition())
+        M.getDiags().Report(VD->getLocation(), diag::warn_dspic_address_overrides_near) << VD;
+      ForcedFar = ForcedFar || AddrOutsideNear;
       if (ForcedFar) {
         GVar->setAttributes(GVar->getAttributes().removeAttribute(GVar->getContext(), "near"));
         GVar->addAttribute("far");

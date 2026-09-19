@@ -323,6 +323,16 @@ def err_function_always_inline_new_za : Error<
 def err_function_always_inline_new_zt0
     : Error<"always_inline function %0 has new zt0 state">;
 
+// trellis session 127 (dsPIC): cc1's own sentence, verbatim -- pic30.c warning_at(...,
+// OPT_Wattributes) at the near-clearing site, "address() attribute over-rides near attribute for
+// 'v'". It is HERE and not in DiagnosticSemaKinds.td, where this port's other dsPIC diagnostics
+// live, because it is emitted from CodeGen (Targets/DSPIC.cpp) -- the only place that can still
+// tell an EXPLICIT `near` from the data model's default, which is the distinction cc1 warns on.
+// Upstream AArch64.cpp reaches its CodeGen diagnostics by this same route. Same -Wattributes
+// group as cc1's, so one flag silences both compilers.
+def warn_dspic_address_overrides_near : Warning<
+  "address() attribute over-rides near attribute for %0">, InGroup<Attributes>;
+
 def warn_avx_calling_convention
     : Warning<"AVX vector %select{return|argument}0 of type %1 without '%2' "
               "enabled changes the ABI">,
