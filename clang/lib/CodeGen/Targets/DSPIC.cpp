@@ -332,15 +332,35 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       //
       // The marker also keeps the trigger set in ONE place: the TLOF reads the marker and never
       // these three attributes, so there is no second copy to drift.
-      if (GVar->hasSection() &&
-          (VD->hasAttr<DSPICReverseAttr>() || VD->hasAttr<DSPICUnorderedAttr>() ||
-           (SpA && SpA->getSpace()->isStr("auto_psv")))) {
-        // cc1 warns twice, from two call sites of one condition; ours warns once, and the count
-        // is deliberately not asserted. Guarded on the definition so a declaration of the same
-        // object does not report it a second time -- session 127's guard, same reason.
+      bool TrigReverse = VD->hasAttr<DSPICReverseAttr>();
+      bool TrigUnordered = VD->hasAttr<DSPICUnorderedAttr>();
+      bool TrigAutoPsv = SpA && SpA->getSpace()->isStr("auto_psv");
+      if (GVar->hasSection() && (TrigReverse || TrigUnordered || TrigAutoPsv)) {
+        // ⛔ THE TWO VENDOR SITES ARE NOT ONE CONDITION, and the session-128 PREP's warning about
+        // that is RIGHT -- on an axis neither the prep nor this row's first landing considered.
+        // They compare the written name against DIFFERENT STRINGS:
+        //     pic30.c:3203   strcmp(name, pic30_unique_section_name(decl))   -> WARN
+        //     pic30.c:3422   strcmp(name, pic30_default_section)             -> DISCARD
+        // and `pic30_default_section` is the one-character string "*" (pic30.c:402). So for the
+        // written name "*" cc1 WARNS AND KEEPS. Measured: `space(auto_psv), section("*")` is
+        // `*,psv,page` in cc1, which the banked pre-row binary MATCHED and the first landing of
+        // this row broke to `.const,psv,page` -- a regression, in the direction the standing
+        // vendor rule binds, found by a refutation pass.
+        //
+        // ⚠ It bites ONLY the auto_psv arm, and that is the vendor ladder rather than a guess:
+        // after 3422, `if (u) ... else if (a) ... else if (r) ...` all land on the generated name
+        // WHATEVER the surviving name is, and only the psv case falls through to
+        // `else if (pszSectionName)` and keeps it. Measured on all three triggers.
+        //
+        // The warning is UNCONDITIONAL because cc1's is: 3203 compares against the unique name,
+        // which a written name never equals, so cc1 warns in the "*" cases too (W=2, measured).
+        // ⚠ cc1 warns twice, from two call sites; ours warns once and the count is not asserted.
+        // Guarded on the definition so a declaration of the same object does not report it twice
+        // -- session 127's guard, same reason.
         if (VD->isThisDeclarationADefinition())
           M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
-        GVar->addAttribute("dspic-ignore-section-name");
+        if (TrigReverse || TrigUnordered || GVar->getSection() != "*")
+          GVar->addAttribute("dspic-ignore-section-name");
       }
     }
     return;
