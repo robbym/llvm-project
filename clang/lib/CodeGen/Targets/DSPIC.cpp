@@ -359,8 +359,60 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // -- session 127's guard, same reason.
         if (VD->isThisDeclarationADefinition())
           M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
-        if (TrigReverse || TrigUnordered || GVar->getSection() != "*")
+        // trellis session 129 (ITEM 0), TWO CORRECTIONS, both found by a refutation pass sent at
+        // the LANDED DIFF rather than at a claim -- the first pass ever aimed at this code -- and
+        // both REPRODUCED here against the row's own banked pre-row binary before being recorded.
+        //
+        // THE VENDOR LADDER, read at pic30.c and verified at the source this session:
+        //     3421  if (r || u || psv) {
+        //     3422    if (pszSectionName && strcmp(pszSectionName, pic30_default_section))
+        //     3423      pszSectionName = 0;
+        //     3425    if (u && psv) u = 0;            <-- NOT IMPLEMENTED BY THE FIRST LANDING
+        //     3429  if (u)            -> generated
+        //     3432  else if (a)       -> generated_at_address        (D5, see below)
+        //     3468  else if (r)       -> generated + reverse
+        //     3491  else if (name)    -> THE NAME IS KEPT
+        //           else if (psv)     -> .const
+        // with `pic30_default_section` the one-character string "*" (pic30.c:402).
+        //
+        // (1) ⛔ A REGRESSION THE ROW INTRODUCED. `unordered + space(auto_psv) + section("*")`:
+        // cc1 CLEARS `u` when `psv` is set, so its `if (u)` arm does not fire, the ladder falls
+        // through to `else if (pszSectionName)` and "*" IS KEPT. Measured on one axis:
+        //     cc1  *,psv,page     pre-row  *,psv,page  (MATCHED)   post-row  .const,psv,page
+        // drop `unordered` and all three agree; drop `space(auto_psv)` and the cell is fine.
+        // `section("*")` is the vendor's own spelling for GIVE ME MY OWN SECTION, and the first
+        // landing merged such an object into the shared `.const`.
+        bool UnordEff = TrigUnordered && !TrigAutoPsv;      // pic30.c:3425
+        bool NameDiscarded = GVar->getSection() != "*"
+                                 ? (TrigReverse || TrigUnordered || TrigAutoPsv)
+                                 : (UnordEff || TrigReverse);
+        // (2) ⛔ A SECOND REGRESSION, AND THIS ONE IS NARROWED RATHER THAN FIXED, DELIBERATELY.
+        // The delegation's stated ground is that "the name cc1 gives a triggering object is the
+        // name its UNNAMED path gives it". That is FALSE for `reverse` + `space(auto_psv)`: cc1's
+        // ladder reaches `else if (r)` and gives a PER-OBJECT generated section, while ours'
+        // unnamed path tests the space first and gives the SHARED `.const`. Measured:
+        //     cc1      .const,psv,page          + *_<hex>,reverse(64),psv,page   (two sections)
+        //     pre-row  sy,reverse(64),psv,page  + .const                         (two sections)
+        //     post-row .const,reverse(64),psv,page + .const                      (ONE section)
+        // so an unrelated `const int plain` -- and in a real translation unit every string
+        // literal and const table -- was dragged into a reverse(64), 64-byte-aligned section.
+        // ⛔ THE FIX IS NOT ATTEMPTED HERE and that is a scope decision, not an oversight: the
+        // root cause is that ours' per-object base chain consults the SPACE before the u/a/r arms
+        // where cc1's ladder does the reverse, and choosing the per-object base for a psv object
+        // needs its own ask (the pic30 assembler derives attributes from the NAME too -- session
+        // 128's own M-ladder finding -- so `.nbss.a` and `.const.a` are not interchangeable).
+        // Landing a guess beside a verified fix is how this row shipped wrong code five times.
+        // What IS done is to stop the harm: the shape keeps its named section, which is ALSO
+        // divergent from cc1 and is at least ISOLATED to the object that asked for it.
+        // ⚠ COSTED, not decided, and it is in the close question with its measurement.
+        bool DelegationAgrees = !(TrigReverse && TrigAutoPsv);
+        if (NameDiscarded && DelegationAgrees)
           GVar->addAttribute("dspic-ignore-section-name");
+        // ⚠ D5, MEASURED AND NOT THIS ROW'S REGRESSION: `space(auto_psv) + address(0x2000) +
+        // section("*")` is `*_<hex>_at_address_...` in cc1 and `*,address(8192),psv,page` in
+        // ours, IDENTICALLY before and after this row -- the 3432 `else if (a)` arm, which the
+        // guard does not consult. Adding `a` to NameDiscarded would delegate into the same
+        // shared-`.const` base that (2) is about, so it waits on the same ask.
       }
     }
     return;
