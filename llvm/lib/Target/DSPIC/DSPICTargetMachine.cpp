@@ -119,6 +119,70 @@ public:
   // trellis session 122: ProgDefault -- the space to assume when the object names none. A `__prog__`
   // object lives in program memory whether or not it says space(prog), and both of its section
   // arms spell their attributes through here so that noload / keep / psv,page are not lost.
+  // ⛔ trellis session 124 (P3). THE SECTION TYPE, as cc1 distinguishes it from a section
+  // ATTRIBUTE, measured before this was written (steps/frontend/order-ask.sh): cc1 REFUSES to
+  // reconcile near-vs-far, address-present-vs-absent and noload-vs-absent -- "'a' causes a section
+  // type conflict with 'b'", an ERROR -- and silently RESOLVES two different address VALUES,
+  // keep-vs-absent and two priorities. So the TYPE is those three facts and the address VALUE is
+  // deliberately NOT part of it. Mutants MO2 and MO3 take a fact back out.
+  // ⚠ `page` vs absent was not asked; it is not classified, and nothing here quantifies over it.
+  static std::string dspicSecType(StringRef Attrs) {
+    std::string T;
+    SmallVector<StringRef, 8> Parts;
+    Attrs.split(Parts, ',');
+    for (StringRef P : Parts) {
+      P = P.trim();
+      if (P == "near" || P == "far" || P == "noload")
+        T += (P + ",").str();
+      else if (P.starts_with("address("))
+        T += "address,";
+    }
+    return T;
+  }
+
+  // The object whose placement a shared section line carries, plus cc1's refusal where the objects
+  // cannot be reconciled. ⛔ Ours takes the LAST in module order = cc1's answer AT -Os; matching
+  // -O0 as well is impossible, because cc1's deciding object is the FIRST it emits and its emission
+  // order REVERSES above -O0 (order-ask.sh a1/a2/a3, the swap being the single axis). Mutant MO5
+  // takes the first instead. ⚠ Module order is CREATION order, which is source order except under a
+  // forward reference -- P1, inherited here and not fixed.
+  const GlobalVariable *dspicDecider(const GlobalVariable *PV, SectionKind Kind,
+                                     StringRef Name) const {
+    const GlobalVariable *Last = PV;
+    for (const GlobalVariable &G : PV->getParent()->globals())
+      if (G.getAddressSpace() == PV->getAddressSpace() && G.hasSection() &&
+          G.getSection() == Name && !G.isDeclaration())
+        Last = &G;
+    if (PV != Last)
+      return Last;                     // once per name: when the deciding object is itself placed
+    std::string LA = pic30Attrs(Last, Kind), LT = dspicSecType(LA);
+    for (const GlobalVariable &G : PV->getParent()->globals()) {
+      if (&G == Last || G.getAddressSpace() != PV->getAddressSpace() || !G.hasSection() ||
+          G.getSection() != Name || G.isDeclaration())
+        continue;
+      std::string GA = pic30Attrs(&G, Kind);
+      if (dspicSecType(GA) != LT)
+        G.getContext().diagnose(DiagnosticInfoGeneric(
+            ("'" + G.getName() + "' causes a section type conflict with '" + Last->getName() +
+             "': section '" + Name + "' is asked for '" + StringRef(GA).ltrim(',') +
+             "' and for '" + StringRef(LA).ltrim(',') +
+             "', and these are different KINDS of section, not two placements of one -- the "
+             "vendor compiler refuses this too").str(),
+            DS_Error));
+      else if (GA != LA)
+        G.getContext().diagnose(DiagnosticInfoGeneric(
+            ("section '" + Name + "' is given two placements: '" + G.getName() + "' asks for '" +
+             StringRef(GA).ltrim(',') + "' and '" + Last->getName() + "' for '" +
+             StringRef(LA).ltrim(',') +
+             "'; a section has one, and the second object's is used. NOTE: the deciding object "
+             "here is the last in MODULE order, which is CREATION order, and the vendor compiler "
+             "decides by its own emission order -- source order at -O0 and REVERSE source order "
+             "above it -- so the two agree at -Os and differ at -O0 (trellis session 124)").str(),
+            DS_Warning));
+    }
+    return Last;
+  }
+
   static std::string pic30Attrs(const GlobalObject *GO, SectionKind Kind,
                                 StringRef ProgDefault = StringRef()) {
     if (const auto *F = dyn_cast<Function>(GO)) {
@@ -205,7 +269,16 @@ public:
       // path, where they came out `"aw",@progbits` with no near.
       if (GO->getAddressSpace() != 1) {
         const auto *GV = dyn_cast<GlobalVariable>(GO);
-        std::string Name = (GO->getSection() + pic30Attrs(GO, Kind)).str();
+        // ⛔ trellis session 124 (P3): THE DECIDING OBJECT'S attributes, not this object's. This
+        // arm spelled each object's own, so two globals sharing an explicit section name emitted
+        // TWO `.section` lines -- and with two different address() values the pic30 assembler
+        // REFUSES the file where cc1's assembles, with no compiler diagnostic. A FUNCTION keeps
+        // its own (it is not a GlobalVariable and no scan can see it; a function sharing a name
+        // with a variable is refused by clang itself, on every target). Mutant MO4 restricts the
+        // scan back to addrspace 1.
+        const GlobalObject *Dec = GV ? cast<GlobalObject>(dspicDecider(GV, Kind, GO->getSection()))
+                                     : GO;
+        std::string Name = (GO->getSection() + pic30Attrs(Dec, Kind)).str();
         unsigned Flags = ELF::SHF_ALLOC;
         unsigned Type = ELF::SHT_PROGBITS;
         if (isa<Function>(GO))
