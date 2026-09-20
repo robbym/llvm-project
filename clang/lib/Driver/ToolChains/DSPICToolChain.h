@@ -80,6 +80,16 @@ public:
   }
   bool isPICDefaultForced() const override { return true; }
 
+  // trellis session 135: the VENDOR-INSTALL half of cc1's include list, named by --sysroot.
+  // Measured: the vendor's C++ search list is its C list plus exactly ONE directory,
+  // <install>/include/c++, and it is INSTALL-keyed -- the device pack carries no C++ headers at
+  // all. cc1plus reaches it from its own -iprefix, which our clang has no equivalent of, so the
+  // build names the install and the driver spells out cc1's order.
+  void AddClangSystemIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                                 llvm::opt::ArgStringList &CC1Args) const override;
+  void AddClangCXXStdlibIncludeArgs(const llvm::opt::ArgList &DriverArgs,
+                                    llvm::opt::ArgStringList &CC1Args) const override;
+
 protected:
   Tool *buildAssembler() const override;
 };

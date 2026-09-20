@@ -23,6 +23,7 @@
 #include "clang/Driver/InputInfo.h"
 #include "clang/Options/Options.h"
 #include "llvm/Option/ArgList.h"
+#include "llvm/Support/Path.h"
 
 using namespace clang::driver;
 using namespace clang::driver::toolchains;
@@ -36,6 +37,55 @@ DSPICToolChain::DSPICToolChain(const Driver &D, const llvm::Triple &Triple,
 
 Tool *DSPICToolChain::buildAssembler() const {
   return new tools::dspic::Assembler(*this);
+}
+
+// ⛔ THE C++ HEADERS ARE ON THE INSTALL AXIS, NOT THE DEVICE AXIS, AND THAT WAS MEASURED BEFORE
+// IT WAS DESIGNED (steps/frontend/CXXINC.banked.txt). cc1plus searches, in this order, the two
+// PACK directories -- which Clang.cpp's dspic block already adds from -mcpu/-mdfp, session 120 --
+// then <install>/include/c++, then <install>/include, then <install>/support/generic/h. The C
+// driver's list is the same MINUS include/c++: exactly one directory separates them. That
+// directory does not move when -mcpu changes, does not move when -mdfp is dropped, and does not
+// exist inside any device pack, so the mechanism that supplies it cannot be -mdfp.
+//
+// It is --sysroot, because the install IS a sysroot layout (<root>/include, <root>/include/c++,
+// <root>/lib) and clang already threads --sysroot everywhere. ⚠ It changed NOTHING for this
+// triple before this function existed, in C or C++, which is the control the row's cells rest on.
+//
+// ⚠ <sysroot>/support/generic/h is deliberately NOT here. Its builtins.h has to beat clang's
+// empty stub and session 120 measured that this requires a USER -I; an -internal-isystem lands
+// behind the resource directory and would silently take that header's ownership. A build that
+// wants it says -I, as steps/config/blfw-build.sh does and says why.
+void DSPICToolChain::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
+                                               ArgStringList &CC1Args) const {
+  if (DriverArgs.hasArg(options::OPT_nostdinc, options::OPT_nostdlibinc))
+    return;
+  // getDriver().SysRoot and not computeSysRoot(): the latter is Generic_GCC's, and its answer
+  // depends on GCC-installation detection that finds nothing for this triple. One value, from
+  // the flag the build passed.
+  StringRef SysRoot = getDriver().SysRoot;
+  if (SysRoot.empty())
+    return;
+  SmallString<128> P(SysRoot);
+  llvm::sys::path::append(P, "include");
+  // Passed whether or not it exists, the way Clang.cpp's dspic block passes the four pack
+  // candidates no installed pack has: a nonexistent -internal-isystem is dropped at lookup, and
+  // GCC drops its own the same way. Cell E11 pins that.
+  addSystemInclude(DriverArgs, CC1Args, P);
+}
+
+void DSPICToolChain::AddClangCXXStdlibIncludeArgs(const ArgList &DriverArgs,
+                                                  ArgStringList &CC1Args) const {
+  // The same three suppressions Generic_GCC's own override honours, so -nostdinc++ removes the
+  // C++ directory and leaves the C one -- which is what the vendor's C driver produces.
+  if (DriverArgs.hasArg(options::OPT_nostdinc, options::OPT_nostdincxx,
+                        options::OPT_nostdlibinc))
+    return;
+  StringRef SysRoot = getDriver().SysRoot;
+  if (SysRoot.empty())
+    return;
+  SmallString<128> P(SysRoot);
+  llvm::sys::path::append(P, "include", "c++");
+  addSystemInclude(DriverArgs, CC1Args, P);
 }
 
 // ⛔ --relax TRACKS THE SOURCE LANGUAGE, NOT THE -O LEVEL, AND THAT DISTINCTION WAS MEASURED.
