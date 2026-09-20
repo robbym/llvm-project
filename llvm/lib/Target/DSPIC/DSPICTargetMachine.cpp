@@ -47,6 +47,10 @@ class DSPICTargetObjectFile : public TargetLoweringObjectFileELF {
   MCSection *ConstSection = nullptr;   // .const   (read-only, in program memory via PSV)
   MCSection *NDataSection = nullptr;   // .ndata   (near initialized data)
   MCSection *NBSSSection = nullptr;    // .nbss    (near zero-initialized data)
+  // trellis session 135: the tables the pic30 runtime's __ctor/__dtor walk. ONE each, because
+  // the priority buckets are collapsed -- see getStaticCtorSection below.
+  MCSection *CtorsSection = nullptr;   // .ctors, code, group
+  MCSection *DtorsSection = nullptr;   // .dtors, code, group
 
   MCSection *pic30Section(StringRef Base, const GlobalObject *GO, SectionKind Kind,
                           const TargetMachine &TM, unsigned Type,
@@ -81,6 +85,41 @@ public:
     // A section nothing returns keeps every one a DEFINED symbol in its named section (cc1).
     BSSSection = Ctx.getELFSection(".nbss.__llvm_bss_sentinel", ELF::SHT_NOBITS,
                                    ELF::SHF_ALLOC | ELF::SHF_WRITE);
+    // trellis session 135: the global-constructor and -destructor tables. The pic30 attributes
+    // `code, group` travel INSIDE the name and DSPICTargetAsmStreamer::changeSection prints a
+    // comma-bearing name verbatim (session 96's mechanism), so no new printing code is needed.
+    // ⛔ `group` IS LOAD-BEARING: measured at session 134, `.ctors, code` without it links
+    // clean, produces an output section at the same address with byte-identical map lines, and
+    // leaves __ctors_size at ZERO -- the constructors are never walked.
+    // PROGBITS + ALLOC|EXECINSTR because the vendor's own object reads `PROGBITS ... AX`, and
+    // because a NOBITS section here would also meet session 99's arm in DSPICAsmPrinter.
+    CtorsSection = Ctx.getELFSection(".ctors, code, group", ELF::SHT_PROGBITS,
+                                     ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+    DtorsSection = Ctx.getELFSection(".dtors, code, group", ELF::SHT_PROGBITS,
+                                     ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
+  }
+
+  // ⛔ THE PRIORITY ARGUMENT IS IGNORED ON PURPOSE, AND THAT IS THE WHOLE COLLAPSE.
+  // TargetLoweringObjectFileELF would give `.init_array` / `.init_array.NNNNN` -- a DATA section
+  // that nothing in a pic30 image walks. The runtime looks for ONE `.ctors`: crt0 references
+  // __ctor unconditionally (bl.map:69) and __ctor walks the table with
+  // `tblrdl.w [w8++], w11` -- POST-increment, so array order IS execution order.
+  // Returning the same section for every bucket makes AsmPrinter::emitXXStructorList's
+  // switchSection a no-op after the first, and its entries come out in the order
+  // preprocessXXStructorList already sorted them: PRIORITY ASCENDING.
+  // ⛔ AND THIS IS WHY `UseInitArray` IS LEFT ALONE. Setting it false is how every other target
+  // reaches this section NAME, and emitXXStructorList then std::reverse()s the list, because
+  // GCC's classic .ctors is walked BACKWARD and pic30's is not. That would be silently wrong,
+  // and invisible with a single constructor.
+  // ⚠ A prioritised `.ctors.NNNNN` is not an option: measured at session 134, the linker has no
+  // SORT_BY_INIT_PRIORITY anywhere, the section keeps its own name through the link,
+  // __ctors_size stays 0, and the constructors are silently dropped.
+  MCSection *getStaticCtorSection(unsigned, const MCSymbol *) const override {
+    return CtorsSection;
+  }
+
+  MCSection *getStaticDtorSection(unsigned, const MCSymbol *) const override {
+    return DtorsSection;
   }
 
   MCSection *getSectionForConstant(const DataLayout &DL, SectionKind Kind,
