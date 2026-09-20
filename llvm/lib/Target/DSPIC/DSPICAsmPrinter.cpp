@@ -269,8 +269,19 @@ void DSPICAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
   // wrong here. ⚠ The assembler still advances the location counter, so this is cosmetic TODAY,
   // measured symbol by symbol -- but it is a directive the assembler says it does not support,
   // and a non-zero value on that path would be dropped in silence.
+  // trellis session 134: ⛔ AND NOT ON A GLOBAL THE BASE CLASS WOULD HAVE SKIPPED. A
+  // zero-length appending array -- what -Oz's GlobalOpt leaves behind when it evaluates a global
+  // constructor away, `[0 x {i32,ptr,ptr}] zeroinitializer` -- IS a null initializer and lands
+  // in .bss, so it entered this arm and handed AppendingLinkage to emitLinkage, which answers
+  // llvm_unreachable("Should never emit this"). One linkage over, available_externally trips
+  // getKindForGlobal's "Can only be used for global definitions" assertion in SectionForGlobal
+  // on the line below, BEFORE linkage is ever consulted. AsmPrinter::emitGlobalVariable skips
+  // both via emitSpecialLLVMGlobal before it does anything else; this arm ran first.
+  // ⚠ ExternalWeak is the third linkage emitLinkage refuses and needs no clause: it is a
+  // declaration, so hasInitializer() is already false.
   if (GV->hasInitializer() && GV->getInitializer()->isNullValue() &&
-      !GV->hasCommonLinkage() && !GV->isThreadLocal()) {
+      !GV->hasCommonLinkage() && !GV->isThreadLocal() &&
+      !GV->hasAppendingLinkage() && !GV->hasAvailableExternallyLinkage()) {
     MCSection *S = getObjFileLowering().SectionForGlobal(GV, TM);
     if (S && S->isBssSection()) {
       // ⚠ The ORDER and the metadata are AsmPrinter's own, deliberately: the first version of
