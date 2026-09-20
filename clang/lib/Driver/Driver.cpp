@@ -17,6 +17,7 @@
 #include "ToolChains/CrossWindows.h"
 #include "ToolChains/Cuda.h"
 #include "ToolChains/Cygwin.h"
+#include "ToolChains/DSPICToolChain.h"
 #include "ToolChains/Darwin.h"
 #include "ToolChains/DragonFly.h"
 #include "ToolChains/FreeBSD.h"
@@ -6333,6 +6334,11 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
         break;
       case llvm::Triple::msp430:
         TC = std::make_unique<toolchains::MSP430ToolChain>(*this, Target, Args);
+        break;
+      // trellis session 133: without this arm a `dspic` triple fell through to Generic_ELF,
+      // whose assembler is the HOST's /usr/bin/as. See ToolChains/DSPICToolChain.h.
+      case llvm::Triple::dspic:
+        TC = std::make_unique<toolchains::DSPICToolChain>(*this, Target, Args);
         break;
       case llvm::Triple::riscv32:
       case llvm::Triple::riscv64:

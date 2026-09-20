@@ -6349,8 +6349,14 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // Decide whether to use verbose asm. Verbose assembly is the default on
   // toolchains which have the integrated assembler on by default.
   bool IsIntegratedAssemblerDefault = TC.IsIntegratedAssemblerDefault();
+  // trellis session 133: dsPIC keeps verbose asm although its integrated assembler is OFF. The
+  // two are coupled upstream; for this target the external assembler ignores comments (the
+  // objects are byte-identical either way, measured) while READING the `-S` text is the port's
+  // primary instrument. See steps/frontend/asdrv-edit.py.
+  bool VerboseAsmDefault =
+      IsIntegratedAssemblerDefault || TC.getTriple().getArch() == llvm::Triple::dspic;
   if (!Args.hasFlag(options::OPT_fverbose_asm, options::OPT_fno_verbose_asm,
-                    IsIntegratedAssemblerDefault))
+                    VerboseAsmDefault))
     CmdArgs.push_back("-fno-verbose-asm");
 
   // Parse 'none' or '$major.$minor'. Disallow -fbinutils-version=0 because we
