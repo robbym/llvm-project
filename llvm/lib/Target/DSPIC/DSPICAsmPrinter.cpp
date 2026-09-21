@@ -109,6 +109,31 @@ static cl::opt<bool> DSPICPrintSizes(
     /// refused with "junk at end of line".
     bool InLowerConstant = false;
 
+    /// ⛔ trellis session 136: AN ALIAS IS NOT DATA, AND THE ARM ABOVE WAS REACHED ON ONE.
+    /// AsmPrinter::emitGlobalAlias lowers the ALIASEE through lowerConstant and hands the result
+    /// to emitAssignment, so a C1/C2 constructor alias came out
+    /// `__ZN1SC1Ei = handle(__ZN1SC2Ei)` -- which the pic30 assembler refuses ("junk at end of
+    /// line, first unrecognized character is `('"), where cc1plus writes
+    /// `.set __ZN1SC1Ei,__ZN1SC2Ei`. `handle()` is this port's PROGRAM-ADDRESS operator: on an
+    /// alias there is no address to compute, because the alias IS the aliasee.
+    /// ⚠ The save/restore is defensive rather than load-bearing, and the distinction is worth
+    /// the sentence: AsmPrinter emits every alias in doFinalization, AFTER every global, so
+    /// nothing in a TU is emitted between two aliases today. Mutant N6 drops the restore and is
+    /// predicted to LIVE for exactly that reason.
+    /// ⛔ AsmPrinter::emitGlobalIFunc is lowerConstant's third caller and does the same thing
+    /// with the resolver. It is deliberately NOT guarded: clang answers `unknown attribute
+    /// 'ifunc' ignored` for this triple (a warning, so the compile exits 0), creates no
+    /// GlobalIFunc and leaves the call undefined -- measured, cxxasm-ask4 ARM I -- so an
+    /// override would be dead code. COSTED: one override and one cell the day
+    /// TargetInfo::supportsIFunc is true for dspic.
+    bool InGlobalAlias = false;
+    void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override {
+      bool Saved = InGlobalAlias;
+      InGlobalAlias = true;
+      AsmPrinter::emitGlobalAlias(M, GA);
+      InGlobalAlias = Saved;
+    }
+
     /// L1b: print the frame's accounting as a comment, so a report's frame size is a
     /// line the compiler printed (trellis standing rule 12).
     void emitFunctionBodyStart() override;
@@ -557,7 +582,9 @@ const MCExpr *DSPICAsmPrinter::lowerConstant(const Constant *CV,
   const MCExpr *E = AsmPrinter::lowerConstant(CV, BaseCV, Offset);
   InLowerConstant = !Top;
   const Constant *S = CV->stripPointerCasts();
-  if (Top && (isa<Function>(S) || isa<BlockAddress>(S)))
+  // trellis session 136: ...and NOT when the result is about to be an ASSIGNMENT rather than
+  // data. See InGlobalAlias, declared above, for why the caller decides this and not the value.
+  if (Top && !InGlobalAlias && (isa<Function>(S) || isa<BlockAddress>(S)))
     E = MCSpecifierExpr::create(E, DSPIC::S_HANDLE, OutContext);
   return E;
 }

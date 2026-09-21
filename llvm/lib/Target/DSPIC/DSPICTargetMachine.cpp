@@ -66,6 +66,39 @@ class DSPICTargetObjectFile : public TargetLoweringObjectFileELF {
     return getContext().getELFSection(Base, Type, Flags);
   }
 
+  // ⛔ trellis session 136: THE pic30 ASSEMBLER HAS NO ELF SECTION-GROUP MECHANISM. A comdat
+  // global reaches TargetLoweringObjectFileELF, which sets SHF_GROUP from getELFComdat(GO)
+  // (TargetLoweringObjectFileImpl.cpp:803), and MCAsmInfoELF prints the group operands whenever
+  // that flag is set -- `.section .text._Z2mx...,"axG",@progbits,_Z2mx...,comdat`, answered with
+  // `unknown section attribute 'G'` and then `junk at end of line`. Measured: every group
+  // spelling this assembler was offered is refused, INCLUDING the one with the G dropped and the
+  // comdat operands kept (steps/frontend/CXXASM.banked.txt ARM P).
+  // ⛔ AND DROPPING THE GROUP IS SAFE BECAUSE OF THE BINDING, WHICH WAS MEASURED, NOT ASSUMED.
+  // The vendor emits ZERO comdat groups for the same programs and binds the same explicit
+  // instantiation `.weak`; nm reads W on its object and on ours with the groups stripped; both
+  // link with T=0, W/V=2 and no multiple-definition error (CXXASM3.banked.txt ARMs V/B/L). The
+  // weak binding is what prevents the duplicate definition -- the group never was.
+  // ⚠ The section NAME is deliberately left alone: ours keeps `.text.<symbol>`, which is what was
+  // measured to assemble and link. Mutant N5 renames it to the vendor's plain `.text` to say that
+  // the name was never what the assembler refused.
+  // ⚠ Conditioned on the COMDAT, not on the flag: that is the known cause, and mutant N3 drops
+  // the condition to measure that nothing else reaching here carries SHF_GROUP.
+  // ⚠ static_cast, not dyn_cast: MCSectionELF declares no classof, so there is no RTTI for it --
+  // `no member named 'classof'` was this edit's first build error. It is the idiom LLVM itself
+  // uses (TargetLoweringObjectFileImpl.cpp:1007, MCELFStreamer.cpp:92), and it is sound here for
+  // a stated reason: the argument is whatever TargetLoweringObjectFileELF just returned, and that
+  // class creates ELF sections and nothing else.
+  MCSection *dropComdatGroup(const GlobalObject *GO, MCSection *S) const {
+    if (!S || !GO->getComdat())
+      return S;
+    auto *ES = static_cast<MCSectionELF *>(S);
+    if (!(ES->getFlags() & ELF::SHF_GROUP))
+      return S;
+    return getContext().getELFSection(ES->getName(), ES->getType(),
+                                      ES->getFlags() & ~ELF::SHF_GROUP,
+                                      ES->getEntrySize());
+  }
+
 public:
   void Initialize(MCContext &Ctx, const TargetMachine &TM) override {
     TargetLoweringObjectFileELF::Initialize(Ctx, TM);
@@ -724,8 +757,15 @@ public:
       return getContext().getELFSection(".const", ELF::SHT_PROGBITS,
                                         ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     // Functions keep the default `.text` handling.
+    // trellis session 136: ...minus the COMDAT group, which this assembler cannot parse. This is
+    // the ONLY call in this class that falls through to the base (grepped), so it is the only
+    // place a section we return can acquire SHF_GROUP -- every other arm builds its section here.
+    // A comdat global of any other kind is routed above to `.const`, `.ndata`, `.nbss`,
+    // `.packed.*` or `.prog.*`, none of which carries a group; cell A3 measures that over the
+    // fifteen C++ cells rather than trusting this sentence.
     if (Kind.isText())
-      return TargetLoweringObjectFileELF::SelectSectionForGlobal(GO, Kind, TM);
+      return dropComdatGroup(
+          GO, TargetLoweringObjectFileELF::SelectSectionForGlobal(GO, Kind, TM));
     // Read-only data -> the SHARED .const (never per-object). The pic30 as special-cases the
     // exact name .const to give it the psv/code attribute AND allow near data access; a
     // per-object .const.<sym> (from -fdata-sections) gets neither (probe psvprobe: alloc-only
