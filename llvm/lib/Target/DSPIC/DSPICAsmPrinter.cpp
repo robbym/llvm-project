@@ -123,9 +123,20 @@ static cl::opt<bool> DSPICPrintSizes(
     /// ⛔ AsmPrinter::emitGlobalIFunc is lowerConstant's third caller and does the same thing
     /// with the resolver. It is deliberately NOT guarded: clang answers `unknown attribute
     /// 'ifunc' ignored` for this triple (a warning, so the compile exits 0), creates no
-    /// GlobalIFunc and leaves the call undefined -- measured, cxxasm-ask4 ARM I -- so an
-    /// override would be dead code. COSTED: one override and one cell the day
-    /// TargetInfo::supportsIFunc is true for dspic.
+    /// GlobalIFunc and leaves the call undefined -- measured, cxxasm-ask4 ARM I, whose banked
+    /// print carries that warning verbatim -- so an override would be dead code.
+    /// ⚠ The attribute's existsInTarget gate IS TargetInfo::supportsIFunc() (clang Attr.td: the
+    /// IFunc attr is TargetSpecificAttr<TargetIFuncSupport>, whose CustomCode is exactly that
+    /// call), so the named far side is necessary AND sufficient -- and AVR is in that function's
+    /// list by ARCH alone, so a bare-metal ELF target joining it is upstream precedent.
+    /// COSTED: one override and ONE CELL -- and the cell must expect up to TWO bare assignments,
+    /// because the ELF arm runs the lowered expr through emitAssignment twice, for Name and for
+    /// LocalAlias.
+    /// ⛔ AND THAT PRICE IS THE PRICE OF NOT EMITTING A MALFORMED ASSIGNMENT. It is NOT the price
+    /// of `ifunc` working: the same arm emits `.type f,@gnu_indirect_function`, and the
+    /// resolution runs through an IRELATIVE relocation that a static pic30 image has no agent
+    /// for. That is a separate, unpriced question, and cell D3 holds the line until someone
+    /// asks it.
     bool InGlobalAlias = false;
     void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override {
       bool Saved = InGlobalAlias;

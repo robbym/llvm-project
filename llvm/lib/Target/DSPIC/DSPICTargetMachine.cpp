@@ -76,8 +76,17 @@ class DSPICTargetObjectFile : public TargetLoweringObjectFileELF {
   // ⛔ AND DROPPING THE GROUP IS SAFE BECAUSE OF THE BINDING, WHICH WAS MEASURED, NOT ASSUMED.
   // The vendor emits ZERO comdat groups for the same programs and binds the same explicit
   // instantiation `.weak`; nm reads W on its object and on ours with the groups stripped; both
-  // link with T=0, W/V=2 and no multiple-definition error (CXXASM3.banked.txt ARMs V/B/L). The
-  // weak binding is what prevents the duplicate definition -- the group never was.
+  // link with T=0, W/V=2 and no multiple-definition error (CXXASM3.banked.txt ARMs V/B/L).
+  // ⛔ AND THE VERB MATTERS, BECAUSE TWO PASSES GOT IT WRONG IN OPPOSITE DIRECTIONS. This comment
+  // first read "the weak binding PREVENTS the duplicate definition"; a refutation pass broke that
+  // on B2's own pass condition -- W/V=2 is TWO entries, not one -- and concluded that both bodies
+  // reach the image and nothing deduplicates. ⛔ Cell B4b then refuted THAT, on the unedited tree:
+  // the vendor's image holds those 2 weak entries at ONE address (000002ee). So the linker warns,
+  // and then keeps ONE BODY. What the weak binding does is make a duplicate a WARNING instead of
+  // an ERROR while both symbols resolve to a single definition; the group would have deduplicated
+  // at the SECTION level instead, and on this assembler no object has ever carried one (ARM P).
+  // ⚠ B4 asserts the single address, so the day that stops being true this comment goes red with
+  // it rather than quietly becoming a story about code size.
   // ⚠ The section NAME is deliberately left alone: ours keeps `.text.<symbol>`, which is what was
   // measured to assemble and link. Mutant N5 renames it to the vendor's plain `.text` to say that
   // the name was never what the assembler refused.
@@ -761,8 +770,16 @@ public:
     // the ONLY call in this class that falls through to the base (grepped), so it is the only
     // place a section we return can acquire SHF_GROUP -- every other arm builds its section here.
     // A comdat global of any other kind is routed above to `.const`, `.ndata`, `.nbss`,
-    // `.packed.*` or `.prog.*`, none of which carries a group; cell A3 measures that over the
-    // fifteen C++ cells rather than trusting this sentence.
+    // `.packed.*` or `.prog.*`, none of which carries a group.
+    // ⚠ THE EVIDENCE FOR THAT IS THE GREP, NOT CELL A3, and the first version of this comment
+    // cited A3. A3 counts group spellings in the output and reads 0 after the edit -- which is
+    // equally consistent with "the data path never sets the group" and with "no comdat DATA
+    // global occurred in the fifteen cells", and the second is the true one, so A3 is vacuous for
+    // that half. What is not vacuous: SHF_GROUP appears nowhere in this file outside
+    // dropComdatGroup, and TargetLoweringObjectFileELF:: is called from exactly two places in the
+    // class -- Initialize, and the arm below. A comdat vtable in a class with no key function,
+    // and a guard variable for a static local in an inline function, are the two cells that would
+    // measure it, and neither exists yet.
     if (Kind.isText())
       return dropComdatGroup(
           GO, TargetLoweringObjectFileELF::SelectSectionForGlobal(GO, Kind, TM));
