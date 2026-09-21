@@ -36,6 +36,31 @@ public:
               const TargetInfo *Aux) override {
     TargetInfo::adjust(Diags, Opts, Aux);
     Opts.DSPICAddressSpaceNames = true;
+    // ⛔ trellis session 136: cc1plus's `double` IS 64-BIT WHERE cc1's IS 32-BIT, and ours was
+    // 32-bit in both. Measured: __DBL_MANT_DIG__ / __SIZEOF_DOUBLE__ are 24 / 4 from the vendor's
+    // C and 53 / 8 from its C++, with `long double` 53 / 8 on every side. One entry of a
+    // sixteen-entry four-way table, and an ABI rather than a type: a C++ program built against the
+    // vendor's headers and linked against its libstdc++.a passed 32-bit doubles to functions
+    // expecting 64-bit ones -- no diagnostic, no crash, wrong numbers. It is also the entire cause
+    // of six of the seven standard-header refusals, because <xc-dsc>/include/math.h:146 declares
+    // its whole double block only under `__DBL_MANT_DIG__ != __FLT_MANT_DIG__`.
+    // ⛔ IT IS A cc1plus BUILT-IN DEFAULT AND NOT A FLAG. The vendor's cc1 and cc1plus command
+    // lines are IDENTICAL in flags and neither mentions short-double, so nothing the driver passes
+    // can discover it -- which is why this is keyed on the LANGUAGE here rather than on an option.
+    // ⚠ SAFE BECAUSE THE BACKEND ALREADY DOES f64, AND THAT WAS MEASURED, NOT ASSUMED: this
+    // target's `long double` is already 64-bit, compiles, assembles, and emits ___adddf3 /
+    // ___muldf3 / ___ltdf2 -- the same names the vendor emits -- and the data layout carries
+    // f64:16 with no language dependence at all, so the front-end type cannot disagree with it.
+    // ⚠ DoubleAlign is deliberately left at 16, and that is REQUIRED rather than incumbent:
+    // LongDoubleAlign, this target's existing 64-bit float, is 16 too, and mutant M4 -- which sets
+    // it to one byte -- breaks assembly, the libcall set and every header cell, not just the
+    // alignment one. Measured, after I predicted it would be inert.
+    // The row is steps/frontend/dblwidth-compare.sh; PPCTargetInfo::adjust is the in-tree
+    // precedent for mutating a float format here.
+    if (Opts.CPlusPlus) {
+      DoubleWidth = 64;
+      DoubleFormat = &llvm::APFloat::IEEEdouble();
+    }
   }
 
   static const char *const GCCRegNames[];
