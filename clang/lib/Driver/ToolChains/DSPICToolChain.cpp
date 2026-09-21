@@ -24,6 +24,10 @@
 #include "clang/Options/Options.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Path.h"
+// trellis session 137: FileSystem.h for directory_iterator, which enumerates the pack's
+// support/<FAMILY>/gld directories, and STLExtras.h for llvm::sort over them.
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Support/FileSystem.h"
 
 using namespace clang::driver;
 using namespace clang::driver::toolchains;
@@ -149,6 +153,136 @@ void tools::dspic::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
 
   const char *Exec =
       Args.MakeArgString(getToolChain().GetProgramPath("pic30-elf-as"));
+  C.addCommand(std::make_unique<Command>(JA, *this, ResponseFileSupport::None(),
+                                         Exec, CmdArgs, Inputs, Output));
+}
+
+Tool *DSPICToolChain::buildLinker() const {
+  return new tools::dspic::Linker(*this);
+}
+
+// ⛔ THE ORDER IS A SEQUENCE, IT IS THE VENDOR'S OWN, AND IT WAS READ OFF ITS -### LINE RATHER
+// THAN COMPOSED (steps/frontend/CXXLD.banked.txt ARM F). Over FOUR devices in THREE families and
+// BOTH drivers the -l sequence is identical in all eight readings; C++ differs from C by exactly
+// the two prepended tokens.
+//
+// ⚠ -lgcc APPEARS TWICE, OUTSIDE THE GROUP ON BOTH SIDES -- in C as well as C++. A single -lgcc
+// inside the group is the natural spelling and is not what the vendor does; mutants N2 and N3
+// apply it deliberately, and the pair separates "twice" from "outside".
+// ⚠ -lstdc++ SITS BEFORE THE GROUP, NOT INSIDE IT. Session 136 put it inside and X8 and XC
+// failed to link, which is the measured cost of reading this as a set; mutant N1 is that spelling.
+// ⛔ AND NO CRT OBJECT IS ON THE LINE AT ALL -- no crt0.o, no crtbegin/crtend. The pic30 linker
+// pulls crt0 from the archive through the linker script, so MSP430's GetFilePath("crt0.o") would
+// look right here and fail to find a file.
+static void addDefaultLibs(ArgStringList &CmdArgs, bool CXX) {
+  if (CXX) {
+    CmdArgs.push_back("-lstdc++");
+    CmdArgs.push_back("-lm");
+  }
+  CmdArgs.push_back("-lgcc");
+  CmdArgs.push_back("--start-group");
+  CmdArgs.push_back("-lc99-pic30-elf");
+  CmdArgs.push_back("-lm-elf");
+  CmdArgs.push_back("-lc99-elf");
+  CmdArgs.push_back("--end-group");
+  CmdArgs.push_back("-lgcc");
+}
+
+// ⛔ EVERY support/<FAMILY>/gld THE PACK HAS, AND NOT THE DEVICE'S FAMILY. Two installed packs
+// carry two families each -- dsPIC33E-GM-GP-MC-GU-MU has PIC24E and dsPIC33E, dsPIC33F-GP-MC has
+// PIC24H and dsPIC33F -- and the vendor's line carries BOTH of a pack's directories, in order,
+// for a device of either family (CXXLD2 ARM M, CXXLD3 ARM M2). The single-family packs cannot
+// tell that rule from the family-derived one, which is why the two-family packs were read.
+// ⚠ clang::dspic::packIncludeDirs answers the FAMILY question for include paths and is the
+// obvious thing to reuse here. It is the wrong answer for this one: it yields exactly one family,
+// so on those two packs it would emit one -L where the vendor emits two. Mutant N6 is that reuse.
+// ⚠ SORTED. On the two packs that can show an order, sorted order and the vendor's agree; nothing
+// installed here distinguishes "sorted" from "whatever order the vendor uses", and if a pack ever
+// does, cell L4 is where it surfaces.
+static void addPackLibraryPaths(const ArgList &Args, ArgStringList &CmdArgs) {
+  const Arg *A = Args.getLastArg(options::OPT_mdfp_EQ);
+  if (!A)
+    return;
+  SmallString<128> Support(A->getValue());
+  llvm::sys::path::append(Support, "support");
+  llvm::SmallVector<std::string, 4> Dirs;
+  std::error_code EC;
+  for (llvm::sys::fs::directory_iterator I(Support, EC), E; I != E && !EC;
+       I.increment(EC)) {
+    SmallString<128> Gld(I->path());
+    llvm::sys::path::append(Gld, "gld");
+    if (llvm::sys::fs::is_directory(Gld))
+      Dirs.push_back(std::string(Gld));
+  }
+  llvm::sort(Dirs);
+  for (const std::string &D : Dirs)
+    CmdArgs.push_back(Args.MakeArgString(Twine("-L") + D));
+}
+
+void tools::dspic::Linker::ConstructJob(Compilation &C, const JobAction &JA,
+                                        const InputInfo &Output,
+                                        const InputInfoList &Inputs,
+                                        const ArgList &Args,
+                                        const char *LinkingOutput) const {
+  const ToolChain &TC = getToolChain();
+  ArgStringList CmdArgs;
+
+  // -p<CPU> and the pack, GUARDED as the Assembler guards them -- absent when the flag is absent,
+  // rather than defaulted to a value nobody measured -- but ⛔ NOT SPELLED AS THE ASSEMBLER SPELLS
+  // THEM. The vendor writes `-mdfp=` to the assembler and `--mdfp=` TO THE LINKER, two dashes
+  // (CXXLD.banked.txt ARM F). The first version of this file copied the assembler's one-dash
+  // spelling; ld-new accepts it through getopt_long_only, so nothing failed to link and only cell
+  // L6 -- which compares the token against the vendor's -- said so.
+  if (const Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
+    CmdArgs.push_back(Args.MakeArgString(Twine("-p") + A->getValue()));
+
+  if (const Arg *A = Args.getLastArg(options::OPT_mdfp_EQ))
+    CmdArgs.push_back(Args.MakeArgString(Twine("--mdfp=") + A->getValue()));
+
+  CmdArgs.push_back("-o");
+  CmdArgs.push_back(Output.getFilename());
+
+  // -u before the -L set, and a user -L before the driver's own: the vendor's own slots, read
+  // from a line carrying all four of -L, -l, -Wl, and -u at once (ARM U).
+  Args.addAllArgs(CmdArgs, {options::OPT_u});
+  Args.AddAllArgs(CmdArgs, options::OPT_L);
+
+  // <install>/bin and <install>/lib, from --sysroot -- session 135's mechanism for naming the
+  // vendor install, unchanged and not re-derived. Absent when --sysroot is.
+  StringRef SysRoot = TC.getDriver().SysRoot;
+  if (!SysRoot.empty()) {
+    SmallString<128> P(SysRoot);
+    llvm::sys::path::append(P, "bin");
+    CmdArgs.push_back(Args.MakeArgString(Twine("-L") + P));
+  }
+  addPackLibraryPaths(Args, CmdArgs);
+  if (!SysRoot.empty()) {
+    SmallString<128> P(SysRoot);
+    llvm::sys::path::append(P, "lib");
+    CmdArgs.push_back(Args.MakeArgString(Twine("-L") + P));
+  }
+
+  AddLinkerInputs(TC, Inputs, Args, CmdArgs, JA);
+
+  // ⛔ -nostdlib AND -nodefaultlibs EACH strip every -l token while leaving an ld line, which is
+  // MEASURED on the vendor's driver (ARM N) rather than taken from GCC's documentation.
+  // -nostartfiles, -r, -static and -fno-exceptions change nothing there, and change nothing here
+  // because this port passes no crt object at all.
+  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs))
+    addDefaultLibs(CmdArgs,
+                   TC.getDriver().CCCIsCXX() && TC.ShouldLinkCXXStdlib(Args));
+
+  // ⚠ A DELIBERATE DIFFERENCE. The vendor puts a user -T between -lm and -lgcc; this puts it
+  // last, which is MSP430's spelling. Measured: the two orders produce the SAME .hex and
+  // identical nm output, and the ELF files differ in five .symtab bytes -- a transposition of two
+  // absolute-SFR symbol pairs. Cell U4 asserts that AS a difference, not as a match.
+  Args.AddAllArgs(CmdArgs, options::OPT_T);
+
+  // ⛔ NO IMPLICIT LINKER SCRIPT, and the reason is in this file's header comment block in
+  // cxxld-edit.py: OUTPUT_ARCH lives in the pack's .gld, the .gld needs a preprocessor, and the
+  // thing that preprocesses it is the xc-dsc-ld.exe SHELL rather than the linker. An implicit -T
+  // would work through one binary and fail through another for the same driver output.
+  const char *Exec = Args.MakeArgString(TC.GetProgramPath("pic30-elf-ld"));
   C.addCommand(std::make_unique<Command>(JA, *this, ResponseFileSupport::None(),
                                          Exec, CmdArgs, Inputs, Output));
 }

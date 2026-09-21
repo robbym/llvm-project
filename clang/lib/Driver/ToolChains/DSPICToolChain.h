@@ -55,6 +55,21 @@ public:
                     const char *LinkingOutput) const override;
 };
 
+/// The pic30 linker, forked the way the vendor driver forks its own -- session 137, and the
+/// same decision session 133 made for the assembler: the vendor has no integrated linker either,
+/// and the standing vendor-compatibility rule binds on ACCEPTANCE, not on the pipeline's shape.
+class LLVM_LIBRARY_VISIBILITY Linker final : public Tool {
+public:
+  Linker(const ToolChain &TC) : Tool("dspic::Linker", "pic30-elf-ld", TC) {}
+
+  bool hasIntegratedCPP() const override { return false; }
+  bool isLinkJob() const override { return true; }
+  void ConstructJob(Compilation &C, const JobAction &JA,
+                    const InputInfo &Output, const InputInfoList &Inputs,
+                    const llvm::opt::ArgList &TCArgs,
+                    const char *LinkingOutput) const override;
+};
+
 } // end namespace dspic
 } // end namespace tools
 
@@ -92,6 +107,7 @@ public:
 
 protected:
   Tool *buildAssembler() const override;
+  Tool *buildLinker() const override;
 };
 
 } // end namespace toolchains
