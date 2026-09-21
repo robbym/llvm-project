@@ -3115,6 +3115,61 @@ void CodeGenModule::registerGlobalDtorsWithAtExit() {
     unregisterGlobalDtorsWithUnAtExit();
 }
 
+// ⛔ trellis session 138: the destructor stub for a GUARDED (weak / linkonce) object on dspic --
+// a template static member, an inline variable. Every TU that uses it emits its init under ONE
+// shared guard, so every such TU also holds this stub in its own .dtors function, and the object
+// must still be destroyed ONCE: iff the guard's first byte says "initialized" (the Itanium
+// guard's defined byte, and the one clang's init sets), clearing that byte FIRST so the stub in
+// every other TU finds it clear. cc1plus gets exactly-once from GCC's no-__cxa_atexit counter
+// (++guard to construct at 1, --guard to destroy at 0); clang's init sets a flag rather than
+// counting, so the destroy side keys on the flag.
+// ⚠ It takes the cleanup function's pointer argument and IGNORES it:
+// GenerateCXXGlobalCleanUpFunc asserts that a null argument means AIX's sinit/sterm, so the
+// caller passes the object's address and this calls the destructor with the address it
+// captured, as createAtExitStub does.
+static llvm::Function *createDSPICGuardedDtorStub(CodeGenModule &CGM,
+                                                  const VarDecl &D,
+                                                  llvm::GlobalVariable *Guard,
+                                                  llvm::FunctionCallee Dtor,
+                                                  llvm::Constant *Addr) {
+  ASTContext &Ctx = CGM.getContext();
+  auto *Obj = ImplicitParamDecl::Create(Ctx, Ctx.VoidPtrTy,
+                                        ImplicitParamKind::Other);
+  FunctionArgList Args{Obj};
+  const CGFunctionInfo &FI =
+      CGM.getTypes().arrangeBuiltinFunctionDeclaration(Ctx.VoidTy, Args);
+  SmallString<256> Name;
+  {
+    llvm::raw_svector_ostream Out(Name);
+    CGM.getCXXABI().getMangleContext().mangleDynamicAtExitDestructor(&D, Out);
+  }
+  llvm::Function *Fn = CGM.CreateGlobalInitOrCleanUpFunction(
+      CGM.getTypes().GetFunctionType(FI), Name.str(), FI, D.getLocation());
+
+  CodeGenFunction CGF(CGM);
+  CGF.StartFunction(GlobalDecl(&D, DynamicInitKind::AtExit), Ctx.VoidTy, Fn,
+                    FI, Args, D.getLocation(), D.getLocation());
+  auto AL = ApplyDebugLocation::CreateArtificial(CGF);
+
+  Address GuardByte(Guard, CGM.Int8Ty, CharUnits::One());
+  llvm::Value *Set = CGF.Builder.CreateIsNotNull(
+      CGF.Builder.CreateLoad(GuardByte, "guard.byte"), "guard.set");
+  llvm::BasicBlock *DestroyBB = CGF.createBasicBlock("guard.destroy");
+  llvm::BasicBlock *EndBB = CGF.createBasicBlock("guard.end");
+  CGF.Builder.CreateCondBr(Set, DestroyBB, EndBB);
+
+  CGF.EmitBlock(DestroyBB);
+  CGF.Builder.CreateStore(llvm::ConstantInt::get(CGM.Int8Ty, 0), GuardByte);
+  llvm::CallInst *Call = CGF.Builder.CreateCall(Dtor, Addr);
+  if (auto *DtorFn = dyn_cast<llvm::Function>(
+          Dtor.getCallee()->stripPointerCastsAndAliases()))
+    Call->setCallingConv(DtorFn->getCallingConv());
+
+  CGF.EmitBlock(EndBB);
+  CGF.FinishFunction();
+  return Fn;
+}
+
 /// Register a global destructor as best as we know how.
 void ItaniumCXXABI::registerGlobalDtor(CodeGenFunction &CGF, const VarDecl &D,
                                        llvm::FunctionCallee dtor,
@@ -3133,6 +3188,35 @@ void ItaniumCXXABI::registerGlobalDtor(CodeGenFunction &CGF, const VarDecl &D,
   // globals in reverse order of when they were constructed.
   if (!CGM.getLangOpts().hasAtExit() && !D.isStaticLocal())
     return CGF.registerGlobalDtorWithLLVM(D, dtor, addr);
+
+  // ⛔ trellis session 138: dsPIC DESTROYS FROM A LINK-TIME TABLE, AND FROM NOTHING ELSE.
+  // crt0 is `call _main; rcall __dtor; break; reset`, and __dtor walks `.dtors` FORWARD
+  // (libpic30 crt_ctor.s, `tblrdl.w [w8++]`). `___dso_handle` is under `.if 0` in that file and
+  // resolved by nothing on the default 33CK library line, so the __cxa_atexit default below does
+  // not link; `atexit` links but only exit() drains it, never main's return, so -fno-use-cxa-atexit
+  // leaves it unrun when main returns. cc1plus emits ONE `.dtors` entry per TU whose body
+  // destroys that TU's objects in reverse order -- which is exactly AddCXXDtorEntry's
+  // _GLOBAL__D_a (GenerateCXXGlobalCleanUpFunc emits it reversed), placed in `.dtors` by
+  // DSPICTargetObjectFile::getStaticDtorSection.
+  // ⚠ NOT registerGlobalDtorWithLLVM above: one entry PER OBJECT in registration order, which a
+  // forward walk runs in CONSTRUCTION order -- the caveat that arm's own comment states.
+  // ⚠ A GUARDED (weak / linkonce) object's registration sits inside a guard every TU emits, so it
+  // goes through createDSPICGuardedDtorStub, which destroys at most once. The predicate is the
+  // one GenerateCXXGlobalVarDeclInitFunc guards on, taken from the decl because `addr` is a null
+  // constant for an array.
+  // ⚠ Not for a static local, whose construction is conditional on a first call and whose
+  // registration must therefore happen at run time, and not for thread_local: each falls through
+  // to what it does today. The row is steps/frontend/dtor-compare.sh.
+  if (CGM.getTarget().getTriple().getArch() == llvm::Triple::dspic &&
+      !D.isStaticLocal() && !D.getTLSKind()) {
+    llvm::GlobalValue::LinkageTypes L = CGM.getLLVMLinkageVarDefinition(&D);
+    if (!llvm::GlobalValue::isWeakLinkage(L) &&
+        !llvm::GlobalValue::isLinkOnceLinkage(L))
+      return CGM.AddCXXDtorEntry(dtor, addr);
+    if (llvm::GlobalVariable *Guard = CGM.getStaticLocalDeclGuardAddress(&D))
+      return CGM.AddCXXDtorEntry(
+          createDSPICGuardedDtorStub(CGM, D, Guard, dtor, addr), addr);
+  }
 
   // emitGlobalDtorWithCXAAtExit will emit a call to either __cxa_thread_atexit
   // or __cxa_atexit depending on whether this VarDecl is a thread-local storage
