@@ -423,6 +423,48 @@ void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
     if (GV.hasAttribute("dspic-sfr-address"))
       OutStreamer->emitRawText(Twine("\t.equ\t") + getSymbol(&GV)->getName() + "," +
                                GV.getAttribute("dspic-sfr-address").getValueAsString());
+  // ⛔ trellis session 139: THE OBJECT SIGNATURE -- `__c30_signature`, the section the pic30 linker
+  // picks EVERY library member by. It ORs each loaded object's words into one link-wide state
+  // (the vendor binutils' elflink.c:4050) and chooses each member against it
+  // (pic30_elf32.em:9116-9173), so an object without one leaves every choice to a tie-break: a C++
+  // `sqrt(2.25)` linked the single-precision sqrt.CH_lo and returned 0 (session 138). cc1's words
+  // (pic30.c:23531): 0x0001, the MASK of bits this object cares about, and MASK & SET --
+  //     bit 0 unsigned_long_size_t    bit 1 unified_memory    bit 2 no_short_double.
+  // The two facts come from the FRONT END as module flags (clang Targets/DSPIC.cpp), because the IR
+  // does not carry them. Neither flag -> no section: a hand-written .ll states no ABI, and none is
+  // invented here (cell G14a).
+  // MASK is 7 for every object. cc1's is 7 in every TU on a classic device with a 16-bit size_t:
+  // the public `int ()` libfuncs GCC and pic30 declare at init (17 or more: optabs-libfuncs.c:920-
+  // 935, pic30.c:30030-30042) reach type_refers_to_size_t, where `int` is size_t's signed twin (SIG4).
+  // ⚠ Under -menable-large-arrays cc1's bit 0 follows each public decl that reaches codegen --
+  // written, implicit or pic30's own -- and its size_t is 32 bits where ours is 16, so these words
+  // describe OUR object; a pure-ours link takes the `_o` members (stn3255), and L4 is the price.
+  // SET: bit 0 iff size_t is 32 bits (never, yet), bit 1 never (this port has no unified model),
+  // bit 2 iff double is 64 bits (C++). Row: steps/frontend/sig-compare.sh.
+  // ⛔ ONLY WHERE THE STREAMER TAKES RAW TEXT. cc1's spelling (`info, data`) exists only as text for
+  // the pic30 assembler. An object streamer (`-fintegrated-as`, Route B, not started: the operator,
+  // session 133) aborts on emitRawText, and without this test every TU did (mcpu-compare S2). Via
+  // -save-temps the integrated assembler still parses this text and rejects `info, data` -- every
+  // object on that path is EM_MSP430, refused by ld-new; the signature there is Route B's to owe.
+  {
+    auto Flag = [&](StringRef Key) -> uint64_t {
+      if (auto *CI = mdconst::extract_or_null<ConstantInt>(M.getModuleFlag(Key)))
+        return CI->getZExtValue();
+      return 0;
+    };
+    uint64_t SizeT = Flag("dspic-size-t-width"), Dbl = Flag("dspic-double-width");
+    if (SizeT && Dbl && OutStreamer->hasRawTextSupport()) {
+      unsigned Mask = 0x7, Set = (SizeT == 32 ? 0x1 : 0x0) | (Dbl == 64 ? 0x4 : 0x0);
+      auto Hex4 = [](unsigned V) {
+        std::string H = llvm::utohexstr(V, /*LowerCase=*/true);
+        return std::string(H.size() < 4 ? 4 - H.size() : 0, '0') + H;
+      };
+      OutStreamer->emitRawText(StringRef("\n\t.section __c30_signature, info, data"));
+      OutStreamer->emitRawText(StringRef("\t.word 0x0001"));
+      OutStreamer->emitRawText("\t.word 0x" + Hex4(Mask));
+      OutStreamer->emitRawText("\t.word 0x" + Hex4(Mask & Set));
+    }
+  }
   if (ConfigPragmas.empty())
     return;
   if (DSPICConfigDB.empty())

@@ -155,6 +155,22 @@ public:
       : TargetCodeGenInfo(std::make_unique<DSPICABIInfo>(CGT)) {}
   void setTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
                            CodeGen::CodeGenModule &M) const override;
+  // ⛔ trellis session 139: the two ABI facts the backend's `__c30_signature` is made of --
+  // DSPICAsmPrinter::emitEndOfAsmFile composes cc1's three words from them. They are stated HERE
+  // because the IR cannot carry them: by the time the backend runs, a C `double` IS `float`, and a
+  // translation unit with no function carries no language and no target feature at all (trc
+  // steps/frontend/SIG5.banked.txt ARM L). The WIDTHS, not the flags that set them: under
+  // -menable-large-arrays the vendor's size_t is 32 bits and ours 16 (SIG5 ARM Z), and the words
+  // must describe the object that was actually built. Behaviour Error: two modules that disagree
+  // on an ABI fact cannot become one object whose signature is true of both.
+  void emitTargetMetadata(CodeGen::CodeGenModule &CGM,
+                          const llvm::MapVector<GlobalDecl, StringRef> &) const override {
+    const ASTContext &Ctx = CGM.getContext();
+    CGM.getModule().addModuleFlag(llvm::Module::Error, "dspic-size-t-width",
+                                  uint32_t(Ctx.getTypeSize(Ctx.getSizeType())));
+    CGM.getModule().addModuleFlag(llvm::Module::Error, "dspic-double-width",
+                                  uint32_t(Ctx.getTypeSize(Ctx.DoubleTy)));
+  }
 };
 
 } // namespace
