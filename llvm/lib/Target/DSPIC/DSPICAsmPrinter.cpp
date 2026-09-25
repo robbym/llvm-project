@@ -440,7 +440,7 @@ void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
   // written, implicit or pic30's own -- and its size_t is 32 bits where ours is 16, so these words
   // describe OUR object; a pure-ours link takes the `_o` members (stn3255), and L4 is the price.
   // SET: bit 0 iff size_t is 32 bits (never, yet), bit 1 never (this port has no unified model),
-  // bit 2 iff double is 64 bits (C++). Row: steps/frontend/sig-compare.sh.
+  // bit 2 iff double is 64 bits (C++; C under -mdouble=64, cell G17). Row: sig-compare.sh.
   // ⛔ ONLY WHERE THE STREAMER TAKES RAW TEXT. cc1's spelling (`info, data`) exists only as text for
   // the pic30 assembler. An object streamer (`-fintegrated-as`, Route B, not started: the operator,
   // session 133) aborts on emitRawText, and without this test every TU did (mcpu-compare S2). Via
