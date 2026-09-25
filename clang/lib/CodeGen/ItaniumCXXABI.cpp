@@ -3207,8 +3207,13 @@ void ItaniumCXXABI::registerGlobalDtor(CodeGenFunction &CGF, const VarDecl &D,
   // ⚠ Not for a static local, whose construction is conditional on a first call and whose
   // registration must therefore happen at run time, and not for thread_local: each falls through
   // to what it does today. The row is steps/frontend/dtor-compare.sh.
+  // ⛔ AND ONLY WITHOUT __cxa_atexit (session 138 post-close, the operator's "vendor parity"):
+  // .dtors is cc1plus's no-__cxa_atexit route, and under an explicit -fuse-cxa-atexit the vendor
+  // sends every static to __cxa_atexit (and fails to link on ___dso_handle). The dspic driver
+  // makes -fno-use-cxa-atexit the default (DSPICToolChain::addClangTargetOptions), as cc1plus is
+  // configured, so this gate is open unless the user asks for __cxa_atexit.
   if (CGM.getTarget().getTriple().getArch() == llvm::Triple::dspic &&
-      !D.isStaticLocal() && !D.getTLSKind()) {
+      !CGM.getCodeGenOpts().CXAAtExit && !D.isStaticLocal() && !D.getTLSKind()) {
     llvm::GlobalValue::LinkageTypes L = CGM.getLLVMLinkageVarDefinition(&D);
     if (!llvm::GlobalValue::isWeakLinkage(L) &&
         !llvm::GlobalValue::isLinkOnceLinkage(L))

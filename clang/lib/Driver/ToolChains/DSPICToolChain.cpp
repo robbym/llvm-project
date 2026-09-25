@@ -39,6 +39,23 @@ DSPICToolChain::DSPICToolChain(const Driver &D, const llvm::Triple &Triple,
                                const ArgList &Args)
     : Generic_ELF(D, Triple, Args) {}
 
+// ⛔ trellis session 138 (post-close): VENDOR PARITY for static destructors. Measured:
+// xc-dsc-g++'s cc1plus line carries no cxa option at all, so atexit is its CONFIGURED default --
+// a function-local static registers with atexit (runs on exit(), not when main returns), and a
+// namespace-scope object goes to .dtors (ItaniumCXXABI::registerGlobalDtor's dspic arm, gated on
+// exactly this flag). An explicit -fuse-cxa-atexit is honoured, as the vendor honours it: every
+// static then goes to __cxa_atexit, and both compilers fail to link on ___dso_handle.
+// Generic_ELF's hook is called first: it forwards an explicit -fno-use-init-array, and nothing
+// else in the driver does. AVR's and XCore's shape. The row is steps/frontend/dtor-compare.sh.
+void DSPICToolChain::addClangTargetOptions(const ArgList &DriverArgs,
+                                           ArgStringList &CC1Args, BoundArch BA,
+                                           Action::OffloadKind DeviceOffloadKind) const {
+  Generic_ELF::addClangTargetOptions(DriverArgs, CC1Args, BA, DeviceOffloadKind);
+  if (!DriverArgs.hasFlag(options::OPT_fuse_cxa_atexit,
+                          options::OPT_fno_use_cxa_atexit, false))
+    CC1Args.push_back("-fno-use-cxa-atexit");
+}
+
 Tool *DSPICToolChain::buildAssembler() const {
   return new tools::dspic::Assembler(*this);
 }

@@ -80,6 +80,14 @@ public:
   DSPICToolChain(const Driver &D, const llvm::Triple &Triple,
                  const llvm::opt::ArgList &Args);
 
+  // ⛔ trellis session 138 (post-close), the operator's "vendor parity": -fno-use-cxa-atexit is
+  // this toolchain's DEFAULT, as the vendor's cc1plus is configured -- its cc1plus line carries no
+  // cxa option, it registers a function-local static with atexit, and an explicit
+  // -fuse-cxa-atexit sends every static to __cxa_atexit, which does not link on this install.
+  void addClangTargetOptions(const llvm::opt::ArgList &DriverArgs,
+                             llvm::opt::ArgStringList &CC1Args, BoundArch BA,
+                             Action::OffloadKind DeviceOffloadKind) const override;
+
   // ⛔ FALSE, AND THE PRICE WAS MEASURED BEFORE IT WAS CHOSEN. This flag is read when the cc1
   // line is built, not only when the assemble step is: it adds -no-integrated-as and
   // -fno-dwarf-directory-asm and drops -faddrsig. Over the two firmwares' 103 units, at each
