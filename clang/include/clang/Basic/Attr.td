@@ -2543,21 +2543,43 @@ def DSPICStrictBitfield : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
 //   boot / secure    CodeGuard segments -- `.boot*`/`.secure*` sections, the access-entry table,
 //                    `__bootconst_psvpage` prologues (fn.cc1.s f_boot): a linker feature this port
 //                    has never exercised
-//   shared           co-resident applications
-//   preserved/update the linker's --preserved= restart model
-//   xcdsc_obfuscate  symbol renaming (fn.cc1.s: `__JrN0T`)
+//   ⛔ trellis session 141 (ITEM 1a, DECISION 3): `shared`, `preserved`, `update` and
+//   `xcdsc_obfuscate` LEFT this set -- the vendor accepts them -- and are modelled, each its own
+//   record below (trc steps/frontend/attr4-edit.py).
 //   round(mode)      fixed-point rounding -- no _Fract here; ⛔ and cc1 8.3.1 REFUSES ITS OWN FOUR
 //                    DOCUMENTED MODES (err-round-modes.cc1.log: "'fastest' undeclared here")
 //   ramfunc          cc1: "ramfunc attribute is not supported on this target" (the 32-bit ISA only)
 // ⚠ TWO records, not one: a GCC<> spelling flattens to three (GNU, [[gnu::]] C++11, [[gnu::]]
 // C23) and ClangAttrEmitter asserts below 15 per record -- six names in one record is 18, and the
 // first build of this row died in clang-tblgen on exactly that.
-// ⚠ `shared` is NOT here: its GNU spelling is CUDA's `__shared__` (CUDAShared, this file), and
-// two records may not own one spelling. On the dsPIC triple ProcessDeclAttribute routes
-// AT_CUDAShared to handleDSPICRefusedAttr before the language-option check (SemaDeclAttr.cpp).
-def DSPICRefused : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+// ⛔ trellis session 141: the four the vendor ACCEPTS, modelled (trc steps/frontend/ATTR4.expected.first).
+// `preserved` / `update`: a section flag on a variable -- the --preserved= restart model itself is the
+// linker's, and ours links with the same GPL ld-new; on a FUNCTION the vendor errors, and so does
+// handleDSPICPreservedUpdateAttr. No Subjects: the handlers answer a parameter, a member and an
+// automatic with the vendor's own warning (pic30.c:20878 ignore_attribute), which a subject list
+// would pre-empt with clang's.
+def DSPICPreserved : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Spellings = [GCC<"preserved">];
   let Documentation = [Undocumented];
+}
+def DSPICUpdate : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"update">];
+  let Documentation = [Undocumented];
+}
+// `xcdsc_obfuscate`: the symbol renamed by the vendor's cipher of its mangled name -- in CodeGen
+// (getMangledNameImpl), so that every definition and reference takes the one name.
+def DSPICObfuscate : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
+  let Spellings = [GCC<"xcdsc_obfuscate">];
+  let Documentation = [Undocumented];
+}
+// `shared`: its GNU spelling is CUDA's `__shared__` (CUDAShared, this file), and two records may not
+// own one spelling. On the dsPIC triple ProcessDeclAttribute routes AT_CUDAShared, ahead of the
+// language-option check, to handleDSPICSharedAttr (SemaDeclAttr.cpp), which adds this record.
+def DSPICShared : InheritableAttr {
+  // This attribute has no spellings as it is only ever created implicitly.
+  let Spellings = [];
+  let SemaHandler = 0;
+  let Documentation = [InternalOnly];
 }
 // trellis session 110: `eds` LEAVES the refused set and becomes its own attribute. The guide
 // (DS-50003589D 7.7.1) states __attribute__((eds)) is equivalent to __attribute__((space(eds))),
@@ -2568,7 +2590,8 @@ def DSPICEds : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
   let Documentation = [Undocumented];
 }
 def DSPICRefusedB : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {
-  let Spellings = [GCC<"update">, GCC<"xcdsc_obfuscate">, GCC<"ramfunc">];
+  // trellis session 141: `update` and `xcdsc_obfuscate` left for their own records above.
+  let Spellings = [GCC<"ramfunc">];
   let Documentation = [Undocumented];
 }
 def DSPICRefusedSegment : InheritableAttr, TargetSpecificAttr<TargetDSPIC> {

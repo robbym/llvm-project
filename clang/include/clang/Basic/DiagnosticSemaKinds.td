@@ -14423,6 +14423,17 @@ def err_dspic_target_error_use : Error<
   "%0 : %1">;
 def warn_dspic_deprecated_definition : Warning<
   "%0 definition has been deprecated: %1">;
+// trellis session 141 (ITEM 1a): the vendor's own words for shared / preserved / update /
+// xcdsc_obfuscate (pic30.c:20878-20905 ignore_attribute, :21557-21592, :21700), each measured
+// (trc steps/frontend/ATTR1A.banked.txt, ATTR1A3.banked.txt).
+// ⚠ The vendor's other two texts begin with a capital ("Ignoring attribute ...", "Ignoring
+// __attribute__((...)) ..."), which TableGen refuses for a diagnostic here -- the first build of this
+// row stopped on it -- so SemaDeclAttr.cpp emits those two as custom IDs, as session 140's D7 emits the
+// vendor's capitalised C++ notices.
+def warn_dspic_attr_ignored_on : Warning<
+  "ignoring %0 attribute applied to %select{parameter|member|automatic}1 %2">,
+  InGroup<IgnoredAttributes>;
+def err_dspic_invalid_attr : Error<"invalid attribute '%0' ignored">;
 def warn_dspic_scratch_reg : Warning<
   "the scratch_reg attribute is not usable (the vendor compiler says the same and ignores it)">;
 def warn_dspic_strict_bitfield_nonmember : Warning<

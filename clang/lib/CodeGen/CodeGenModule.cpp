@@ -2481,6 +2481,48 @@ static bool isUniqueInternalLinkageDecl(GlobalDecl GD,
                                  cast<VarDecl>(D)) == GVA_Internal);
 }
 
+// trellis session 141 (ITEM 1a): the vendor's xcdsc_obfuscate cipher, ported character for character
+// from pic30.c:31254-31306 (pic30_mapcp, pic30_mapstrdup) -- including that it builds a C STRING, so
+// a character outside its alphabet maps to NUL and ENDS the name, and that its separator index runs
+// one PAST the table before it wraps. Each character is offset by the previous OUTPUT character;
+// every eighth input position is preceded by a separator, `_` first.
+static std::string dspicObfuscatedName(StringRef S) {
+  static const char Cipher[] = "thequickbr" "ownfxjmpsv" "lazydgTHEQ" "UICKBR" "O"
+                               "WNFXJMPSVL" "AZYDG01234" "56789_";
+  const int CLen = sizeof(Cipher) - 1;
+  auto MapCP = [&](char C, char X) -> char {
+    int M;
+    if (C >= '0' && C <= '9')
+      M = C - '0';
+    else if (C >= 'A' && C <= 'Z')
+      M = 10 + C - 'A';
+    else if (C >= 'a' && C <= 'z')
+      M = 36 + C - 'a';
+    else if (C == '_')
+      M = 61;
+    else
+      return 0;
+    M = M + X;
+    while (M >= CLen)
+      M = M - CLen;
+    return Cipher[M];
+  };
+  std::string Out;
+  char Last = 0;
+  int ICO = 0;
+  for (size_t C = 0; C < S.size(); ++C) {
+    Last = MapCP(S[C], Last);
+    if ((C & 7) == 0) {
+      Out += C ? Cipher[ICO] : '_';
+      ++ICO;
+      if (ICO > CLen)
+        ICO = 0;
+    }
+    Out += Last;
+  }
+  return Out.substr(0, Out.find('\0'));
+}
+
 static std::string getMangledNameImpl(CodeGenModule &CGM, GlobalDecl GD,
                                       const NamedDecl *ND,
                                       bool OmitMultiVersionMangling = false) {
@@ -2575,6 +2617,13 @@ static std::string getMangledNameImpl(CodeGenModule &CGM, GlobalDecl GD,
       CGM.getLangOpts().CUDAIsDevice)
     CGM.printPostfixForExternalizedDecl(Out, ND);
 
+  // trellis session 141 (ITEM 1a): xcdsc_obfuscate. The vendor renames the symbol by its cipher of
+  // the name it would otherwise emit -- C's identifier, C++'s mangled name -- and then prefixes the
+  // label as usual (pic30.c:4970). "\01" keeps LLVM from prefixing it a second time. Every
+  // definition and every reference comes through here, so they agree, in every unit that declares
+  // the attribute -- and, as on the vendor, a unit that does not references the plain name.
+  if (ND->hasAttr<DSPICObfuscateAttr>())
+    return "\01_" + dspicObfuscatedName(Out.str());
   return std::string(Out.str());
 }
 

@@ -6976,6 +6976,82 @@ static void handleDSPICStrictBitfieldAttr(Sema &S, Decl *D, const ParsedAttr &AL
 
 // ⛔ REFUSED: the spelling is known and the answer is an error that names what the attribute
 // means and why this port does not provide it. The price of each is in attr-audit.py.
+// ⛔ trellis session 141 (ITEM 1a, DECISION 3): `shared`, `preserved`, `update` and
+// `xcdsc_obfuscate` are MODELLED, each answered as the vendor answers it (trc
+// steps/frontend/ATTR4.expected.first; the asks ATTR1A*.banked.txt). First what the vendor's
+// ignore_attribute (pic30.c:20878-20905) does for all four: a parameter, a member or an automatic
+// is warned in its words and the attribute dropped.
+static bool dspicIgnoredOn(Sema &S, Decl *D, const ParsedAttr &AL, StringRef Name) {
+  unsigned Where = isa<ParmVarDecl>(D) ? 0 : isa<FieldDecl>(D) ? 1 : 2;
+  if (Where == 2) {
+    const auto *VD = dyn_cast<VarDecl>(D);
+    if (!VD || !VD->hasLocalStorage())
+      return false;
+  }
+  S.Diag(AL.getLoc(), diag::warn_dspic_attr_ignored_on)
+      << Name << Where << cast<NamedDecl>(D)->getName();
+  return true;
+}
+
+// preserved / update. The vendor's handlers for these sit in its VARIABLE branch; anything else
+// falls through to its generic error (pic30.c:21700), "invalid attribute 'preserved' ignored".
+static void handleDSPICPreservedUpdateAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  bool IsPreserved = AL.getKind() == ParsedAttr::AT_DSPICPreserved;
+  StringRef Name = IsPreserved ? "preserved" : "update";
+  if (dspicIgnoredOn(S, D, AL, Name))
+    return;
+  auto *VD = dyn_cast<VarDecl>(D);
+  if (!VD) {
+    S.Diag(AL.getLoc(), diag::err_dspic_invalid_attr) << Name;
+    return;
+  }
+  // The other of the pair already on the object: the vendor warns and drops THIS one
+  // (pic30.c:21557-21592), so which survives is written order.
+  // (Both warnings are the vendor's words, capital and all, so they are custom IDs: TableGen refuses a
+  // capitalised diagnostic -- DiagnosticSemaKinds.td says so beside the other two.)
+  if (IsPreserved ? D->hasAttr<DSPICUpdateAttr>() : D->hasAttr<DSPICPreservedAttr>()) {
+    S.Diag(AL.getLoc(),
+           S.getDiagnostics().getCustomDiagID(
+               DiagnosticsEngine::Warning,
+               "Ignoring __attribute__((%0)) applied to '%1'\n\tas it conflicts with "
+               "__attribute__((%2))"))
+        << Name << VD->getName() << (IsPreserved ? "update" : "preserved");
+    return;
+  }
+  // A const where consts live in program memory -- the default model; not -mconst-in-data
+  // (the vendor's TARGET_CONST_IN_CODE | TARGET_CONST_IN_PSV).
+  if (VD->getType().isConstQualified() &&
+      !S.Context.getTargetInfo().hasFeature("const-in-data")) {
+    S.Diag(AL.getLoc(), S.getDiagnostics().getCustomDiagID(
+                            DiagnosticsEngine::Warning, "Ignoring attribute '%0' applied to '%1'"))
+        << Name << VD->getName();
+    return;
+  }
+  if (IsPreserved)
+    D->addAttr(::new (S.Context) DSPICPreservedAttr(S.Context, AL));
+  else
+    D->addAttr(::new (S.Context) DSPICUpdateAttr(S.Context, AL));
+}
+
+// shared. Routed here ahead of checkCommonAttributeFeatures (ProcessDeclAttribute), so the arity is
+// checked here: the vendor refuses `shared(1)` too.
+static void handleDSPICSharedAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (AL.getNumArgs()) {
+    S.Diag(AL.getLoc(), diag::err_attribute_wrong_number_arguments) << AL << 0;
+    return;
+  }
+  if (dspicIgnoredOn(S, D, AL, "shared"))
+    return;
+  D->addAttr(DSPICSharedAttr::CreateImplicit(S.Context, AL.getRange()));
+}
+
+// xcdsc_obfuscate. The renaming itself is CodeGen's (getMangledNameImpl): it needs the mangled name.
+static void handleDSPICObfuscateAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  if (dspicIgnoredOn(S, D, AL, "xcdsc_obfuscate"))
+    return;
+  D->addAttr(::new (S.Context) DSPICObfuscateAttr(S.Context, AL));
+}
+
 static void handleDSPICRefusedAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   StringRef Name = AL.getAttrName()->getName();
   if (Name.starts_with("__") && Name.ends_with("__"))
@@ -6984,10 +7060,7 @@ static void handleDSPICRefusedAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
       Name == "eds"       ? "extended data space is not modelled (the paged access model)"
     : Name == "boot"      ? "CodeGuard boot/secure segments are not modelled"
     : Name == "secure"    ? "CodeGuard boot/secure segments are not modelled"
-    : Name == "shared"    ? "co-resident applications are not modelled"
-    : Name == "preserved" ? "the linker's --preserved= restart model is not modelled"
-    : Name == "update"    ? "the linker's --preserved= restart model is not modelled"
-    : Name == "xcdsc_obfuscate" ? "symbol obfuscation is not provided"
+    // trellis session 141: shared, preserved, update and xcdsc_obfuscate no longer reach here.
     : Name == "round"     ? "fixed-point rounding modes are not provided (and xc-dsc 4.00's own "
                             "compiler refuses its four documented modes)"
     : Name == "ramfunc"   ? "not supported on this target (the vendor compiler refuses it on "
@@ -7951,9 +8024,10 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
   // trellis session 109: on dsPIC `shared` is the vendor's co-resident attribute (pic30.c),
   // spelled like CUDA's `__shared__`; REFUSED with the vendor semantics named rather than left
   // to CUDA's language-option check.
+  // ⛔ trellis session 141: ...and MODELLED since, no longer refused (handleDSPICSharedAttr).
   if (AL.getKind() == ParsedAttr::AT_CUDAShared &&
       S.Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic) {
-    handleDSPICRefusedAttr(S, D, AL);
+    handleDSPICSharedAttr(S, D, AL);
     return;
   }
 
@@ -8330,7 +8404,14 @@ ProcessDeclAttribute(Sema &S, Decl *D, const ParsedAttr &AL,
   case ParsedAttr::AT_DSPICEds:
     handleSimpleAttribute<DSPICEdsAttr>(S, D, AL);
     break;
-  case ParsedAttr::AT_DSPICRefused:
+  // trellis session 141: preserved, update and xcdsc_obfuscate left the refusal records.
+  case ParsedAttr::AT_DSPICPreserved:
+  case ParsedAttr::AT_DSPICUpdate:
+    handleDSPICPreservedUpdateAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_DSPICObfuscate:
+    handleDSPICObfuscateAttr(S, D, AL);
+    break;
   case ParsedAttr::AT_DSPICRefusedB:
   case ParsedAttr::AT_DSPICRefusedSegment:
   case ParsedAttr::AT_DSPICRound:

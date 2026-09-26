@@ -322,6 +322,10 @@ public:
         S += ",noload";
       if (F->hasFnAttribute("dspic-keep") && !F->hasFnAttribute("dspic-priority"))
         S += ",keep";
+      // trellis session 141: `shared` is the vendor's LAST token (ATTR1A2: `code,keep,shared`,
+      // `code,noload,shared`, `address(8192),code,shared`).
+      if (F->hasFnAttribute("dspic-shared"))
+        S += ",shared";
       return S;
     }
     const auto *GV = dyn_cast<GlobalVariable>(GO);
@@ -405,6 +409,14 @@ public:
     // trellis session 109: `reverse(N)` next (var.cc1.s: `reverse(64),bss`), then priority.
     if (GV && GV->hasAttribute("dspic-reverse"))
       S += ",reverse(" + GV->getAttribute("dspic-reverse").getValueAsString().str() + ")";
+    // trellis session 141: preserved / update AFTER address and reverse, BEFORE priority and the
+    // kind -- the vendor's order, measured (ATTR1A2: `address(4608),preserved,data,near`,
+    // `reverse(64),preserved,data,near`, `preserved,priority(0x0002),keep,data,near`). Sema lets
+    // at most one of the two onto an object.
+    if (GV && GV->hasAttribute("dspic-preserved"))
+      S += ",preserved";
+    else if (GV && GV->hasAttribute("dspic-update"))
+      S += ",update";
     S += pic30Priority(GO);
     if ((GV && GV->hasAttribute("dspic-persistent")) || NamePersist) {
       if (Near)
@@ -448,6 +460,10 @@ public:
       S += ",noload";
     if (GV && GV->hasAttribute("dspic-keep") && !GV->hasAttribute("dspic-priority"))
       S += ",keep";
+    // trellis session 141: `shared` LAST (ATTR1A2: `bss,near,noload,shared`, `data,near,keep,shared`,
+    // `near,persist,shared`, `address(4608),data,near,shared`).
+    if (GV && GV->hasAttribute("dspic-shared"))
+      S += ",shared";
     return S;
   }
 
@@ -625,7 +641,8 @@ public:
       // trellis session 109: a function with a placement attribute gets its OWN section carrying
       // it (cc1's `*_hash,...,code`; ours `.text.<name>` -- the name-derived attributes agree).
       if (F->hasFnAttribute("dspic-address") || F->hasFnAttribute("dspic-noload") ||
-          F->hasFnAttribute("dspic-keep") || F->hasFnAttribute("dspic-priority"))
+          F->hasFnAttribute("dspic-keep") || F->hasFnAttribute("dspic-priority") ||
+          F->hasFnAttribute("dspic-shared"))   // trellis session 141
         return getContext().getELFSection((".text." + GO->getName()).str() + pic30Attrs(GO, Kind),
                                           ELF::SHT_PROGBITS, ELF::SHF_ALLOC | ELF::SHF_EXECINSTR);
     }
@@ -647,7 +664,12 @@ public:
                     GVar->hasAttribute("dspic-keep") || GVar->hasAttribute("dspic-page") ||
                     GVar->hasAttribute("dspic-reverse") ||
                     GVar->hasAttribute("dspic-unordered") ||
-                    GVar->hasAttribute("dspic-priority");
+                    GVar->hasAttribute("dspic-priority") ||
+                    // trellis session 141: each its own section on the vendor too; a READ-ONLY
+                    // shared object is placed by the space(auto_psv) clang names for it, which
+                    // this chain already turns into the shared `.const,psv,page`
+                    GVar->hasAttribute("dspic-preserved") || GVar->hasAttribute("dspic-update") ||
+                    (GVar->hasAttribute("dspic-shared") && !Kind.isReadOnly());
       if (Placed && GO->getAddressSpace() != 1) {
         StringRef Space = GVar->hasAttribute("dspic-space")
                               ? GVar->getAttribute("dspic-space").getValueAsString()

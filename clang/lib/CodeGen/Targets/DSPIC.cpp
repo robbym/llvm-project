@@ -250,6 +250,24 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // TLOF (DSPICTargetMachine.cpp pic30Attrs), each measured from cc1 (var.cc1.s).
       if (VD->hasAttr<DSPICKeepAttr>())
         GVar->addAttribute("dspic-keep");
+      // trellis session 141: preserved / update / shared, each a pic30 section flag (the TLOF's
+      // pic30Attrs, in the vendor's positions).
+      if (VD->hasAttr<DSPICPreservedAttr>())
+        GVar->addAttribute("dspic-preserved");
+      if (VD->hasAttr<DSPICUpdateAttr>())
+        GVar->addAttribute("dspic-update");
+      if (VD->hasAttr<DSPICSharedAttr>()) {
+        GVar->addAttribute("dspic-shared");
+        // A const in program memory keeps the SHARED `.const`: the vendor's
+        // `.const,psv,page,shared` (ATTR1A V28). Its space is named here -- space(auto_psv), the
+        // default const model's -- so the TLOF's per-object chain gives it that base and those
+        // flags. ⚠ Done here and not by a new arm before the TLOF's ConstSection return: that
+        // return sits inside models/model-edit.py's text, and the first spelling of this row
+        // split it (roundtrip.py).
+        if (VD->getType().isConstQualified() && !GVar->hasAttribute("dspic-space") &&
+            !M.getTarget().hasFeature("const-in-data"))
+          GVar->addAttribute("dspic-space", "auto_psv");
+      }
       if (VD->hasAttr<DSPICUnorderedAttr>())
         GVar->addAttribute("dspic-unordered");
       if (const auto *PA = VD->getAttr<DSPICPriorityAttr>())
@@ -482,6 +500,9 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
     F->addFnAttr("dspic-noload");
   if (FD->hasAttr<DSPICKeepAttr>())
     F->addFnAttr("dspic-keep");
+  // trellis session 141: `shared` -- its own section, the flag last.
+  if (FD->hasAttr<DSPICSharedAttr>())
+    F->addFnAttr("dspic-shared");
   if (const auto *PA = FD->getAttr<DSPICPriorityAttr>())
     F->addFnAttr("dspic-priority", std::to_string(PA->getLevel()));
   if (FD->hasAttr<DSPICShadowAttr>())
