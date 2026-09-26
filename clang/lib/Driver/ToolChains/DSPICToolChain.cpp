@@ -24,8 +24,9 @@
 #include "clang/Options/Options.h"
 #include "llvm/Option/ArgList.h"
 #include "llvm/Support/Path.h"
-// trellis session 137: FileSystem.h for directory_iterator, which enumerates the pack's
-// support/<FAMILY>/gld directories, and STLExtras.h for llvm::sort over them.
+// trellis session 137: FileSystem.h and STLExtras.h for the pack's library directories -- ⛔ since
+// session 141 FileSystem.h's is_directory filters the vendor's own table (addPackLibraryPaths), and
+// nothing here sorts or enumerates any more.
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/FileSystem.h"
 
@@ -205,35 +206,43 @@ static void addDefaultLibs(ArgStringList &CmdArgs, bool CXX) {
   CmdArgs.push_back("-lgcc");
 }
 
-// ⛔ EVERY support/<FAMILY>/gld THE PACK HAS, AND NOT THE DEVICE'S FAMILY. Two installed packs
-// carry two families each -- dsPIC33E-GM-GP-MC-GU-MU has PIC24E and dsPIC33E, dsPIC33F-GP-MC has
-// PIC24H and dsPIC33F -- and the vendor's line carries BOTH of a pack's directories, in order,
-// for a device of either family (CXXLD2 ARM M, CXXLD3 ARM M2). The single-family packs cannot
-// tell that rule from the family-derived one, which is why the two-family packs were read.
-// ⚠ clang::dspic::packIncludeDirs answers the FAMILY question for include paths and is the
-// obvious thing to reuse here. It is the wrong answer for this one: it yields exactly one family,
-// so on those two packs it would emit one -L where the vendor emits two. Mutant N6 is that reuse.
-// ⚠ SORTED. On the two packs that can show an order, sorted order and the vendor's agree; nothing
-// installed here distinguishes "sorted" from "whatever order the vendor uses", and if a pack ever
-// does, cell L4 is where it surfaces.
+// ⛔ THE VENDOR'S OWN TABLE -- trellis session 141, ITEM 3, and it replaces session 137's rule
+// ("every support/<FAMILY>/gld the pack has, sorted"). The vendor driver walks DEFAULT_LIB_PATH
+// (pic30.h:454-464 over c30_flag_definitions.h:341-437) rooted at <pack>/bin/, so "../E" is <pack>/E,
+// adds every entry as a library prefix with NO de-duplication (gcc.c add_prefix), and prints a -L for
+// each one that IS A DIRECTORY, in table order (%D, spec_path). So: a family the table does not name is
+// never searched; dsPIC33A comes AFTER dsPIC33E and generic first; a pack's lib/ directories ARE
+// searched -- the installed dsPIC33CH-MP pack has one, and it comes first -- and an entry the table
+// repeats is repeated on the line (steps/frontend/GLDTAB.expected.first, gldtab-compare.sh G1-G4).
+// Session 137's reading still holds where it was measured: a two-family pack carries BOTH its
+// directories for a device of either family (CXXLD2 ARM M), and those are in table order.
+// ⚠ clang::dspic::packIncludeDirs answers the FAMILY question for include paths; it is still the wrong
+// answer here -- one family per pack -- and mutant N6 (cxxld) is that reuse.
+// ⚠ The install side (-L<sysroot>/bin, -L<sysroot>/lib in the job below) is the vendor's second pass of
+// the same table rooted at its own directory; on xc-dsc v4.00 only lib of the 22 distinct entries exists
+// (lib/errata is the -merrata= table's), so it is left as it is. PIC30_LIBRARY_PATH, which replaces the
+// table on the vendor, is not modelled.
 static void addPackLibraryPaths(const ArgList &Args, ArgStringList &CmdArgs) {
   const Arg *A = Args.getLastArg(options::OPT_mdfp_EQ);
   if (!A)
     return;
-  SmallString<128> Support(A->getValue());
-  llvm::sys::path::append(Support, "support");
-  llvm::SmallVector<std::string, 4> Dirs;
-  std::error_code EC;
-  for (llvm::sys::fs::directory_iterator I(Support, EC), E; I != E && !EC;
-       I.increment(EC)) {
-    SmallString<128> Gld(I->path());
-    llvm::sys::path::append(Gld, "gld");
-    if (llvm::sys::fs::is_directory(Gld))
-      Dirs.push_back(std::string(Gld));
+  static const char *const Table[] = {
+      "lib", "support/generic/gld",                                               // COMMON
+      "lib/PIC24E", "support/PIC24E/gld", "lib/peripheral_30F_24H_33F",            // PIC24E
+      "lib/PIC24F", "support/PIC24F/gld", "lib/peripheral_24F",                    // PIC24F
+      "lib/PIC24H", "support/PIC24H/gld", "lib/peripheral_30F_24H_33F",            // PIC24H
+      "lib/dsPIC30F", "support/dsPIC30F/gld", "lib/peripheral_30F_24H_33F",        // PIC30F
+      "lib/dsPIC33C", "support/dsPIC33C/gld", "lib/peripheral_30F_24H_33F",        // PIC33C
+      "lib/dsPIC33E", "support/dsPIC33E/gld", "lib/peripheral_30F_24H_33F",        // PIC33E
+      "lib/dsPIC33A", "support/dsPIC33A/gld",                                      // PIC33A
+      "lib/PIC32A", "support/PIC32A/gld",                                          // PIC32A
+      "lib/dsPIC33F", "support/dsPIC33F/gld", "lib/peripheral_30F_24H_33F"};      // PIC33F
+  for (const char *E : Table) {
+    SmallString<128> P(A->getValue());
+    llvm::sys::path::append(P, E);
+    if (llvm::sys::fs::is_directory(P))
+      CmdArgs.push_back(Args.MakeArgString(Twine("-L") + P));
   }
-  llvm::sort(Dirs);
-  for (const std::string &D : Dirs)
-    CmdArgs.push_back(Args.MakeArgString(Twine("-L") + D));
 }
 
 void tools::dspic::Linker::ConstructJob(Compilation &C, const JobAction &JA,
