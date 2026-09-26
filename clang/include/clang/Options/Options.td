@@ -6549,8 +6549,9 @@ def mno_ginv : Flag<["-"], "mno-ginv">, Group<m_mips_Features_Group>;
 // ⛔ HERE, AFTER THE `let Flags = [TargetSpecific]` BLOCK AND NOT INSIDE IT: the first landing put
 // these beside session 96's dsPIC model flags, inside that block, whose `let` OVERRODE the Flags
 // below -- so -omf=elf on a link line was refused as unsupported (flags-compare cell O4).
-// ⛔ Before omf_EQ existed, `-omf=elf` parsed as `-o mf=elf`, and on MPLAB's own line the object went
-// to a file named `mf=elf`.
+// ⛔ Before omf_EQ existed, `-omf=elf` parsed as `-o mf=elf`: placed after `-o x.o`, as MPLAB places
+// it, the object went to a file named `mf=elf` with exit 0 -- measured on MPLAB's own assembler
+// lines, 6 of 6. Its C compile lines never got that far: each carries flags this driver refused.
 def omf_EQ : Joined<["-"], "omf=">, Flags<[NoArgumentUnused]>,
   HelpText<"dsPIC: the object format; only elf (the vendor refuses coff)">;
 def fshort_double : Flag<["-"], "fshort-double">, Flags<[NoArgumentUnused]>,
