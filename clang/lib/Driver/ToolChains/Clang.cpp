@@ -6335,6 +6335,67 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
           << A->getAsString(Args) << TripleStr;
   }
 
+  // ⛔ trellis session 140 (D7: DECISION 3 covers build flags -- refusing a flag the vendor driver
+  // accepts is not an option). Each is MODELLED from what it does on the vendor (trc
+  // steps/frontend/FLAGS2.banked.txt, FLAGS3.banked.txt):
+  //   -omf=elf     ELF is the only object format this compiler emits; the vendor refuses coff.
+  //   -f/-mno-short-double  C: a 64-bit double, as cc1's -mdouble=64 (the vendor: __SIZEOF_DOUBLE__
+  //                8, ___muldf3). C++'s double is 64 bits already; the vendor prints nothing.
+  //   -f/-mshort-double, -mno-unified  the defaults.
+  //   -munified    the unified memory model (the vendor's pointers become 4 bytes) -- NOT
+  //                implemented, so C refuses it by name (COSTED, the session-140 prep).
+  //   In C++ the vendor prints a notice for -fshort-double, -mshort-double and -munified and ignores
+  //   them; so does this driver, with the vendor's text after clang's own prefix.
+  //   -msfr-warn=, -mno-eds-warn, -ftrack-macro-expansion[=]  the vendor's code does not move under
+  //                any measured value, and this compiler emits none of the warnings they control.
+  // On any other triple a compile job refuses all of them. Row: trc steps/frontend/flags-compare.sh.
+  {
+    bool IsDSPIC = TC.getArch() == llvm::Triple::dspic;
+    for (Arg *A : Args.filtered(options::OPT_omf_EQ, options::OPT_fshort_double,
+                                options::OPT_fno_short_double, options::OPT_mshort_double,
+                                options::OPT_mno_short_double, options::OPT_munified,
+                                options::OPT_mno_unified, options::OPT_msfr_warn_EQ,
+                                options::OPT_mno_eds_warn, options::OPT_ftrack_macro_expansion,
+                                options::OPT_ftrack_macro_expansion_EQ)) {
+      A->claim();
+      if (!IsDSPIC)
+        D.Diag(diag::err_drv_unsupported_opt_for_target)
+            << A->getAsString(Args) << TripleStr;
+    }
+    if (IsDSPIC) {
+      DiagnosticsEngine &DE = D.getDiags();
+      bool IsCXX = types::isCXX(Input.getType());
+      if (Arg *A = Args.getLastArg(options::OPT_omf_EQ))
+        if (StringRef(A->getValue()) != "elf")
+          D.Diag(DE.getCustomDiagID(DiagnosticsEngine::Error,
+                                    "-omf=%0: this compiler emits only ELF objects (-omf=elf)"))
+              << A->getValue();
+      if (Arg *A = Args.getLastArg(options::OPT_fshort_double, options::OPT_fno_short_double,
+                                   options::OPT_mshort_double, options::OPT_mno_short_double)) {
+        bool Short = A->getOption().matches(options::OPT_fshort_double) ||
+                     A->getOption().matches(options::OPT_mshort_double);
+        if (IsCXX) {
+          if (Short)
+            D.Diag(DE.getCustomDiagID(
+                DiagnosticsEngine::Warning,
+                "Option '-fshort-double' is not currently supported for C++, ignoring"));
+        } else if (!Short) {
+          CmdArgs.push_back("-mdouble=64");
+        }
+      }
+      if (Args.hasFlag(options::OPT_munified, options::OPT_mno_unified, false)) {
+        if (IsCXX)
+          D.Diag(DE.getCustomDiagID(
+              DiagnosticsEngine::Warning,
+              "Option '-munified' is not currently supported for C++, ignoring"));
+        else
+          D.Diag(DE.getCustomDiagID(DiagnosticsEngine::Error,
+                                    "-munified: the unified memory model (4-byte pointers) is "
+                                    "not implemented by this compiler"));
+      }
+    }
+  }
+
   if (Arg *A = Args.getLastArg(options::OPT_LongDouble_Group)) {
     if (TC.getTriple().isX86())
       A->render(Args, CmdArgs);

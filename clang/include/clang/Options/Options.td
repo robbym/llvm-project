@@ -6542,6 +6542,38 @@ def mno_virt : Flag<["-"], "mno-virt">, Group<m_mips_Features_Group>;
 def mginv : Flag<["-"], "mginv">, Group<m_mips_Features_Group>;
 def mno_ginv : Flag<["-"], "mno-ginv">, Group<m_mips_Features_Group>;
 } // let Flags = [TargetSpecific]
+// ⛔ trellis session 140 (D7: DECISION 3 covers build flags). The vendor driver's own spellings from
+// both vendor project lines and session 139's six, each MODELLED from what it does on the vendor and
+// handled for dsPIC in Clang::ConstructJob (trc steps/frontend/flags-edit.py). NoArgumentUnused:
+// -omf=elf is on MPLAB's LINK lines too, where no compile job runs to claim it.
+// ⛔ HERE, AFTER THE `let Flags = [TargetSpecific]` BLOCK AND NOT INSIDE IT: the first landing put
+// these beside session 96's dsPIC model flags, inside that block, whose `let` OVERRODE the Flags
+// below -- so -omf=elf on a link line was refused as unsupported (flags-compare cell O4).
+// ⛔ Before omf_EQ existed, `-omf=elf` parsed as `-o mf=elf`, and on MPLAB's own line the object went
+// to a file named `mf=elf`.
+def omf_EQ : Joined<["-"], "omf=">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the object format; only elf (the vendor refuses coff)">;
+def fshort_double : Flag<["-"], "fshort-double">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: a 32-bit C double (the default)">;
+def fno_short_double : Flag<["-"], "fno-short-double">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: a 64-bit C double">;
+def mshort_double : Flag<["-"], "mshort-double">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the same as -fshort-double">;
+def mno_short_double : Flag<["-"], "mno-short-double">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the same as -fno-short-double">;
+def munified : Flag<["-"], "munified">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the unified memory model (not implemented for C)">;
+def mno_unified : Flag<["-"], "mno-unified">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the default memory model">;
+def msfr_warn_EQ : Joined<["-"], "msfr-warn=">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the vendor's SFR-warning control; this compiler emits no such warning">;
+def mno_eds_warn : Flag<["-"], "mno-eds-warn">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the vendor's EDS-warning control; this compiler emits no such warning">;
+def ftrack_macro_expansion : Flag<["-"], "ftrack-macro-expansion">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: GCC's macro-expansion diagnostics control; no effect here">;
+def ftrack_macro_expansion_EQ : Joined<["-"], "ftrack-macro-expansion=">,
+  Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: GCC's macro-expansion diagnostics control; no effect here">;
 def mips1 : Flag<["-"], "mips1">,
   Alias<march_EQ>, AliasArgs<["mips1"]>, Group<m_mips_Features_Group>,
   HelpText<"Equivalent to -march=mips1">, Flags<[HelpHidden]>;
