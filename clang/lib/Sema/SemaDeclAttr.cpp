@@ -6698,6 +6698,28 @@ static void handleDSPICSpaceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     S.Diag(AL.getLoc(), diag::err_dspic_space_unimplemented) << Space->getName();
     return;
   }
+  // ⛔ trellis session 141 (ITEM 1a, after refutation): the vendor's pic30_space_conflicts_with_decl
+  // (pic30.c:20906), called as space() is processed (:21095). preserved/update ALREADY on the object
+  // and a space among prog, auto_psv, psv, eedata, auxflash, auxpsv, dataflash draws "space(S) cannot
+  // be combined with __attribute__((X)) ignoring X" -- and it is the SPACE that is dropped (ATTR5
+  // Q03-Q06 Q09 Q12; refuter A D12). Ours accepts three of the seven; the rest are refused above. The
+  // mirror call (:21566/:21587, the attribute second) never matches, so space-first emits both flags
+  // on both compilers and both assemblers refuse the unit (refuter A P01 P02 P04) -- parity already.
+  if (Space->isStr("prog") || Space->isStr("auto_psv") || Space->isStr("psv")) {
+    const char *X = D->hasAttr<DSPICPreservedAttr>() ? "preserved"
+                    : D->hasAttr<DSPICUpdateAttr>()  ? "update"
+                                                     : nullptr;
+    if (X) {
+      S.Diag(AL.getLoc(), diag::warn_dspic_space_conflict) << Space->getName() << X;
+      return;
+    }
+  }
+  // ...and an explicit space(auto_psv) takes `shared` off the object, in either order (pic30.c:2768-2774;
+  // ATTR5 Q01 Q02, refuter A O11). The other order is handleDSPICSharedAttr's.
+  if (Space->isStr("auto_psv") && D->hasAttr<DSPICSharedAttr>()) {
+    S.Diag(AL.getLoc(), diag::warn_dspic_shared_ignored) << cast<NamedDecl>(D)->getName();
+    D->dropAttr<DSPICSharedAttr>();
+  }
   D->addAttr(::new (S.Context) DSPICSpaceAttr(S.Context, AL, Space));
 }
 
@@ -7005,8 +7027,13 @@ static void handleDSPICPreservedUpdateAttr(Sema &S, Decl *D, const ParsedAttr &A
     S.Diag(AL.getLoc(), diag::err_dspic_invalid_attr) << Name;
     return;
   }
-  // The other of the pair already on the object: the vendor warns and drops THIS one
-  // (pic30.c:21557-21592), so which survives is written order.
+  // The other of the pair already on the object: the vendor warns and drops the one it PROCESSES
+  // second (pic30.c:21557-21592) -- and ⛔ that is not written order, as the first landing wrote here:
+  // GCC processes the attributes after the declarator first, then the decl-spec runs last-written
+  // first (refuter A, c-decl.c:11122, c-parser.c:2094), where clang processes decl-specs in written
+  // order and then the declarator. The two agree inside one run (W03/W04, D04) and differ across
+  // runs (D01-D03): a different answer where both accept -- UNWRITTEN, the operator's, pinned by
+  // attr4-compare's D cells.
   // (Both warnings are the vendor's words, capital and all, so they are custom IDs: TableGen refuses a
   // capitalised diagnostic -- DiagnosticSemaKinds.td says so beside the other two.)
   if (IsPreserved ? D->hasAttr<DSPICUpdateAttr>() : D->hasAttr<DSPICPreservedAttr>()) {
@@ -7042,6 +7069,13 @@ static void handleDSPICSharedAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   }
   if (dspicIgnoredOn(S, D, AL, "shared"))
     return;
+  // After refutation: an explicit space(auto_psv) ALREADY on the object takes shared off it
+  // (pic30.c:2768-2774, `auto_psv` from the object's own space attribute at :2674) -- ATTR5 Q01. The
+  // other order is handleDSPICSpaceAttr's.
+  if (const auto *SA = D->getAttr<DSPICSpaceAttr>(); SA && SA->getSpace()->isStr("auto_psv")) {
+    S.Diag(AL.getLoc(), diag::warn_dspic_shared_ignored) << cast<NamedDecl>(D)->getName();
+    return;
+  }
   D->addAttr(DSPICSharedAttr::CreateImplicit(S.Context, AL.getRange()));
 }
 

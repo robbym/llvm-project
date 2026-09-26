@@ -14434,6 +14434,13 @@ def warn_dspic_attr_ignored_on : Warning<
   "ignoring %0 attribute applied to %select{parameter|member|automatic}1 %2">,
   InGroup<IgnoredAttributes>;
 def err_dspic_invalid_attr : Error<"invalid attribute '%0' ignored">;
+// trellis session 141, after refutation: pic30.c:20939-20943 (a space beside preserved/update, the
+// space dropped) and :2771-2772 (%D, then the name again: "v Ignoring shared attribute for 'v'").
+def warn_dspic_space_conflict : Warning<
+  "space(%0) cannot be combined with __attribute__((%1)) ignoring %1">,
+  InGroup<IgnoredAttributes>;
+def warn_dspic_shared_ignored : Warning<"%0 Ignoring shared attribute for '%0'">,
+  InGroup<IgnoredAttributes>;
 def warn_dspic_scratch_reg : Warning<
   "the scratch_reg attribute is not usable (the vendor compiler says the same and ignores it)">;
 def warn_dspic_strict_bitfield_nonmember : Warning<

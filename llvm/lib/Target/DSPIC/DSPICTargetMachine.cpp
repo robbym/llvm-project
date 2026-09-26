@@ -320,7 +320,10 @@ public:
       S += ",code";
       if (F->hasFnAttribute("dspic-noload"))
         S += ",noload";
-      if (F->hasFnAttribute("dspic-keep") && !F->hasFnAttribute("dspic-priority"))
+      // trellis session 141, after refutation (F7): the explicit keep EVEN WITH priority, whose own
+      // keep is already in the name part -- the vendor prints both (ATTR5 K03:
+      // `priority(0x0002),keep,code,keep`). Session 109's guard printed one.
+      if (F->hasFnAttribute("dspic-keep"))
         S += ",keep";
       // trellis session 141: `shared` is the vendor's LAST token (ATTR1A2: `code,keep,shared`,
       // `code,noload,shared`, `address(8192),code,shared`).
@@ -409,15 +412,18 @@ public:
     // trellis session 109: `reverse(N)` next (var.cc1.s: `reverse(64),bss`), then priority.
     if (GV && GV->hasAttribute("dspic-reverse"))
       S += ",reverse(" + GV->getAttribute("dspic-reverse").getValueAsString().str() + ")";
-    // trellis session 141: preserved / update AFTER address and reverse, BEFORE priority and the
-    // kind -- the vendor's order, measured (ATTR1A2: `address(4608),preserved,data,near`,
-    // `reverse(64),preserved,data,near`, `preserved,priority(0x0002),keep,data,near`). Sema lets
-    // at most one of the two onto an object.
+    // trellis session 141: preserved / update AFTER address and reverse, before the kind, in the
+    // vendor's order -- ⛔ corrected after refutation (F1): pic30.c:3619-3639 appends preserved, THEN
+    // priority, THEN update, THEN priority's implied keep (ATTR5: `priority(0x0002),update,keep`,
+    // `preserved,priority(0x0002),keep`); the first landing put update before priority. Sema lets at
+    // most one of the two onto an object.
     if (GV && GV->hasAttribute("dspic-preserved"))
       S += ",preserved";
-    else if (GV && GV->hasAttribute("dspic-update"))
-      S += ",update";
-    S += pic30Priority(GO);
+    std::string Prio = pic30Priority(GO);   // ",priority(0xNNNN),keep", or empty
+    if (GV && GV->hasAttribute("dspic-update") && !GV->hasAttribute("dspic-preserved"))
+      Prio = Prio.empty() ? std::string(",update")
+                          : Prio.substr(0, Prio.rfind(",keep")) + ",update,keep";
+    S += Prio;
     if ((GV && GV->hasAttribute("dspic-persistent")) || NamePersist) {
       if (Near)
         S += ",near";
@@ -458,7 +464,10 @@ public:
       S += ",page";
     if (Noload)
       S += ",noload";
-    if (GV && GV->hasAttribute("dspic-keep") && !GV->hasAttribute("dspic-priority"))
+    // trellis session 141, after refutation (F7): the explicit keep EVEN WITH priority -- the vendor
+    // prints both (ATTR5 K01 K02 K04: `priority(0x0002),keep,data,near,keep`; progaddr-ask.sh:58 wrote
+    // it down at session 122). Session 109's guard printed one.
+    if (GV && GV->hasAttribute("dspic-keep"))
       S += ",keep";
     // trellis session 141: `shared` LAST (ATTR1A2: `bss,near,noload,shared`, `data,near,keep,shared`,
     // `near,persist,shared`, `address(4608),data,near,shared`).
@@ -667,9 +676,13 @@ public:
                     GVar->hasAttribute("dspic-priority") ||
                     // trellis session 141: each its own section on the vendor too; a READ-ONLY
                     // shared object is placed by the space(auto_psv) clang names for it, which
-                    // this chain already turns into the shared `.const,psv,page`
+                    // this chain already turns into the shared `.const,psv,page` -- ⛔ except under
+                    // -mconst-in-data (F4, after refutation): there clang names no space, and the
+                    // vendor gives the object its own `data,near,shared` (ATTR5 Q14 Q15, refuter A
+                    // O15 T03), where this dropped it into the common `.ndata`
                     GVar->hasAttribute("dspic-preserved") || GVar->hasAttribute("dspic-update") ||
-                    (GVar->hasAttribute("dspic-shared") && !Kind.isReadOnly());
+                    (GVar->hasAttribute("dspic-shared") &&
+                     (!Kind.isReadOnly() || GVar->hasAttribute("dspic-const-in-data")));
       if (Placed && GO->getAddressSpace() != 1) {
         StringRef Space = GVar->hasAttribute("dspic-space")
                               ? GVar->getAttribute("dspic-space").getValueAsString()
@@ -726,7 +739,11 @@ public:
                          !GVar->hasAttribute("dspic-noload") && !HasAddr && !HasRev &&
                          !GVar->hasAttribute("dspic-keep") && !GVar->hasAttribute("dspic-page") &&
                          !GVar->hasAttribute("dspic-unordered") &&
-                         !GVar->hasAttribute("dspic-priority");
+                         !GVar->hasAttribute("dspic-priority") &&
+                         // trellis session 141 (after refutation, F6): and preserved / update /
+                         // shared -- ATTR5 Q10, where the shared `.ndata` merged the object
+                         !GVar->hasAttribute("dspic-preserved") &&
+                         !GVar->hasAttribute("dspic-update") && !GVar->hasAttribute("dspic-shared");
         // ⛔ trellis session 130, THE SHAPE AXIS -- and this is a correction to the first version
         // of this very edit, found by `steps/placement/compare.sh`, an instrument I had not run.
         // The asks that produced the rule above varied every ATTRIBUTE against every SPACE and
