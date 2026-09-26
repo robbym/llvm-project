@@ -6396,6 +6396,40 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
     }
   }
 
+  // ⛔ trellis session 141 (D8: the operator confirmed that -mpa and -msmart-io=1 are accepted and
+  // have no effect -- session 124 ruled both features out of scope, procedural abstraction and smart
+  // I/O, and D7 rules the flags). Accepted with them, each on a reading of D8's reason and each
+  // measured on the vendor first (trc steps/frontend/PASIO.banked.txt): -mno-pa, -mpa=<any>, a bare
+  // -msmart-io, -msmart-io=0|2, -msmart-io<x> with no `=`, -msmart-io-format=<fmt>. None moves this
+  // compiler's output or a predefined macro; the vendor's macros do not move under any of them.
+  // The vendor's cc1 judges the LAST -msmart-io and warns on any value after `=` but 0, 1 and 2
+  // (pic30.c:4493-4507), in C and C++ and at -E (PASIO3.banked.txt); so does this driver, with the
+  // vendor's text after clang's own prefix. -mno-smart-io stays unknown: the vendor refuses it too.
+  // ⚠ NOT modelled: the vendor exits 255 with no diagnostic for `-pipe -mpa` on a C/C++ -c, and for
+  // `-mpa -S -o <not .s>`; this driver accepts both, which is UNWRITTEN (PASIO2.banked.txt).
+  // On any other triple a compile job refuses all of them. Row: trc steps/frontend/flags-compare.sh.
+  {
+    bool OnDSPIC = TC.getArch() == llvm::Triple::dspic;
+    for (Arg *A : Args.filtered(options::OPT_mpa, options::OPT_mno_pa, options::OPT_mpa_EQ,
+                                options::OPT_msmart_io, options::OPT_msmart_io_format_EQ)) {
+      A->claim();
+      if (!OnDSPIC)
+        D.Diag(diag::err_drv_unsupported_opt_for_target)
+            << A->getAsString(Args) << TripleStr;
+    }
+    if (OnDSPIC) {
+      if (Arg *A = Args.getLastArg(options::OPT_msmart_io)) {
+        StringRef Level = A->getValue();
+        if (Level.consume_front("=") &&
+            !(Level.size() == 1 && Level[0] >= '0' && Level[0] <= '2'))
+          D.Diag(D.getDiags().getCustomDiagID(
+              DiagnosticsEngine::Warning,
+              "-msmart-io=%0 invalid; defaulting to -msmart-io=1"))
+              << Level;
+      }
+    }
+  }
+
   if (Arg *A = Args.getLastArg(options::OPT_LongDouble_Group)) {
     if (TC.getTriple().isX86())
       A->render(Args, CmdArgs);

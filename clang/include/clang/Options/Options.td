@@ -6578,6 +6578,25 @@ def ftrack_macro_expansion_EQ : Joined<["-"], "ftrack-macro-expansion=">,
 def mips1 : Flag<["-"], "mips1">,
   Alias<march_EQ>, AliasArgs<["mips1"]>, Group<m_mips_Features_Group>,
   HelpText<"Equivalent to -march=mips1">, Flags<[HelpHidden]>;
+// ⛔ trellis session 141 (D8: -mpa and -msmart-io=1 are accepted and have no effect -- the operator,
+// joining session 124's out-of-scope rulings on procedural abstraction and smart I/O to D7). With
+// them, the neighbouring spellings the vendor's option table defines (pic30.opt:152-154, :340-342,
+// :355-357, :363-365), each accepted by the vendor and, on a reading of D8's reason, here too;
+// handled in Clang::ConstructJob (trc steps/frontend/pasio-edit.py). NoArgumentUnused, as D7's: a
+// link line may carry them. -mno-smart-io is NOT defined: the vendor refuses it too.
+def mpa : Flag<["-"], "mpa">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the vendor's procedural abstraction -- accepted, no effect (out of scope)">;
+def mno_pa : Flag<["-"], "mno-pa">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: no procedural abstraction -- what this compiler does">;
+def mpa_EQ : Joined<["-"], "mpa=">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the vendor's procedural-abstraction nesting limit -- accepted, no effect">;
+// The vendor's `msmart-io` is JoinedOrMissing: -msmart-io, -msmart-io=<n> and -msmart-io<x> all
+// parse, so this is Joined on the bare name. OptTable's longest match keeps -msmart-io-format= its
+// own option -- which matters: only the last LEVEL is judged (flags-compare cell PW4).
+def msmart_io : Joined<["-"], "msmart-io">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the vendor's smart I/O forwarding level -- accepted, no effect">;
+def msmart_io_format_EQ : Joined<["-"], "msmart-io-format=">, Flags<[NoArgumentUnused]>,
+  HelpText<"dsPIC: the vendor's smart I/O format string -- accepted, no effect">;
 def mips2 : Flag<["-"], "mips2">,
   Alias<march_EQ>, AliasArgs<["mips2"]>, Group<m_mips_Features_Group>,
   HelpText<"Equivalent to -march=mips2">, Flags<[HelpHidden]>;
