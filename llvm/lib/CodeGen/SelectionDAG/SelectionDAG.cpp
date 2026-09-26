@@ -10075,6 +10075,29 @@ bool SelectionDAG::hasSwiftErrorArg() const {
              Attribute::SwiftError);
 }
 
+// ⛔ trellis session 140: THE LIBRARY'S LENGTH IS A size_t, AND size_t IS NOT THE POINTER-SIZED
+// INTEGER ON EVERY TARGET. dsPIC's is 32 bits under -mlarge-arrays over 16-bit pointers (the
+// vendor's ABI: trc steps/frontend/SZT2.banked.txt ARM R), and the member the object's signature
+// then selects reads the length from both halves -- memset.CH_lo tests w3:w2 against zero and then
+// repeats on w2 alone, so a zero length with w3 set does not return (ARM B; executed by
+// steps/exec/sztexec-run.sh). The type comes from TargetLibraryInfo, which
+// reads the module (getSizeTSize). Where it IS the pointer-sized integer -- every other target, and
+// dsPIC's default model -- this returns that type and leaves the value alone, so nothing changes.
+// Where it is wider the value is ZERO-extended here: left to getCopyToParts, a narrower length is
+// ANY-extended and the high half is whatever the register held (szt-compare.sh cell C13).
+static Type *getLibcallSizeTy(SelectionDAG &DAG, const TargetLibraryInfo *LibInfo,
+                              SDValue &Size, const SDLoc &dl) {
+  Type *IntPtrTy = DAG.getDataLayout().getIntPtrType(*DAG.getContext());
+  if (!LibInfo)
+    return IntPtrTy;
+  Type *SizeTy =
+      LibInfo->getSizeTType(*DAG.getMachineFunction().getFunction().getParent());
+  if (SizeTy == IntPtrTy)
+    return IntPtrTy;
+  Size = DAG.getZExtOrTrunc(Size, dl, EVT::getEVT(SizeTy));
+  return SizeTy;
+}
+
 SDValue SelectionDAG::getMemcpy(
     SDValue Chain, const SDLoc &dl, SDValue Dst, SDValue Src, SDValue Size,
     Align DstAlign, Align SrcAlign, bool isVol, bool AlwaysInline,
@@ -10136,7 +10159,8 @@ SDValue SelectionDAG::getMemcpy(
   Type *PtrTy = PointerType::getUnqual(*getContext());
   Args.emplace_back(Dst, PtrTy);
   Args.emplace_back(Src, PtrTy);
-  Args.emplace_back(Size, getDataLayout().getIntPtrType(*getContext()));
+  Type *SizeTy = getLibcallSizeTy(*this, LibInfo, Size, dl);
+  Args.emplace_back(Size, SizeTy);
   // FIXME: pass in SDLoc
   TargetLowering::CallLoweringInfo CLI(*this);
   bool IsTailCall = false;
@@ -10248,7 +10272,8 @@ SDValue SelectionDAG::getMemmove(SDValue Chain, const SDLoc &dl, SDValue Dst,
   Type *PtrTy = PointerType::getUnqual(*getContext());
   Args.emplace_back(Dst, PtrTy);
   Args.emplace_back(Src, PtrTy);
-  Args.emplace_back(Size, getDataLayout().getIntPtrType(*getContext()));
+  Type *SizeTy = getLibcallSizeTy(*this, LibInfo, Size, dl);
+  Args.emplace_back(Size, SizeTy);
   // FIXME:  pass in SDLoc
   TargetLowering::CallLoweringInfo CLI(*this);
 
@@ -10377,7 +10402,8 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
   if (UseBZero) {
     TargetLowering::ArgListTy Args;
     Args.emplace_back(Dst, PointerType::getUnqual(Ctx));
-    Args.emplace_back(Size, DL.getIntPtrType(Ctx));
+    Type *SizeTy = getLibcallSizeTy(*this, LibInfo, Size, dl);
+    Args.emplace_back(Size, SizeTy);
     CLI.setLibCallee(
         Libcalls->getLibcallImplCallingConv(BzeroImpl), Type::getVoidTy(Ctx),
         getExternalSymbol(BzeroImpl, TLI->getPointerTy(DL)), std::move(Args));
@@ -10387,7 +10413,8 @@ SDValue SelectionDAG::getMemset(SDValue Chain, const SDLoc &dl, SDValue Dst,
     TargetLowering::ArgListTy Args;
     Args.emplace_back(Dst, PointerType::getUnqual(Ctx));
     Args.emplace_back(Src, Src.getValueType().getTypeForEVT(Ctx));
-    Args.emplace_back(Size, DL.getIntPtrType(Ctx));
+    Type *SizeTy = getLibcallSizeTy(*this, LibInfo, Size, dl);
+    Args.emplace_back(Size, SizeTy);
     CLI.setLibCallee(Libcalls->getLibcallImplCallingConv(MemsetImpl),
                      Dst.getValueType().getTypeForEVT(Ctx),
                      getExternalSymbol(MemsetImpl, TLI->getPointerTy(DL)),

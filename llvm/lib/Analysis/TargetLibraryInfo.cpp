@@ -1473,6 +1473,17 @@ unsigned TargetLibraryInfoImpl::getWCharSize(const Module &M) const {
 }
 
 unsigned TargetLibraryInfoImpl::getSizeTSize(const Module &M) const {
+  // ⛔ trellis session 140: dsPIC's size_t is NOT its index size under -mlarge-arrays -- 32 bits
+  // over 16-bit pointers, as the vendor compiler's is -- so its clang states the width as the module
+  // flag `dspic-size-t-width` (clang/lib/CodeGen/Targets/DSPIC.cpp), read here as getWCharSize reads
+  // `wchar_size`: the early return the comment below asks such a target to take. Left at 16 against
+  // clang's `i32 @strlen`, isValidProtoForLibFunc stops recognising the library's own functions,
+  // and a call LLVM builds itself (BuildLibCalls, SimplifyLibCalls) carries a 16-bit length where
+  // the library's size_t is 32 (trc steps/frontend/szt-compare.sh C11, C12). No flag -- a
+  // hand-written .ll -- keeps the index size.
+  if (Triple(M.getTargetTriple()).getArch() == Triple::dspic)
+    if (auto *W = cast_or_null<ConstantAsMetadata>(M.getModuleFlag("dspic-size-t-width")))
+      return cast<ConstantInt>(W->getValue())->getZExtValue();
   // There is really no guarantee that sizeof(size_t) is equal to the index
   // size of the default address space. If that isn't true then it should be
   // possible to derive the SizeTTy from the target triple here instead and do

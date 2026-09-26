@@ -159,10 +159,12 @@ public:
   // DSPICAsmPrinter::emitEndOfAsmFile composes cc1's three words from them. They are stated HERE
   // because the IR cannot carry them: by the time the backend runs, a C `double` IS `float`, and a
   // translation unit with no function carries no language and no target feature at all (trc
-  // steps/frontend/SIG5.banked.txt ARM L). The WIDTHS, not the flags that set them: under
-  // -menable-large-arrays the vendor's size_t is 32 bits and ours 16 (SIG5 ARM Z), and the words
+  // steps/frontend/SIG5.banked.txt ARM L). The WIDTHS, not the flags that set them: the words
   // must describe the object that was actually built. Behaviour Error: two modules that disagree
   // on an ABI fact cannot become one object whose signature is true of both.
+  // ⛔ trellis session 140: the size_t width is ALSO TargetLibraryInfo's size_t (getSizeTSize reads
+  // this flag), which types the length of every library call the backend and the optimizer build.
+  // Under -mlarge-arrays it is 32, as the vendor's is (D6); until then ours stayed 16 (SIG5 ARM Z).
   void emitTargetMetadata(CodeGen::CodeGenModule &CGM,
                           const llvm::MapVector<GlobalDecl, StringRef> &) const override {
     const ASTContext &Ctx = CGM.getContext();

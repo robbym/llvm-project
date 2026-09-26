@@ -139,6 +139,15 @@ public:
       else if (Name == "const-in-data") ConstInData = On;
       else if (Name == "large-arrays") LargeArrays = On;
     }
+    // ⛔ trellis session 140: under -mlarge-arrays / -menable-large-arrays the vendor's size_t is
+    // `long unsigned int`, in C and C++, and ours stayed 16 bits (the flag moved only
+    // __LARGE_ARRAYS__), so the two compilers built one program with two size_t ABIs; the operator
+    // ruled "match vendor" (D6). Measured of the vendor (trc steps/frontend/SZT2.banked.txt): the
+    // flag moves EXACTLY size_t's macros -- ptrdiff_t, intptr_t and pointers stay 16 bits -- and a
+    // size_t travels in a register pair (w2:w3 after a pointer). So only SizeType moves here; the
+    // signature's bit 0, TargetLibraryInfo's size_t and the mem* libcall's length all follow from it
+    // through the `dspic-size-t-width` module flag. Row: steps/frontend/szt-compare.sh.
+    SizeType = LargeArrays ? UnsignedLong : UnsignedInt;
     return true;
   }
 

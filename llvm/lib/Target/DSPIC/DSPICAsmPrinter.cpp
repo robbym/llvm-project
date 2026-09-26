@@ -437,9 +437,10 @@ void DSPICAsmPrinter::emitEndOfAsmFile(Module &M) {
   // the public `int ()` libfuncs GCC and pic30 declare at init (17 or more: optabs-libfuncs.c:920-
   // 935, pic30.c:30030-30042) reach type_refers_to_size_t, where `int` is size_t's signed twin (SIG4).
   // ⚠ Under -menable-large-arrays cc1's bit 0 follows each public decl that reaches codegen --
-  // written, implicit or pic30's own -- and its size_t is 32 bits where ours is 16, so these words
-  // describe OUR object; a pure-ours link takes the `_o` members (stn3255), and L4 is the price.
-  // SET: bit 0 iff size_t is 32 bits (never, yet), bit 1 never (this port has no unified model),
+  // written, implicit or pic30's own -- so a TU with no size_t in its interface is 6/0 there. These
+  // words describe OUR object, whose size_t is 32 bits under the flag as cc1's is (session 140, D6):
+  // every such object is 7/1 (7/5 in C++), and a pure-ours link takes the CH_lo members.
+  // SET: bit 0 iff size_t is 32 bits (-mlarge-arrays), bit 1 never (this port has no unified model),
   // bit 2 iff double is 64 bits (C++; C under -mdouble=64, cell G17). Row: sig-compare.sh.
   // ⛔ ONLY WHERE THE STREAMER TAKES RAW TEXT. cc1's spelling (`info, data`) exists only as text for
   // the pic30 assembler. An object streamer (`-fintegrated-as`, Route B, not started: the operator,
