@@ -107,6 +107,10 @@ LangStandard::Kind clang::getDefaultLanguageStandard(clang::Language Lang,
     // The PS4 uses C99 as the default C standard.
     if (T.isPS4())
       return LangStandard::lang_gnu99;
+    // trellis session 141 (ITEM 2): so does the dsPIC vendor compiler -- `__STDC_VERSION__ 199901L`
+    // (trc steps/frontend/DIALECT.banked.txt). Assembler-with-cpp shares C's case, as the PS4's does.
+    if (T.getArch() == llvm::Triple::dspic)
+      return LangStandard::lang_gnu99;
     return LangStandard::lang_gnu17;
   case Language::ObjC:
     return LangStandard::lang_gnu11;
@@ -114,6 +118,10 @@ LangStandard::Kind clang::getDefaultLanguageStandard(clang::Language Lang,
   case Language::ObjCXX:
   case Language::CUDA:
   case Language::HIP:
+    // trellis session 141 (ITEM 2): the dsPIC vendor compiler's C++ is gnu++14 -- `__cplusplus 201402L`;
+    // at gnu++17 ours refused five programs it compiles (trc steps/frontend/CXXSTD.banked.txt).
+    if (Lang == Language::CXX && T.getArch() == llvm::Triple::dspic)
+      return LangStandard::lang_gnucxx14;
     return LangStandard::lang_gnucxx17;
   case Language::HLSL:
     return LangStandard::lang_hlsl202x;
