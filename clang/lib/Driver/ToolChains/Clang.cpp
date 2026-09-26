@@ -6405,8 +6405,10 @@ void Clang::ConstructJob(Compilation &C, const JobAction &JA,
   // The vendor's cc1 judges the LAST -msmart-io and warns on any value after `=` but 0, 1 and 2
   // (pic30.c:4493-4507), in C and C++ and at -E (PASIO3.banked.txt); so does this driver, with the
   // vendor's text after clang's own prefix. -mno-smart-io stays unknown: the vendor refuses it too.
-  // ⚠ NOT modelled: the vendor exits 255 with no diagnostic for `-pipe -mpa` on a C/C++ -c, and for
-  // `-mpa -S -o <not .s>`; this driver accepts both, which is UNWRITTEN (PASIO2.banked.txt).
+  // ⚠ NOT modelled: the vendor's shipped wrapper (xc-dsc-cc1.exe) runs PA itself and names its
+  // intermediate by replacing the FIRST `.s` in the compiler's -o with `.p`, so a PA-enabling job whose
+  // -o holds no `.s` -- `-pipe`'s `-o -`, `-S -o x.out` -- exits 255 with no diagnostic on the vendor;
+  // this driver accepts them, which is UNWRITTEN (trc PASIO2.banked.txt, PASIO4.banked.txt W1).
   // On any other triple a compile job refuses all of them. Row: trc steps/frontend/flags-compare.sh.
   {
     bool OnDSPIC = TC.getArch() == llvm::Triple::dspic;
