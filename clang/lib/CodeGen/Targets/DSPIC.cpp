@@ -347,6 +347,62 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         if (VD->hasAttr<DSPICPageAttr>())
           GVar->addAttribute("dspic-page");
       }
+      // ⛔ trellis session 142 (ITEM 1): A BLOCK-SCOPE OBJECT'S WRITTEN SECTION IS ATTACHED HERE, BEFORE THE
+      // DISCARD BELOW READS IT. For a static local clang attaches it only after this function has run --
+      // CodeGenModule::getOrCreateStaticVarDecl calls setTargetAttributes (CGDecl.cpp:308), and
+      // CodeGenFunction::EmitStaticVarDecl calls setSection afterwards (:463-464) -- so the discard's
+      // `GVar->hasSection()` was false for every static local, and one carrying space(auto_psv), reverse,
+      // unordered or `address` + "*" KEPT its written name where the vendor warns and discards it: session
+      // 132's D4. Beside a 30000-byte `.const` that name is a separate page-attributed PSV section the linker
+      // puts on another page, and the object is read through the page crt0's `__psv_init` sets from
+      // `__const_psvpage`: 0x0000 where the vendor reads 0x5A, no diagnostic (trc steps/frontend/
+      // MISREAD-X.banked.txt). The name is the one EmitStaticVarDecl attaches later -- the same string twice --
+      // and from here a static local takes the file-scope path whole: the warning, the marker, the TLOF's
+      // delegation, and the conflict scan, which still reads the string. ⚠ Static locals only: a file-scope
+      // definition and a block-scope `extern` carry their section before this runs.
+      // ⛔ AFTER REFUTATION (trc steps/frontend/LANDREF.banked.txt, B1 B3 B5): NOT for a space(auto_psv) static local
+      // carrying noload, persistent, or a written section whose string holds pic30 tokens (`sy,persist`). The vendor
+      // IGNORES those three for an auto_psv object (pic30.c:2768-2826; the name and its tokens go with the discard);
+      // ours' file-scope path keeps them, so attaching such an object here would put `noload` on the SHARED
+      // `.const` -- every const in the unit unprogrammed -- or tokens the assembler refuses there. Excluded, it keeps
+      // its pre-landing section exactly (MISREAD-Q.s141.banked.txt): still wrong against the vendor, never worse.
+      // The far side is the auto_psv ignore family, the next prep's; lifting this exclusion is part of it.
+      // ⚠ Only with space(auto_psv): `unordered` + a `sy,code` name, or + noload, match the vendor's class attached.
+      bool DspicAutoPsvKeep =
+          SpA && SpA->getSpace()->isStr("auto_psv") &&
+          (VD->hasAttr<DSPICNoloadAttr>() || VD->hasAttr<DSPICPersistentAttr>() ||
+           (VD->hasAttr<SectionAttr>() && VD->getAttr<SectionAttr>()->getName().contains(',')));
+      if (!GVar->hasSection() && VD->isStaticLocal() && !DspicAutoPsvKeep)
+        if (const auto *SecA = VD->getAttr<SectionAttr>())
+          GVar->setSection(SecA->getName());
+      // ⛔ AND THE VENDOR NEVER GIVES THE DISCARD WARNING INSIDE A TEMPLATE INSTANTIATION. Its C++ front end
+      // carries no written section name onto an instantiated declaration, and pic30.c's warning
+      // (validate_decl_attributes, :3202-3209) fires only when DECL_SECTION_NAME is set -- measured SILENT on a
+      // function template's static local, a class template member's, an explicit instantiation's, a generic
+      // lambda's, the static local of a lambda, a local class and a nested class inside a template, a class
+      // template's static data member and a variable template; and WARNING on an explicit specialization and
+      // a non-template member (MISREAD-M/P.banked.txt). A warning the vendor does not give is a refusal under
+      // -Werror. ⚠ The PLACEMENT half of that behaviour -- a templated object with a written name and NO trigger
+      // lands where no name was written (MISREAD-P T1-T3, T5, T18) -- is NOT modelled: a different answer where
+      // both accept, the operator's.
+      // Two terms, each killed by its own mutant: the object's OWN kind (a class template's static member, a
+      // variable template), and its enclosing FUNCTION's. ⚠ No walk further out: clang marks a lambda's call
+      // operator, a local class's and a nested class's member inside an instantiation as instantiations
+      // themselves, so the enclosing function decides every static local asked -- a parent walk written first
+      // was never reached, and its mutant LIVED (MISREAD.mutants.txt, MR5).
+      bool DspicInInstantiation = isTemplateInstantiation(VD->getTemplateSpecializationKind());
+      if (const auto *FD = dyn_cast<FunctionDecl>(VD->getDeclContext()))
+        DspicInInstantiation = DspicInInstantiation || FD->isTemplateInstantiation();
+      // ⛔ AND A STATIC LOCAL WARNS ONLY AT -O0 (after refutation: LANDREF B2, TPLREF N5/N6). The vendor's warning
+      // comes from encode_section_info, so it is given only for an object that reaches OUTPUT: at -Os it is
+      // silent for an unreferenced or folded static local and warns for one that survives (MISREAD-U). This runs
+      // at CodeGen time, before anything is folded, so above -O0 it cannot tell -- and a warning the vendor does
+      // not give is a refusal under -Werror. At -O0 both compilers emit every static local of an emitted
+      // function, so the warning there is exact. Above -O0 ours gives none: a MISSING warning for a static local
+      // that survives, DECLARED in misread-compare.py, never an extra one. The far side -- warn after optimization,
+      // for the objects that survive -- is priced in the next prep. File scope and templates are unchanged.
+      bool DspicWarnHere = !DspicInInstantiation &&
+                           (!VD->isStaticLocal() || M.getCodeGenOpts().OptimizationLevel == 0);
       // ⛔ trellis session 128: THREE ATTRIBUTES MAKE cc1 IGNORE A WRITTEN SECTION NAME, and
       // ours honoured it in silence -- so the object landed somewhere the vendor compiler would
       // not have put it, with no word from the compiler, the assembler or the linker. The set is
@@ -400,7 +456,9 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // -- 0 warnings at space(psv) and at no space, against 4 at space(auto_psv), measured
         // through the vendor driver at -Wall. Warning on the address-only cells would be a
         // diagnostic cc1 does not issue, on code it compiles.
-        if (VD->isThisDeclarationADefinition() &&
+        // trellis session 142 (ITEM 1): and never inside a template instantiation, where the vendor is
+        // silent, nor for a static local above -O0 (DspicWarnHere, computed before this block).
+        if (VD->isThisDeclarationADefinition() && DspicWarnHere &&
             (TrigReverse || TrigUnordered || TrigAutoPsv))
           M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
         // trellis session 129 (ITEM 0), TWO CORRECTIONS, both found by a refutation pass sent at
