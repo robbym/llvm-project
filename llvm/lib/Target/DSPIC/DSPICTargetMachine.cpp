@@ -363,7 +363,12 @@ public:
     // a first version that rewrote `std::string Name = (GO->getSection() + pic30Attrs(...))`,
     // which is the last line of discard-edit.py's `new` -- the prep's must-not 2, caught before
     // a commit rather than after one.
-    StringRef WrittenName = GO->getSection();
+    // trellis session 143 (ITEM 1): ...except off a space(auto_psv) object, whose discarded name takes its tokens with
+    // it on the vendor (trc steps/frontend/APSV-T.banked.txt: for an object alone under its name, every token it
+    // accepts lands in `.const,psv,page`; a name two objects share is FOR THE OPERATOR 15's class). clang marks it
+    // (Targets/DSPIC.cpp, the auto_psv ignore family), and the tokens of a name the vendor refuses are ignored alike.
+    StringRef WrittenName =
+        (GV && GV->hasAttribute("dspic-ignore-name-tokens")) ? StringRef() : GO->getSection();
     bool NameBss = false, NameNear = false, NamePersist = false;
     StringRef NameSpace;
     size_t NameComma = WrittenName.find(',');

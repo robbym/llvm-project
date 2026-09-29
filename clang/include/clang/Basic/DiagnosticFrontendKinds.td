@@ -348,6 +348,17 @@ def warn_dspic_address_overrides_near : Warning<
 def warn_dspic_section_name_ignored : Warning<
   "ignoring explicit section name for %0">, InGroup<Attributes>;
 
+// trellis session 143 (dsPIC): the vendor's own sentence for the auto_psv ignore family -- pic30.c warning_at(...,
+// OPT_Wattributes) "%D Ignoring shared attribute for '%s'" and its noload and persistent twins (:2768-2826) -- with
+// %D's QUALIFIED name first (`S<int>::v` in C++) and the identifier second. ⚠ Clang prints that name, not GCC: they
+// agree on the simple spellings and differ on some (refC F4 -- `S<long>` for the vendor's `S<long int>`, `S<int *>`
+// for `S<int*>`, an inline namespace the vendor names and clang omits); the text is cosmetic, no -Werror turns on
+// it. Emitted from
+// CodeGen (Targets/DSPIC.cpp), where the gate can tell an object that certainly reaches output. The same -Wattributes
+// group as the vendor's.
+def warn_dspic_auto_psv_ignores : Warning<
+  "%0 Ignoring %select{shared|noload|persistent}1 attribute for '%2'">, InGroup<Attributes>;
+
 def warn_avx_calling_convention
     : Warning<"AVX vector %select{return|argument}0 of type %1 without '%2' "
               "enabled changes the ABI">,

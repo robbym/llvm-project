@@ -6714,12 +6714,13 @@ static void handleDSPICSpaceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
       return;
     }
   }
-  // ...and an explicit space(auto_psv) takes `shared` off the object, in either order (pic30.c:2768-2774;
-  // ATTR5 Q01 Q02, refuter A O11). The other order is handleDSPICSharedAttr's.
-  if (Space->isStr("auto_psv") && D->hasAttr<DSPICSharedAttr>()) {
-    S.Diag(AL.getLoc(), diag::warn_dspic_shared_ignored) << cast<NamedDecl>(D)->getName();
-    D->dropAttr<DSPICSharedAttr>();
-  }
+  // trellis session 143: an explicit space(auto_psv) no longer takes `shared` off the object HERE, in either order --
+  // CodeGen does (clang/lib/CodeGen/Targets/DSPIC.cpp, the auto_psv ignore family): the strip always, its warning
+  // under a gate that can tell an object that reaches output. This warning fired for an unreferenced or folded object
+  // the vendor is silent on (trc steps/frontend/APSV-N.banked.txt, N-U-shared-*): a refusal under -Werror.
+  // ⚠ CodeGen keys on ours' reading of the space, the definition's FIRST space(); this branch fired on any
+  // space(auto_psv) written after `shared`, so `space(psv), shared, space(auto_psv)` now keeps `shared` where it was
+  // dropped -- the vendor, reading the LAST space, ignores it: the two-space class, carried (refD 3).
   D->addAttr(::new (S.Context) DSPICSpaceAttr(S.Context, AL, Space));
 }
 
@@ -7069,13 +7070,8 @@ static void handleDSPICSharedAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   }
   if (dspicIgnoredOn(S, D, AL, "shared"))
     return;
-  // After refutation: an explicit space(auto_psv) ALREADY on the object takes shared off it
-  // (pic30.c:2768-2774, `auto_psv` from the object's own space attribute at :2674) -- ATTR5 Q01. The
-  // other order is handleDSPICSpaceAttr's.
-  if (const auto *SA = D->getAttr<DSPICSpaceAttr>(); SA && SA->getSpace()->isStr("auto_psv")) {
-    S.Diag(AL.getLoc(), diag::warn_dspic_shared_ignored) << cast<NamedDecl>(D)->getName();
-    return;
-  }
+  // trellis session 143: an explicit space(auto_psv) already on the object no longer takes shared off it HERE --
+  // CodeGen does (the other order's comment, in handleDSPICSpaceAttr, says how, and where the two differ).
   D->addAttr(DSPICSharedAttr::CreateImplicit(S.Context, AL.getRange()));
 }
 

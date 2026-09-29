@@ -360,19 +360,15 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // and from here a static local takes the file-scope path whole: the warning, the marker, the TLOF's
       // delegation, and the conflict scan, which still reads the string. ⚠ Static locals only: a file-scope
       // definition and a block-scope `extern` carry their section before this runs.
-      // ⛔ AFTER REFUTATION (trc steps/frontend/LANDREF.banked.txt, B1 B3 B5): NOT for a space(auto_psv) static local
-      // carrying noload, persistent, or a written section whose string holds pic30 tokens (`sy,persist`). The vendor
-      // IGNORES those three for an auto_psv object (pic30.c:2768-2826; the name and its tokens go with the discard);
-      // ours' file-scope path keeps them, so attaching such an object here would put `noload` on the SHARED
-      // `.const` -- every const in the unit unprogrammed -- or tokens the assembler refuses there. Excluded, it keeps
-      // its pre-landing section exactly (MISREAD-Q.s141.banked.txt): still wrong against the vendor, never worse.
-      // The far side is the auto_psv ignore family, the next prep's; lifting this exclusion is part of it.
-      // ⚠ Only with space(auto_psv): `unordered` + a `sy,code` name, or + noload, match the vendor's class attached.
-      bool DspicAutoPsvKeep =
-          SpA && SpA->getSpace()->isStr("auto_psv") &&
-          (VD->hasAttr<DSPICNoloadAttr>() || VD->hasAttr<DSPICPersistentAttr>() ||
-           (VD->hasAttr<SectionAttr>() && VD->getAttr<SectionAttr>()->getName().contains(',')));
-      if (!GVar->hasSection() && VD->isStaticLocal() && !DspicAutoPsvKeep)
+      // ⛔ trellis session 143 (ITEM 1): SESSION 142'S EXCLUSION IS LIFTED -- every static local's written section is
+      // attached here. It kept a space(auto_psv) static local carrying noload, persistent or a comma-bearing name on its
+      // pre-landing `sy,<tokens>` path, because ours' file-scope path then kept what the vendor ignores; the family block
+      // below now ignores them as the vendor does, and the exclusion's own path was the worse one: of the 33 written
+      // names the vendor accepts at block scope in trc steps/frontend/APSV-T.banked.txt, ours kept all 33 -- right only
+      // for the bare "*" -- and the assembler refused 12 (apsv-counts.py), and D4's silent misread survived for the
+      // kept PSV names: `sy,psv`, `sy,keep`, `sy,page`, `sy,info`, `sy,reverse(64)` and `*,psv` read 0x0000 beside a
+      // 30000-byte `.const` where the vendor reads 0x5A (APSV-X3.banked.txt).
+      if (!GVar->hasSection() && VD->isStaticLocal())
         if (const auto *SecA = VD->getAttr<SectionAttr>())
           GVar->setSection(SecA->getName());
       // ⛔ AND THE VENDOR NEVER GIVES THE DISCARD WARNING INSIDE A TEMPLATE INSTANTIATION. Its C++ front end
@@ -393,16 +389,157 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       bool DspicInInstantiation = isTemplateInstantiation(VD->getTemplateSpecializationKind());
       if (const auto *FD = dyn_cast<FunctionDecl>(VD->getDeclContext()))
         DspicInInstantiation = DspicInInstantiation || FD->isTemplateInstantiation();
-      // ⛔ AND A STATIC LOCAL WARNS ONLY AT -O0 (after refutation: LANDREF B2, TPLREF N5/N6). The vendor's warning
-      // comes from encode_section_info, so it is given only for an object that reaches OUTPUT: at -Os it is
-      // silent for an unreferenced or folded static local and warns for one that survives (MISREAD-U). This runs
-      // at CodeGen time, before anything is folded, so above -O0 it cannot tell -- and a warning the vendor does
-      // not give is a refusal under -Werror. At -O0 both compilers emit every static local of an emitted
-      // function, so the warning there is exact. Above -O0 ours gives none: a MISSING warning for a static local
-      // that survives, DECLARED in misread-compare.py, never an extra one. The far side -- warn after optimization,
-      // for the objects that survive -- is priced in the next prep. File scope and templates are unchanged.
-      bool DspicWarnHere = !DspicInInstantiation &&
-                           (!VD->isStaticLocal() || M.getCodeGenOpts().OptimizationLevel == 0);
+      // ⛔ AND THE GATE IS "THE OBJECT CERTAINLY REACHES OUTPUT" (session 142's C2, narrowed at session 143 by two
+      // refutation passes aimed at the landed diff). The vendor warns from encode_section_info, so only for an object
+      // that reaches OUTPUT: at -Os it is silent for an unreferenced or folded object and warns for one that survives
+      // (MISREAD-U; trc steps/frontend/APSV-N.banked.txt, the U cells). This runs at CodeGen time, before anything is
+      // folded, so it warns only for an object that cannot be folded away: a definition whose linkage is not
+      // discardable -- an external or weak one, or an explicit instantiation's. ⚠ NOT "at -O0 as well", which the
+      // first landing had: clang emits at -O0 objects the vendor never does -- an unreferenced or folded static local
+      // of an inline or in-class function the unit calls, and the static locals of a callee reached only from
+      // `while (0)` -- so its warning there was one the vendor does not give, a refusal under -Werror
+      // (APSV.expected.first, addendum 7: W-inline-unref-noload). And session 142's gate (`!isStaticLocal() || -O0`)
+      // warned for a FILE-SCOPE static a fold removes (APSV-N N-U-bss-fold-FS). The price, declared in apsv-compare.py
+      // and misread-compare.py: a MISSING warning for every static local and every internal, inline or implicitly
+      // instantiated object, at every level. The far side -- warn
+      // after optimization, for the objects that survive -- joins ITEM 11 (the vendor's warnings ours never gives),
+      // which carries the static-local discard warning's.
+      // ⛔ AND THE LINKAGE IS READ AS THE VENDOR'S C++ FRONT END -- GCC 8.3.1's -- READS IT, where the two differ (a third
+      // refutation pass, trc steps/frontend/APSV.expected.first addendum 11: refC F1). A non-volatile const at
+      // namespace scope that no namespace-scope declaration calls `extern` has internal linkage by C++'s own rule, and
+      // clang gives two shapes EXTERNAL linkage instead: an explicit specialization of a const variable template
+      // (`template <> const char vt<char>[2]`), and a const defined after a block-scope `extern` of its name. The vendor
+      // drops an unreferenced one at -Os in silence, and ours warned: a refusal under -Werror. So they count as
+      // discardable. ⚠ Not a static data member (`S::v<int>` is external on both; its context is its class, so the
+      // file-context test excludes it) and not an explicit instantiation (`template const int vt<int>[2]`: the vendor
+      // warns at both levels). What counts as `extern` is GCC's, read in the vendor's source (cp/parser.c, cp/decl.c)
+      // after two more refutation passes broke two narrower readings -- clang's isExternC() (addendum 13, refF 1b: a
+      // block-scope `extern` inside `extern "C" {}` gave the whole chain C language linkage) and [dcl.link]p7's, read
+      // over every redeclaration (addendum 14, refG):
+      //   - the declarations UP TO THE DEFINITION, never a later one: GCC gives a later declaration the earlier one's
+      //     linkage (decl.c:2355, `TREE_PUBLIC (newdecl) = TREE_PUBLIC (olddecl)`). Inside a namespace or a braced
+      //     linkage spec clang hands CodeGen the block at its closing brace, so a later `extern` stood in the chain
+      //     here and read external where the vendor's object is internal -- an extra warning at -Os, a refusal under
+      //     -Werror (refG's HL cells); at file scope the definition is emitted before a later line is parsed;
+      //   - on a declaration not at block scope (a block-scope `extern` leaves the later const internal on GCC), the
+      //     storage class `extern`, or ANY enclosing linkage spec written WITHOUT braces: GCC's parser sets `extern` on
+      //     each declaration it parses under one that writes no storage class of its own (parser.c:19726-19727; one
+      //     that writes one is refused, :28232) and resets that only for a parameter list, a class body and a named
+      //     function's body (:21436, :22634, :26964 -- not a lambda's, :10699), so it reaches through a namespace body
+      //     and a braced spec nested in the brace-less one -- wider than [dcl.link]p7 (refG's MS cells: the vendor
+      //     warns, and exports the object; refH).
+      // C is not read at all: every C object at file scope has external linkage unless `static`, and a static one is
+      // discardable already. The price: a MISSING warning where the vendor emits the internal object -- referenced,
+      // or at -O0 -- and where GCC's flag makes external an object clang keeps internal and drops (`extern "C"
+      // namespace M { __attribute__((space(auto_psv), noload)) const int a[2] = {41, 42}; }`: the vendor warns and
+      // exports `a` -- the linkage itself, carried).
+      bool DspicGccInternal = false;
+      if (M.getLangOpts().CPlusPlus && VD->getDeclContext()->getRedeclContext()->isFileContext() &&
+          VD->getType().isConstQualified() && !VD->getType().isVolatileQualified() &&
+          VD->getTemplateSpecializationKind() != TSK_ExplicitInstantiationDefinition) {
+        DspicGccInternal = true;
+        for (const VarDecl *R = VD; R; R = R->getPreviousDecl()) {
+          bool DspicUnbraced = false;
+          for (const DeclContext *DC = R->getLexicalDeclContext(); DC; DC = DC->getLexicalParent())
+            if (const auto *LinkSpec = dyn_cast<LinkageSpecDecl>(DC))
+              DspicUnbraced = DspicUnbraced || !LinkSpec->hasBraces();
+          if (!R->isLocalExternDecl() && (R->getStorageClass() == SC_Extern || DspicUnbraced))
+            DspicGccInternal = false;
+        }
+      }
+      bool DspicReachesOutput = !GVar->isDiscardableIfUnused() && !DspicGccInternal;
+      // ⛔ AND ONLY WHEN THE OBJECT'S SPACE IS NOT IN DOUBT. With two space() attributes on one declaration the vendor
+      // takes the LAST ("ignoring previous space attribute"); over redeclarations it MERGES the lists (GCC's
+      // merge_attributes, attribs.c:1423-1464, which pic30 does not override): the longer list is kept and the other's
+      // missing attributes are put in front of it, so the space of the declaration with FEWER attributes is the one
+      // found, and at equal lengths the later declaration's (corrected after refutation, refC F3: "the earliest
+      // declaration's" was wrong). Ours reads the definition's first (VD->getAttr). Where they differ the vendor may
+      // not treat the object as auto_psv
+      // at all: after `extern __attribute__((space(data))) const int a[2];` a space(auto_psv) definition named
+      // "sy,data" is accepted in silence (addendum 7, D-redecl-data-then-apsv-F), and ours warned that the name was
+      // ignored -- a refusal under -Werror. So when ours reads auto_psv, every space() written on every declaration
+      // must say auto_psv too, or ours gives none of these warnings: a MISSING warning, never an extra one -- over the
+      // declarations it SEES. ⚠ Which those are turns on when CodeGen runs: C, and C++ at file scope, emit a strong
+      // definition as it is parsed, so a space() on a LATER declaration is not seen here, and the vendor merges it --
+      // after a `space(auto_psv), shared` definition, `extern __attribute__((space(data)))` makes the vendor place `a`
+      // in data, -Werror-clean, where ours warns: a refusal under -Werror, pre-existing (clang-s142's Sema warned too;
+      // refD 1), carried with the later-declaration class. Inside a namespace or a braced linkage spec CodeGen runs at
+      // the closing brace and sees it -- Sema keeps a later attribute of a kind the definition already carries
+      // (SemaDecl.cpp, checkNewAttributesAfterDef) -- and these warnings go silent. So this scan, unlike the linkage
+      // scan above, reads every declaration: here seeing more can only silence. ⚠ The PLACEMENT under two spaces stays
+      // ours' own reading,
+      // the first -- a difference that predates this row, carried; and it misreads silently where the first space
+      // is psv and the vendor's auto_psv (RB-C-psv-then-autopsv-noload: ours' `.const.a` NEVER_LOAD, refD).
+      bool DspicSpaceAgrees = true;
+      if (SpA && SpA->getSpace()->isStr("auto_psv"))
+        for (const VarDecl *R : VD->redecls())
+          for (const auto *SpR : R->specific_attrs<DSPICSpaceAttr>())
+            DspicSpaceAgrees = DspicSpaceAgrees && SpR->getSpace()->isStr("auto_psv");
+      bool DspicWarnHere = !DspicInInstantiation && DspicReachesOutput && DspicSpaceAgrees;
+      // ⛔ trellis session 143 (ITEM 1): THE auto_psv IGNORE FAMILY. For an object whose OWN written space is auto_psv --
+      // pic30.c:2674's `auto_psv` is the space attribute, not the const default and not the auto_psv this file names
+      // above for a `shared` const -- the vendor IGNORES `shared`, `noload` and `persistent`, each with "%D Ignoring <x>
+      // attribute for '%s'" (pic30.c:2768-2826, in that order), and a discarded name's tokens go with the name. Ours
+      // kept all of it: `noload` on the SHARED `.const` left EVERY const of the unit out of the device -- executed, ours
+      // read 0x00FF from the object and from an unrelated table (trc steps/frontend/APSV-X1.banked.txt, X-noload-F/B)
+      // -- and `persistent` moved the object to uninitialised RAM (0x0000; X-persistent-F/B).
+      // The three attributes are taken back off here, after the chain above added them, so the lines that add them
+      // stay as written; ALWAYS, on ours' own reading of the space, because an object ours places in the shared
+      // `.const` by a WRITTEN space(auto_psv) must never carry `noload` whatever the warning gate says -- the vendor
+      // ignores it there. ⚠ Two other roads still reach a NEVER_LOAD shared `.const`, and neither is this family's:
+      // a `shared` const with `noload` and no written space, where the vendor ITSELF marks the shared `.const`
+      // NEVER_LOAD when nothing else holds it and refuses the unit beside another const (see below the block); and a
+      // section NAMED `.const` written on a space(psv) object with `noload`, which the vendor refuses on the name's own
+      // flags (refD 2, corrected by refF) -- both carried. `shared` no longer leaves Sema early
+      // (SemaDeclAttr.cpp): Sema cannot tell whether the object reaches output, and its warning fired for an
+      // unreferenced or folded object the vendor is silent on (APSV-N N-U-shared-*). ⚠ The warnings are NOT silenced
+      // inside a template instantiation, where the vendor gives them too (addendum 7: an explicit instantiation's
+      // static member, `S<int>::v Ignoring noload attribute for 'v'`) and is silent only for the discarded NAME; the
+      // vendor's %D is the QUALIFIED name, the second the identifier.
+      if (SpA && SpA->getSpace()->isStr("auto_psv")) {
+        static const char *const DspicIgnored[] = {"dspic-shared", "dspic-noload", "dspic-persistent"};
+        for (unsigned K = 0; K != 3; ++K)
+          if (GVar->hasAttribute(DspicIgnored[K])) {
+            GVar->setAttributes(GVar->getAttributes().removeAttribute(GVar->getContext(), DspicIgnored[K]));
+            if (VD->isThisDeclarationADefinition() && DspicReachesOutput && DspicSpaceAgrees) {
+              std::string DspicShown;
+              llvm::raw_string_ostream DspicOS(DspicShown);
+              VD->getNameForDiagnostic(DspicOS, M.getContext().getPrintingPolicy(), /*Qualified=*/true);
+              M.getDiags().Report(VD->getLocation(), diag::warn_dspic_auto_psv_ignores)
+                  << DspicOS.str() << K << VD->getName();
+            }
+          }
+        // A discarded name's tokens go with it: every token the vendor accepts lands in `.const,psv,page` for an
+        // object alone under its name, at both scopes (APSV-T). The TLOF's pic30Attrs reads the marker; the kept "*"
+        // holds none. ⚠ Except a name that BEGINS with `#`: the vendor keeps it, without the `#`, with its tokens
+        // (pic30.c:3345, :22228-22230 -- `#sy,keep` is `sy,keep,psv,page`), and ours discards it like any other: a
+        // different answer where both accept, nothing misread (refC F5), the answer class.
+        // ⛔ AND A NAME THE VENDOR REFUSES IS ACCEPTED HERE, ITS TOKENS IGNORED ALIKE: a kind (`sy,bss`) or
+        // a pair its table marks incompatible (`sy,psv,near`). The first landing refused them with the vendor's text
+        // (D5), and two refutation passes broke it where the vendor accepts (APSV.expected.first addendum 7 counts
+        // them): inside template instantiations, which carry no written name on the vendor; at -O0 for objects clang
+        // emits and the vendor does not; under two space() attributes; and after a declaration sharing the name
+        // string, which the vendor's parse writes into (pic30.c:2131-2132, :2145), where its answer turns on whether
+        // the other declaration is used. Two of those are decidable here and one lies outside the gate now; the
+        // refusal was WITHDRAWN rather than narrowed shape by shape, because each pass found shapes the last had not,
+        // a refusal of what the vendor accepts is a breach, and accepting more is the operator's call (addendum 7, R1).
+        if (VD->hasAttr<SectionAttr>())
+          GVar->addAttribute("dspic-ignore-name-tokens");
+      }
+      // ⛔ AND A `shared` CONST WITH `noload` AND NO WRITTEN SPACE KEEPS `noload` -- THE VENDOR'S OWN ANSWER (a fourth
+      // refutation pass, refF 2, withdrew the strip the third build had put here). It takes the implied auto_psv set
+      // above, the vendor's `.const,psv,page,shared`, and where nothing else holds the unit's `.const` the vendor marks
+      // it NEVER_LOAD too -- executed, its image loses every const, another unit's too -- and beside another const it
+      // refuses the unit (a section type conflict). The third build took `noload` off here and so answered
+      // DIFFERENTLY where both accept -- in 23 cells of refF's sample, 40 cell-levels (14 of those cells, 24 cell-levels,
+      // where clang-s143b had matched the vendor exactly; refG) -- the safer answer, and one no rule of this project
+      // lets ours choose alone:
+      // a different answer where both accept is the operator's (FOR THE OPERATOR, with refF's executed witnesses).
+      // ⚠ What the strip was written for remains: `shared, noload` and then a LATER
+      // `extern __attribute__((space(auto_psv)))`, which the vendor merges (ignoring noload, 0x5A) and clang's Sema
+      // drops, the definition carrying no space() of its own ("attribute declaration must precede definition", at file
+      // scope and inside a namespace alike; refG) -- ours' shared `.const` NEVER_LOAD, 0x00FF: the later-declaration
+      // class, carried to the next prep.
       // ⛔ trellis session 128: THREE ATTRIBUTES MAKE cc1 IGNORE A WRITTEN SECTION NAME, and
       // ours honoured it in silence -- so the object landed somewhere the vendor compiler would
       // not have put it, with no word from the compiler, the assembler or the linker. The set is
@@ -457,7 +594,8 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // through the vendor driver at -Wall. Warning on the address-only cells would be a
         // diagnostic cc1 does not issue, on code it compiles.
         // trellis session 142 (ITEM 1): and never inside a template instantiation, where the vendor is
-        // silent, nor for a static local above -O0 (DspicWarnHere, computed before this block).
+        // silent; since session 143, only where the gate says the object reaches output (DspicWarnHere, computed
+        // before this block) -- never for a static local, at any level (refD: this line still said "above -O0").
         if (VD->isThisDeclarationADefinition() && DspicWarnHere &&
             (TrigReverse || TrigUnordered || TrigAutoPsv))
           M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
