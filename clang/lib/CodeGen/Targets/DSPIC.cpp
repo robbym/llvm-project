@@ -381,11 +381,19 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // -Werror. ⚠ The PLACEMENT half of that behaviour -- a templated object with a written name and NO trigger
       // lands where no name was written (MISREAD-P T1-T3, T5, T18) -- is NOT modelled: a different answer where
       // both accept, the operator's.
-      // Two terms, each killed by its own mutant: the object's OWN kind (a class template's static member, a
-      // variable template), and its enclosing FUNCTION's. ⚠ No walk further out: clang marks a lambda's call
-      // operator, a local class's and a nested class's member inside an instantiation as instantiations
-      // themselves, so the enclosing function decides every static local asked -- a parent walk written first
-      // was never reached, and its mutant LIVED (MISREAD.mutants.txt, MR5).
+      // Two terms: the object's OWN kind (a class template's static member, a variable template, an explicit
+      // instantiation's member; AM24 drops it) and its enclosing FUNCTION's (AM43 drops it). ⚠ No walk further out:
+      // clang marks a lambda's call operator, a local class's and a nested class's member inside an instantiation as
+      // instantiations themselves, so the enclosing function decides every static local asked -- a parent walk
+      // written first was never reached, and its mutant LIVED (MISREAD.mutants.txt, MR5). Under the gate below, a
+      // static local reaches this warning only when clang makes it `weak` (getLLVMLinkageForDeclarator); any other
+      // linkage clang gives a static local under the vendor's flags is discardable (ASTContext's static-local GVA
+      // linkage, read; refK's probe). The vendor refuses a `weak` it applies itself to a static local ("weak
+      // declaration of 'x' must be public"; refI, trc APSV.expected.first addendum 19). It never applies one that
+      // `#pragma clang attribute` gives: it ignores the pragma, warns only -Wunknown-pragmas, gives no family
+      // warning, and under -Werror with -Wno-unknown-pragmas accepts (refJ, addenda 21 and 22). There this term keeps
+      // ours silent too, and accepting. The operator ruled it removed (addendum 18 R2) on the premise that no cell
+      // could kill it, and ruled it restored on refJ's witness (addendum 21).
       bool DspicInInstantiation = isTemplateInstantiation(VD->getTemplateSpecializationKind());
       if (const auto *FD = dyn_cast<FunctionDecl>(VD->getDeclContext()))
         DspicInInstantiation = DspicInInstantiation || FD->isTemplateInstantiation();
@@ -402,8 +410,8 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // warned for a FILE-SCOPE static a fold removes (APSV-N N-U-bss-fold-FS). The price, declared in apsv-compare.py
       // and misread-compare.py: a MISSING warning for every static local and every internal, inline or implicitly
       // instantiated object, at every level. The far side -- warn
-      // after optimization, for the objects that survive -- joins ITEM 11 (the vendor's warnings ours never gives),
-      // which carries the static-local discard warning's.
+      // after optimization, for the objects that survive -- joins the prep's ITEM on the vendor's warnings ours never
+      // gives (the SESSION 144 PREP's ITEM 12), which carries the static-local discard warning's.
       // ⛔ AND THE LINKAGE IS READ AS THE VENDOR'S C++ FRONT END -- GCC 8.3.1's -- READS IT, where the two differ (a third
       // refutation pass, trc steps/frontend/APSV.expected.first addendum 11: refC F1). A non-volatile const at
       // namespace scope that no namespace-scope declaration calls `extern` has internal linkage by C++'s own rule, and
@@ -533,8 +541,10 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // refuses the unit (a section type conflict). The third build took `noload` off here and so answered
       // DIFFERENTLY where both accept -- in 23 cells of refF's sample, 40 cell-levels (14 of those cells, 24 cell-levels,
       // where clang-s143b had matched the vendor exactly; refG) -- the safer answer, and one no rule of this project
-      // lets ours choose alone:
-      // a different answer where both accept is the operator's (FOR THE OPERATOR, with refF's executed witnesses).
+      // lets ours choose alone: a different answer where both accept is the operator's -- and for THIS road, after
+      // session 143, the operator ruled "do what the vendor does": ours keeps NEVER_LOAD here alone, as the vendor
+      // does (FOR THE OPERATOR 16; APSV.expected.first addendum 18 R1, read narrowly -- whether it reaches DOTNAME or
+      // a plain `noload` const is the operator's; refF's executed witnesses).
       // ⚠ What the strip was written for remains: `shared, noload` and then a LATER
       // `extern __attribute__((space(auto_psv)))`, which the vendor merges (ignoring noload, 0x5A) and clang's Sema
       // drops, the definition carrying no space() of its own ("attribute declaration must precede definition", at file
@@ -595,7 +605,8 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // diagnostic cc1 does not issue, on code it compiles.
         // trellis session 142 (ITEM 1): and never inside a template instantiation, where the vendor is
         // silent; since session 143, only where the gate says the object reaches output (DspicWarnHere, computed
-        // before this block) -- never for a static local, at any level (refD: this line still said "above -O0").
+        // before this block) -- never for a static local unless clang makes it `weak` (refI's W10, refJ's P9 and
+        // T2; refD: this line still said "above -O0").
         if (VD->isThisDeclarationADefinition() && DspicWarnHere &&
             (TrigReverse || TrigUnordered || TrigAutoPsv))
           M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
