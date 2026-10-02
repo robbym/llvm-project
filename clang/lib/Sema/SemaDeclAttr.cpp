@@ -6718,9 +6718,33 @@ static void handleDSPICSpaceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   // CodeGen does (clang/lib/CodeGen/Targets/DSPIC.cpp, the auto_psv ignore family): the strip always, its warning
   // under a gate that can tell an object that reaches output. This warning fired for an unreferenced or folded object
   // the vendor is silent on (trc steps/frontend/APSV-N.banked.txt, N-U-shared-*): a refusal under -Werror.
-  // ⚠ CodeGen keys on ours' reading of the space, the definition's FIRST space(); this branch fired on any
-  // space(auto_psv) written after `shared`, so `space(psv), shared, space(auto_psv)` now keeps `shared` where it was
-  // dropped -- the vendor, reading the LAST space, ignores it: the two-space class, carried (refD 3).
+  // ⚠ CodeGen keys on the vendor's reading of the space since session 144 -- the last distinct space of one
+  // declaration, gcc's merged list over several -- so `space(psv), shared, space(auto_psv)` loses `shared` there, as on
+  // the vendor (refD 3's two-space class, closed by the block below and SemaDecl.cpp's mergeDeclAttributes).
+  // ⛔ trellis session 144 (ITEM 1): TWO space() ATTRIBUTES ON ONE DECLARATION, AS THE VENDOR READS THEM. Its handler
+  // (pic30.c:21019-21029) looks up the space the declaration already carries -- the one it added LAST, gcc's
+  // decl_attributes prepending -- and at a different one warns "ignoring previous space attribute"; then
+  // decl_attributes adds this one EVEN WHEN AN EQUAL ONE IS ALREADY THERE: its duplicate test (attribs.c:746) is
+  // simple_cst_equal on two argument-list nodes, which is never 1 (tree.c: a TREE_LIST is tcc_exceptional, "-1, we
+  // don't know"), so only an attribute with NO argument is ever skipped. So the space written LAST is the one the
+  // vendor finds -- `space(psv), space(auto_psv), space(psv)` is psv (trc steps/frontend/APSV.expected.first addendum
+  // 27, the LB-T cell) -- and every space() here is added, and CodeGen reads the last (Targets/DSPIC.cpp,
+  // dspicVendorView). Ours kept both and read the FIRST: `space(psv), space(auto_psv), noload` put the object in its
+  // own psv section NEVER_LOAD where the vendor ignores noload in the shared `.const` (LATE-T.banked.txt).
+  // ⚠ Here AFTER the preserved/update conflict above, where the vendor warns before it: only a declaration writing
+  // preserved or update and two spaces tells the two orders apart -- not asked.
+  // ⛔ The eighth build: for a VARIABLE the warning is given where its own list is built (SemaDecl.cpp,
+  // dspicWrittenOwnList), in gcc's processing order among its WRITTEN spaces -- here it also saw a space clang slid
+  // from a type position and one `#pragma clang attribute` applies, which the vendor never puts on the declaration
+  // (refutation pass D's P2c, P2d, PR3, PR4: ours warned where the vendor is silent, a refusal under -Werror).
+  if (!isa<VarDecl>(D)) {
+    const DSPICSpaceAttr *DspicLast = nullptr;
+    for (const auto *P : D->specific_attrs<DSPICSpaceAttr>())
+      if (!P->isInherited())
+        DspicLast = P;
+    if (DspicLast && DspicLast->getSpace() != Space)
+      S.Diag(AL.getLoc(), diag::warn_dspic_space_previous_ignored);
+  }
   D->addAttr(::new (S.Context) DSPICSpaceAttr(S.Context, AL, Space));
 }
 

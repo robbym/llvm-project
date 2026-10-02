@@ -14413,8 +14413,11 @@ def warn_dspic_priority_range : Warning<
   "ignoring attribute">;
 def err_dspic_sfr_extern : Error<
   "sfr attribute requires extern storage class">;
+// trellis session 144 (ITEM 1): given by CodeGen on the final view, and in -Wattributes, as the vendor's
+// (pic30.c:22651, OPT_Wattributes): -Wno-attributes silences it there, and refused under -Werror here (FILLGROUP).
 def warn_dspic_fillupper_ignored : Warning<
-  "ignoring fillupper attribute applied to %0: it is not a program-memory object">;
+  "ignoring fillupper attribute applied to %0: it is not a program-memory object">,
+  InGroup<IgnoredAttributes>;
 def warn_dspic_unsafe_use : Warning<
   "%0 access is not safe to use within C">;
 def warn_dspic_unsupported_use : Warning<
@@ -14456,5 +14459,8 @@ def err_dspic_attr_refused : Error<
 // section 7: the refusal was landed on a premise about cc1 that no ask script had measured.
 def err_dspic_packed_write : Error<
   "invalid address space for destination">;
+// trellis session 144 (ITEM 1): the vendor's words, pic30.c:21029, for a second, different space() on one declaration.
+def warn_dspic_space_previous_ignored : Warning<"ignoring previous space attribute">,
+  InGroup<Attributes>;
 
 } // end of sema component.

@@ -36,6 +36,11 @@
 #include "llvm/ADT/StringSwitch.h"
 #include <optional>
 
+namespace clang {
+// trellis session 144 (ITEM 1): defined in Sema/SemaDecl.cpp, which reads the runs
+void dspicNoteGNUAttrRun(SourceLocation Attr, SourceLocation Run);
+} // namespace clang
+
 using namespace clang;
 
 //===----------------------------------------------------------------------===//
@@ -264,6 +269,13 @@ void Parser::ParseGNUAttributes(ParsedAttributes &Attrs,
     if (ExpectAndConsume(tok::r_paren))
       SkipUntil(tok::r_paren, StopAtSemi);
     EndLoc = Loc;
+    // ⛔ trellis session 144 (ITEM 1): every attribute of this `__attribute__` belongs to the RUN that began at
+    // StartLoc. This loop is gcc's c_parser_attributes loop -- consecutive `__attribute__` specifiers are one chain,
+    // any other token ends it, and a comment, a directive or a macro boundary is no token -- and Sema reads the run to
+    // put a dsPIC variable's own attribute list in gcc's order (dspicGNUAttrRun, SemaDecl.cpp).
+    if (getTargetInfo().getTriple().getArch() == llvm::Triple::dspic)
+      for (unsigned I = OldNumAttrs; I < Attrs.size(); ++I)
+        dspicNoteGNUAttrRun(Attrs[I].getLoc(), StartLoc);
 
     // If this was declared in a macro, attach the macro IdentifierInfo to the
     // parsed attribute.

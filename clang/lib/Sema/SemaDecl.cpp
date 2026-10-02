@@ -3139,6 +3139,19 @@ static void checkNewAttributesAfterDef(Sema &S, Decl *New, const Decl *Old) {
       }
     }
 
+    // ⛔ trellis session 144 (ITEM 1): a dsPIC variable's space, noload, persistent and shared written AFTER its
+    // definition are KEPT, and not warned: the vendor merges them in silence (merge_attributes; trc
+    // steps/frontend/LATE-L.banked.txt), and CodeGen reads them through the merged list mergeDeclAttributes keeps
+    // (DSPICMergedAttrs, kept here too). Dropped, `shared, noload` and a later space(auto_psv) left ours' shared
+    // `.const` NEVER_LOAD where the vendor ignores both. ⚠ Every other attribute keeps this drop and its warning, where
+    // the vendor merges it: a refusal under -Werror (pre-existing; the next prep's).
+    // The seventh build: fillupper too -- the vendor merges it and emits the merged list's first (refutation pass D's
+    // F2: written only after the definition, `.fillupper 0x12` on the vendor).
+    if (isa<VarDecl>(New) && isa<DSPICSpaceAttr, DSPICNoloadAttr, DSPICPersistentAttr, DSPICSharedAttr,
+                                 DSPICFillupperAttr, DSPICMergedAttrsAttr>(NewAttribute)) {
+      ++I;
+      continue;
+    }
     if (hasAttribute(Def, NewAttribute->getKind())) {
       ++I;
       continue; // regular attr merging will take care of validating this.
@@ -3288,8 +3301,656 @@ static void diagnoseMissingConstinit(Sema &S, const VarDecl *InitDecl,
   }
 }
 
+// ⛔ trellis session 144 (ITEM 1): THE VENDOR'S MERGED ATTRIBUTE LIST, for a dsPIC variable. The vendor merges a
+// variable's attributes over its declarations and reads the FIRST `space` of the result (pic30_build_prefix,
+// pic30.c:2543), then applies the auto_psv family to it (:2674, :2768-2826). gcc builds each declaration's list by
+// PREPENDING every attribute in the order it PROCESSES them -- the lists written after the declarator first, then the
+// declaration-specifier lists, the LAST-written first (c-decl.c:11122, c-parser.c:2094, cp/decl.c:5053), each list in
+// written order -- skipping a repeat only of one with NO argument (decl_attributes' test, attribs.c:746, is
+// simple_cst_equal on two argument lists, never 1); so the space in the FIRST-written specifier list wins (trc
+// steps/frontend/refs144/A/REFA-O.banked.txt: `__attribute__((space(auto_psv), noload)) const int a[2]
+// __attribute__((space(psv)))` is auto_psv). It merges two lists by merge_attributes (attribs.c:1423-1464, pic30 does
+// not override it): the older if it holds the newer, the newer if it holds the older, else the LONGER (the older at
+// equal length) with each of the other's missing attributes prepended -- the union, in an order that decides which
+// space comes first. Asked of the vendor over 115 cells, C and C++ (LATE-*.banked.txt): 214 cell-levels as read.
+// ⛔ THE SIXTH BUILD: a declaration's own list is read off what was WRITTEN -- the parsed attributes, at its
+// declarator (dspicWrittenOwnList) -- and counted as gcc counts it: an attribute gcc 8.3.1's tables do not hold is never
+// added ("attribute directive ignored": annotate, nodebug, retain, merge -- trc steps/frontend/LATE-GCCTAB.banked.txt,
+// LATE-GCCUNK.banked.txt), nor one its handler refuses here (mode, vector_size; `deprecated` with NO argument; `used`
+// on an object that is not TREE_STATIC; `externally_visible` on one that is not public; a weaker `aligned` after a
+// stronger one, C's `_Alignas` setting the alignment first, c-decl.c:7150-7154). Clang's SEMANTIC attributes count
+// differently -- they merge a repeated `visibility`, keep `annotate`, drop `no_reorder` -- and counting them misread
+// the merge (refutation pass C's G1-G5, R1, R2). The fifth build's chain test read the source text between two
+// attributes, which a comment, a directive or a `const` inside a macro misread (pass C's S cells): the chains are the
+// PARSER's runs now. A declaration created without a declarator (a template instantiation) keeps the fifth build's
+// reading of its semantic attributes (dspicOwnList), the runs read the same way.
+// ⛔ THE SEVENTH BUILD (refutation pass D, refs144/D): pic30's own attributes follow the general rule -- the vendor
+// refuses preserved, update, an odd address, priority(0), scratch_reg and strict_bitfield with a WARNING (pic30.c:
+// 20856-21595) and ours' Sema drops them likewise; a type-position attribute counts only where clang kept it on the
+// declaration; C++ chains its decl-specifier attributes in WRITTEN order (cp/parser.c:13516-13517).
+static std::string dspicAttrKey(const Attr *A, const PrintingPolicy &Policy) {
+  if (const auto *Sp = dyn_cast<DSPICSpaceAttr>(A))
+    return ("space(" + Sp->getSpace()->getName() + ")").str();
+  if (isa<DSPICNoloadAttr>(A))
+    return "noload";
+  if (isa<DSPICPersistentAttr>(A))
+    return "persistent";
+  if (isa<DSPICSharedAttr>(A))
+    return "shared";
+  std::string Key;
+  llvm::raw_string_ostream OS(Key);
+  A->printPretty(OS, Policy);
+  return OS.str();
+}
+
+// does the key name an attribute WITH an argument -- `space(X)`, `__attribute__((aligned(2)))`, `[[gnu::aligned(2)]]`
+static bool dspicKeyHasArgs(StringRef K) {
+  if (K.consume_front("__attribute__(("))
+    K.consume_back("))");
+  else if (K.consume_front("[["))
+    K.consume_back("]]");
+  return K.contains('(');
+}
+
+// THE PARSER'S RUNS. gcc's parser reads consecutive `__attribute__` specifiers as ONE chain, in written order
+// (c_parser_attributes' loop; the row's RA-D-apsv-then-data-2spec-F: `__attribute__((space(auto_psv)))
+// __attribute__((space(data)))` is data on the vendor), and ANY other token ends it -- a type keyword makes two
+// declaration specifiers (pass A's O3), and that keyword may come from a macro; a comment, a directive or a macro
+// boundary is no token and ends nothing (refutation pass C's S cells). Clang's ParseGNUAttributes has the same loop and
+// records each attribute's run here, keyed by the attribute's location (Parse/ParseDecl.cpp); Sema::Initialize clears
+// them for each translation unit. An attribute with no run -- not GNU, or not parsed -- is a chain of its own.
+static llvm::DenseMap<SourceLocation, SourceLocation> &dspicGNURuns() {
+  static llvm::DenseMap<SourceLocation, SourceLocation> Runs;
+  return Runs;
+}
+namespace clang {
+void dspicNoteGNUAttrRun(SourceLocation Attr, SourceLocation Run) { dspicGNURuns()[Attr] = Run; }
+void dspicClearGNUAttrRuns() { dspicGNURuns().clear(); }
+} // namespace clang
+static SourceLocation dspicGNUAttrRun(SourceLocation Attr) {
+  auto It = dspicGNURuns().find(Attr);
+  return It == dspicGNURuns().end() ? SourceLocation() : It->second;
+}
+
+// one declaration's own list, gcc's: its written attributes (`shared` is created implicit, and is written) in gcc's
+// processing order, each prepended, a repeat skipped only when it has no argument, gcc's refusals left out
+static SmallVector<std::string, 4> dspicOwnList(const Decl *D, ASTContext &Ctx) {
+  const SourceManager &SM = Ctx.getSourceManager();
+  SmallVector<const Attr *, 8> Own;
+  for (const Attr *A : D->attrs()) {
+    if (A->isInherited() || isa<DSPICMergedAttrsAttr>(A) || (A->isImplicit() && !isa<DSPICSharedAttr>(A)) ||
+        A->getLocation().isInvalid() || isa<NoDebugAttr, RetainAttr>(A))
+      continue;
+    if (const auto *DA = dyn_cast<DeprecatedAttr>(A); DA && DA->getMessage().empty())
+      continue;
+    if (const auto *AA = dyn_cast<AlignedAttr>(A); AA && AA->isC11())
+      continue;
+    // `used` on a declaration that is not a definition: gcc's handler adds it only to a static object (c-attribs.c,
+    // handle_used_attribute: `VAR_P (node) && TREE_STATIC (node)`), and clang drops it later, after this list is taken
+    // at the declarator (the row's SA-G5: counted, the merge chose the other space)
+    if (isa<UsedAttr>(A) && isa<VarDecl>(D) &&
+        cast<VarDecl>(D)->isThisDeclarationADefinition() == VarDecl::DeclarationOnly)
+      continue;
+    Own.push_back(A);
+  }
+  llvm::stable_sort(Own, [&](const Attr *X, const Attr *Y) {
+    return SM.isBeforeInTranslationUnit(X->getLocation(), Y->getLocation());
+  });
+  SourceLocation NameLoc = cast<NamedDecl>(D)->getLocation();
+  SmallVector<const Attr *, 8> Order;                       // the lists after the declarator, in written order
+  SmallVector<const Attr *, 4> Std;                         // C++'s `[[ ]]` before it: processed before the GNU ones
+  SmallVector<const Attr *, 4> DeclId;                      // C++'s `[[ ]]` after the name: processed LAST
+  SmallVector<SmallVector<const Attr *, 4>, 4> Prefix;       // the GNU specifier chains, in written order
+  SourceLocation PrefixRun;
+  for (const Attr *A : Own) {
+    bool After = SM.isBeforeInTranslationUnit(NameLoc, A->getLocation());
+    // the seventh build: C++ chains every decl-specifier attribute in WRITTEN order (cp/parser.c:13516-13517)
+    if (A->isStandardAttributeSyntax() || (Ctx.getLangOpts().CPlusPlus && !After)) {
+      (After ? DeclId : Std).push_back(A);
+      continue;
+    }
+    if (After) {
+      Order.push_back(A);
+      continue;
+    }
+    SourceLocation Run = dspicGNUAttrRun(A->getLocation());
+    if (Prefix.empty() || Run.isInvalid() || Run != PrefixRun)
+      Prefix.emplace_back();
+    PrefixRun = Run;
+    Prefix.back().push_back(A);
+  }
+  Order.append(Std.begin(), Std.end());
+  for (auto It = Prefix.rbegin(); It != Prefix.rend(); ++It)
+    Order.append(It->begin(), It->end());
+  Order.append(DeclId.begin(), DeclId.end());
+  SmallVector<std::string, 4> L;
+  unsigned MaxAlign = 0;
+  for (const Attr *A : Order) {
+    if (const auto *AA = dyn_cast<AlignedAttr>(A); AA && !AA->isAlignmentDependent()) {
+      unsigned Al = AA->getAlignment(Ctx);
+      if (Al < MaxAlign)
+        continue;
+      MaxAlign = std::max(MaxAlign, Al);
+    }
+    std::string K = dspicAttrKey(A, Ctx.getPrintingPolicy());
+    if (dspicKeyHasArgs(K) || !llvm::is_contained(L, K))
+      L.insert(L.begin(), K);
+  }
+  return L;
+}
+
+// the list is kept EVEN WHEN EMPTY: dropped, the next declaration read this one's OWN attributes in its place, so a C++
+// block-scope `extern` -- which passes an empty list on -- leaked its own into the merge (refutation pass C's G8, G9,
+// R3: the vendor merges it in neither order)
+static void dspicKeepList(ASTContext &Ctx, VarDecl *VD, ArrayRef<std::string> List) {
+  VD->dropAttr<DSPICMergedAttrsAttr>();
+  SmallVector<StringRef, 4> Refs(List.begin(), List.end());
+  VD->addAttr(DSPICMergedAttrsAttr::CreateImplicit(Ctx, Refs.data(), Refs.size()));
+}
+
+// gcc 8.3.1's attribute tables, read from its source (trc steps/frontend/LATE-GCCTAB.banked.txt: c-attribs.c's common
+// and format tables, pic30.c's, cp/tree.c's cxx and std tables): decl_attributes adds NO attribute these do not hold
+static bool dspicGccKnows(StringRef N, bool CPlusPlus) {
+  static const char *const Common[] = {
+      "packed", "nocommon", "common", "noreturn", "volatile", "stack_protect", "noinline", "noclone", "no_icf",
+      "noipa", "leaf", "always_inline", "gnu_inline", "artificial", "flatten", "used", "unused",
+      "externally_visible", "no_reorder", "const", "scalar_storage_order", "transparent_union", "constructor",
+      "destructor", "mode", "section", "aligned", "warn_if_not_aligned", "weak", "noplt", "ifunc", "alias",
+      "weakref", "no_instrument_function", "no_profile_instrument_function", "malloc", "returns_twice",
+      "no_stack_limit", "pure", "transaction_callable", "transaction_unsafe", "transaction_safe",
+      "transaction_safe_dynamic", "transaction_may_cancel_outer", "transaction_pure", "transaction_wrap",
+      "deprecated", "vector_size", "visibility", "tls_model", "nonnull", "nonstring", "nothrow", "may_alias",
+      "cleanup", "warn_unused_result", "sentinel", "alloc_size", "cold", "hot", "no_address_safety_analysis",
+      "no_sanitize", "no_sanitize_address", "no_sanitize_thread", "no_sanitize_undefined", "warning", "error",
+      "target", "target_clones", "optimize", "no_split_stack", "warn_unused", "returns_nonnull", "alloc_align",
+      "assume_aligned", "designated_init", "bnd_variable_size", "bnd_legacy", "bnd_instrument", "fallthrough",
+      "patchable_function_entry", "nocf_check", "format", "format_arg"};
+  for (const char *C : Common)
+    if (N == C)
+      return true;
+  if (CPlusPlus)
+    for (const char *C : {"init_priority", "abi_tag", "maybe_unused", "nodiscard"})
+      if (N == C)
+        return true;
+  return false;
+}
+
+// pic30.c's own table: each added by its handler wherever both compilers accept the program (a refusal is an error)
+static bool dspicPic30Name(StringRef N) {
+  for (const char *C :
+       {"user_init", "interrupt", "altirq", "irq", "save", "no_auto_psv", "auto_psv", "shadow", "sfr", "near", "far",
+        "eds", "space", "address", "unordered", "noload", "persistent", "reverse", "deprecated_definition", "unsafe",
+        "unsupported", "target_error", "boot", "secure", "scratch_reg", "fillupper", "page", "naked", "keep", "round",
+        "nocontext", "context", "shared", "preserved", "priority", "update", "xcdsc_obfuscate", "ramfunc",
+        "strict_bitfield"})
+    if (N == C)
+      return true;
+  return false;
+}
+
+// the name gcc's decl_attributes sees for a written attribute, or "" where it sees none: `__x__` is `x`; `[[gnu::x]]`
+// is `x`; an unscoped `[[x]]` only where gcc 8's C++ parser takes it (cp/parser.c: noreturn, deprecated and
+// fallthrough as GNU's, maybe_unused and nodiscard from its std table); C++ `alignas` is `aligned` (refutation pass
+// A's G15); C's `_Alignas` is no attribute to gcc -- it sets the alignment first (dspicWrittenOwnList)
+static std::string dspicGccName(const ParsedAttr &AL) {
+  if (AL.isAlignas())
+    return AL.isCXX11Attribute() ? "aligned" : "";
+  if (!AL.getAttrName())
+    return "";
+  StringRef N = AL.getAttrName()->getName();
+  if (N.size() > 4 && N.starts_with("__") && N.ends_with("__"))
+    N = N.drop_front(2).drop_back(2);
+  if (AL.isGNUAttribute())
+    return N.str();
+  if (!AL.isStandardAttributeSyntax())
+    return "";
+  if (const IdentifierInfo *Scope = AL.getScopeName())
+    return Scope->isStr("gnu") || Scope->isStr("__gnu__") ? N.str() : "";
+  for (const char *C : {"noreturn", "deprecated", "fallthrough", "maybe_unused", "nodiscard"})
+    if (N == C)
+      return N.str();
+  return "";
+}
+
+// a written attribute's key in the list: its name and its arguments by VALUE -- gcc's merge compares them so
+// (attribute_value_equal): an identifier by name, a string by its text, an integer by its value
+static std::string dspicParsedKey(const ParsedAttr &AL, StringRef Name, ASTContext &Ctx) {
+  std::string K = Name.str();
+  if (!AL.getNumArgs())
+    return K;
+  llvm::raw_string_ostream OS(K);
+  OS << "(";
+  for (unsigned I = 0; I < AL.getNumArgs(); ++I) {
+    if (I)
+      OS << ",";
+    if (AL.isArgIdent(I)) {
+      OS << AL.getArgAsIdent(I)->getIdentifierInfo()->getName();
+      continue;
+    }
+    if (!AL.isArgExpr(I) || !AL.getArgAsExpr(I))
+      continue;
+    const Expr *E = AL.getArgAsExpr(I)->IgnoreParenImpCasts();
+    if (const auto *SL = dyn_cast<StringLiteral>(E); SL && SL->getCharByteWidth() == 1) {
+      OS << '"' << SL->getString() << '"';
+      continue;
+    }
+    if (!E->isValueDependent() && !E->isTypeDependent())
+      if (std::optional<llvm::APSInt> V = E->getIntegerConstantExpr(Ctx)) {
+        OS << *V;                       // APSInt's operator<<: its value, signed as it is
+        continue;
+      }
+    E->printPretty(OS, nullptr, Ctx.getPrintingPolicy());
+  }
+  OS << ")";
+  return OS.str();
+}
+
+// clang's own attribute for a written one -- the one at its location on this declaration
+static const Attr *dspicKeptFor(const ParsedAttr &AL, const Decl *D) {
+  // an IMPLICIT attribute at the written one's location is its own (`shared`: handleDSPICSharedAttr creates it so)
+  for (const Attr *A : D->attrs())
+    if (!A->isInherited() && !isa<DSPICMergedAttrsAttr>(A) && A->getLocation() == AL.getLoc())
+      return A;
+  return nullptr;
+}
+
+// the tenth build: an attribute gcc NEVER puts in a variable's list -- the type_required ones of c-attribs.c's table
+// (applied to the TYPE, decl_attributes; read off the table: refutation pass E's B2, may_alias), and the handlers that
+// always set *no_add_attrs: mode, vector_size (the table's too) and the no_sanitize family (:690-772)
+static bool dspicGccNeverOnVar(StringRef N) {
+  for (const char *C : {"mode", "vector_size", "may_alias", "nonnull", "designated_init", "warn_unused_result",
+                        "sentinel", "alloc_size", "returns_nonnull", "alloc_align", "assume_aligned", "nocf_check",
+                        "transaction_callable", "transaction_unsafe", "transaction_safe", "transaction_may_cancel_outer",
+                        "transaction_pure", "no_sanitize", "no_sanitize_address", "no_sanitize_thread",
+                        "no_sanitize_undefined", "no_address_safety_analysis"})
+    if (N == C)
+      return true;
+  return false;
+}
+
+// the twelfth build: the attributes gcc's tables mark decl_required -- the only ones a type-position list passes on to
+// the declaration (decl_attributes with ATTR_FLAG_DECL_NEXT / _FUNCTION_NEXT / _ARRAY_NEXT; c-attribs.c's table and
+// pic30.c:1287-1371, read off them: trc steps/frontend/LATE-GCCTAB.banked.txt, refs144/F/REFF-src1, -src2)
+static bool dspicGccDeclRequired(StringRef N) {
+  for (const char *C :
+       {"nocommon", "common", "noreturn", "volatile", "stack_protect", "noinline", "noclone", "no_icf", "noipa", "leaf",
+        "always_inline", "gnu_inline", "artificial", "flatten", "used", "externally_visible", "no_reorder", "const",
+        "constructor", "destructor", "section", "weak", "noplt", "ifunc", "alias", "weakref", "no_instrument_function",
+        "no_profile_instrument_function", "malloc", "returns_twice", "no_stack_limit", "pure",
+        "transaction_safe_dynamic", "transaction_wrap", "tls_model", "nonstring", "nothrow", "cleanup", "cold", "hot",
+        "no_address_safety_analysis", "no_sanitize", "no_sanitize_address", "no_sanitize_thread",
+        "no_sanitize_undefined", "warning", "error", "target", "target_clones", "optimize", "no_split_stack",
+        "bnd_variable_size", "bnd_legacy", "bnd_instrument", "patchable_function_entry",
+        // pic30.c's
+        "altirq", "irq", "save", "sfr", "scratch_reg", "fillupper", "page", "naked", "keep", "round", "nocontext",
+        "context", "shared", "preserved", "priority", "update", "xcdsc_obfuscate"})
+    if (N == C)
+      return true;
+  return false;
+}
+
+// the tenth build: handle_nonstring_attribute accepts an array of, or a pointer to, a NARROW character type -- its
+// main variant char, signed char or unsigned char -- and on any other object warns and adds nothing (pass E's B3)
+static bool dspicNarrowCharArrayOrPointer(QualType T, ASTContext &Ctx) {
+  QualType E;
+  if (const auto *PT = T->getAs<PointerType>())
+    E = PT->getPointeeType();
+  else if (const ArrayType *AT = Ctx.getAsArrayType(T))
+    E = AT->getElementType();
+  else
+    return false;
+  return E.getCanonicalType().getUnqualifiedType()->isCharType();
+}
+
+// ⛔ ONE DECLARATION'S OWN LIST, READ OFF WHAT WAS WRITTEN (the sixth build; the later builds' corrections marked).
+// Every attribute the declarator carries, in gcc's processing order -- what a declarator chunk passes on FIRST
+// (returned_attrs, chained before the rest: c-decl.c's grokdeclarator, cp/decl.c:11710-11713); the GNU lists after the
+// name, in written order; then the decl-specifier attributes -- in C the `[[ ]]` ones and the GNU specifier chains (the
+// parser's runs) the last-written first, in C++ all of them in WRITTEN order (cp/parser.c:13516-13517: attr_chainon
+// appends; refutation pass D's Y1-Y4); a C++ `[[ ]]` list after the name LAST (the declarator-id's,
+// cp/decl.c:11718-11726) -- each one gcc ADDS prepended, a repeat skipped only when it has no argument.
+// gcc adds an attribute its tables hold, unless its handler refuses it here: mode, vector_size and the no_sanitize family
+// never (c-attribs.c: *no_add_attrs at entry, :690-772); `deprecated` only with an argument (:2979 -- `deprecated("")`
+// is added, pass C's G3); `used` only to a TREE_STATIC object (handle_used_attribute); `externally_visible` only to a
+// public one (handle_externally_visible_attribute -- a static data member is, and an anonymous namespace's object is
+// when the handler runs: cgraphunit.c:809-814 warns later); `no_reorder` always to a variable; any other -- pic30.c's
+// own among them, whose handlers refuse six with a warning (pass D's GB cells) -- wherever clang keeps it, or keeps one
+// of its name beside it, having dropped this one as an equal repeat; and a weaker `aligned` after a stronger one never,
+// C's `_Alignas` setting the alignment before any attribute is read (c-decl.c:7150-7154; pass C's G1, G1b).
+// ⛔ The thirteenth build: WHERE THE VARIABLE'S OWN TYPE CARRIES A SPACE, NONE OF THAT COUNTING HAPPENS. TARGET_INSERT_
+// ATTRIBUTES (pic30_set_default_decl_attributes, pic30.c:20293-20334) chains the type's space onto the list
+// decl_attributes was given and sets DECL_ATTRIBUTES to the WHOLE chain before its loop (pic30.c:20089-20111;
+// attribs.c:544-548), so every attribute then finds itself there and nothing is prepended or dropped (attribs.c:742-748):
+// the list is the raw chain -- every attribute gcc sees, unknown, refused and repeated ones included -- with the type's
+// space last, and the space handler compares each space with the chain's FIRST (pic30.c:21019-21029). In C++ only where
+// the chain is not empty: cplus_decl_attributes returns on an empty one (cp/decl2.c:1508-1511), and the type's space is
+// then never copied (refutation pass G's TS6, SP1, SP2, CX5: 0x00FF executed where the vendor reads 0x005A; the probe's
+// EC1-EC4).
+static SmallVector<std::string, 4> dspicWrittenOwnList(Sema &S, const Declarator &D, VarDecl *VD) {
+  ASTContext &Ctx = S.Context;
+  const SourceManager &SM = Ctx.getSourceManager();
+  bool CXX = S.getLangOpts().CPlusPlus;
+  SmallVector<std::pair<const ParsedAttr *, bool>, 8> All;     // each written attribute, and whether in a chunk
+  auto Take = [&](const ParsedAttributesView &L, bool Chunk) {
+    for (const ParsedAttr &AL : L)
+      if (AL.getLoc().isValid() &&
+          llvm::none_of(All, [&](const std::pair<const ParsedAttr *, bool> &P) { return P.first == &AL; }))
+        All.push_back({&AL, Chunk});
+  };
+  auto Before = [&](const ParsedAttr *X, const ParsedAttr *Y) {
+    return SM.isBeforeInTranslationUnit(X->getLoc(), Y->getLoc());
+  };
+  Take(D.getDeclarationAttributes(), false);
+  Take(D.getDeclSpec().getAttributes(), false);
+  // the fourteenth build: a C++ `[[ ]]` after a decl-specifier -- clang's DeclSpec list; one at the declaration's start
+  // is the declarator's own -- is the TYPE's to gcc (std_attributes, ignored: cp/parser.c:13488-13513, cp/decl.c:
+  // 11050-11056), never the chain (refutation pass H's B1, B1r, B1n: an unknown one chained, 0x00FF executed)
+  llvm::SmallPtrSet<const ParsedAttr *, 4> SpecStd;
+  if (CXX)
+    for (const ParsedAttr &AL : D.getDeclSpec().getAttributes())
+      if (AL.isStandardAttributeSyntax() && !AL.isAlignas() &&
+          llvm::none_of(D.getDeclarationAttributes(), [&](const ParsedAttr &X) { return &X == &AL; }))
+        SpecStd.insert(&AL);
+  for (unsigned I = 0, N = D.getNumTypeObjects(); I != N; ++I)
+    Take(D.getTypeObject(I).getAttrs(), true);
+  Take(D.getAttributes(), false);
+  llvm::stable_sort(All, [&](const std::pair<const ParsedAttr *, bool> &X,
+                             const std::pair<const ParsedAttr *, bool> &Y) { return Before(X.first, Y.first); });
+  // ⛔ the thirteenth build: GCC'S DECLARATOR WALK over the chunks' lists, the outermost first (chunk 0 is the one bound
+  // closest to the identifier) -- c-decl.c:6028-6047's cdk_attrs, cp/decl.c:11067-11080's list on a node. What a list
+  // sees inside it -- 0 the identifier (ATTR_FLAG_DECL_NEXT), 1 an array, 2 a function, 3 anything else -- skips
+  // parentheses, no declarator to gcc. At each GNU list the attributes passed on before it are RE-PROCESSED with its
+  // flags (chainon(returned_attrs, attrs)): a decl_required one dropped with a pointer inside ("does not apply to
+  // types", attribs.c:597-614; refutation pass G's RN, RP), any other applied to the type; then its own -- a
+  // decl_required one passed on with the identifier, an array or a function inside, else dropped; the FIRST space with
+  // the identifier inside the variable's own type's (a type takes a space only where it has none, pic30.c:21736-21766:
+  // pass G's TT); every other the type's. In C++ a list lands on the first non-parenthesis chunk inside it, and of two
+  // landing on one node the OUTER replaces the inner (cp_parser_declarator assigns, cp/parser.c:20008-20009: the probe's
+  // OW3); a `[[ ]]` list after an array bound is passed on unprocessed (cp/decl.c:11116-11122: pass G's CY1).
+  SmallVector<const ParsedAttr *, 4> Returned;
+  const ParsedAttr *OwnSpace = nullptr;
+  {
+    SmallVector<int, 4> Landed;               // C++: the nodes a list has landed on
+    for (unsigned I = D.getNumTypeObjects(); I-- > 0;) {
+      const DeclaratorChunk &C = D.getTypeObject(I);
+      int Inner = -1, Next = 0;
+      for (unsigned J = I; J-- > 0;)
+        if (D.getTypeObject(J).Kind != DeclaratorChunk::Paren) {
+          Inner = J;
+          Next = D.getTypeObject(J).Kind == DeclaratorChunk::Array      ? 1
+                 : D.getTypeObject(J).Kind == DeclaratorChunk::Function ? 2
+                                                                         : 3;
+          break;
+        }
+      SmallVector<const ParsedAttr *, 4> GNU;
+      for (const ParsedAttr &AL : C.getAttrs())
+        if (AL.getLoc().isValid() && AL.isGNUAttribute())
+          GNU.push_back(&AL);
+      llvm::stable_sort(GNU, Before);
+      if (!CXX) {
+        // the fourteenth build: a C pointer's qualifier list holding two attribute runs is ONE list, the last-written
+        // run first (c-decl.c:10017-10022, declspecs_add_attrs :11120-11122; refutation pass H's D1, D1n)
+        SmallVector<SmallVector<const ParsedAttr *, 2>, 2> Runs;
+        SourceLocation Prev;
+        for (const ParsedAttr *AL : GNU) {
+          SourceLocation Run = dspicGNUAttrRun(AL->getLoc());
+          if (Runs.empty() || Run.isInvalid() || Run != Prev)
+            Runs.emplace_back();
+          Prev = Run;
+          Runs.back().push_back(AL);
+        }
+        GNU.clear();
+        for (auto It = Runs.rbegin(); It != Runs.rend(); ++It)
+          GNU.append(It->begin(), It->end());
+      }
+      bool Replaced = CXX && llvm::is_contained(Landed, Inner);
+      if (!GNU.empty())
+        Landed.push_back(Inner);
+      if (!GNU.empty() && !Replaced) {
+        SmallVector<const ParsedAttr *, 4> Kept;
+        for (const ParsedAttr *P : Returned)
+          // the fourteenth build: a C++11 attribute on a type is ignored before the decl_required test, whatever
+          // the flags (attribs.c:583-595) -- an array-bound `[[ ]]` never survives a later list (pass H's A1-A3, E2)
+          if (!P->isCXX11Attribute() && dspicGccDeclRequired(dspicGccName(*P)) && Next <= 2)
+            Kept.push_back(P);
+        Returned = Kept;
+        for (const ParsedAttr *AL : GNU) {
+          std::string Name = dspicGccName(*AL);
+          if (dspicGccDeclRequired(Name)) {
+            if (Next <= 2)
+              Returned.push_back(AL);
+          } else if (Name == "space" && Next == 0 && !OwnSpace)
+            OwnSpace = AL;
+        }
+      }
+      if (CXX && C.Kind == DeclaratorChunk::Array)
+        for (const ParsedAttr &AL : C.getAttrs())
+          if (AL.getLoc().isValid() && AL.isCXX11Attribute() && !AL.isAlignas())
+            Returned.push_back(&AL);
+    }
+  }
+  // gcc's TREE_STATIC, DECL_EXTERNAL and TREE_PUBLIC for THIS declaration, as its handlers see them -- DECL_EXTERNAL the
+  // declarator's own: no definition (an unbraced extern "C" one has none, pass D's V1) and no initializer to come
+  bool External = VD->isThisDeclarationADefinition() == VarDecl::DeclarationOnly && !D.hasInitializer();
+  bool TreeStatic = VD->isStaticDataMember() || (VD->hasGlobalStorage() && !External);   // cp/decl.c:9236
+  bool TreePublic = VD->isStaticDataMember() ||
+                    (VD->hasGlobalStorage() && !VD->isStaticLocal() && VD->getStorageClass() != SC_Static);
+  if (TreePublic && !VD->isStaticDataMember() && CXX && VD->getDeclContext()->getRedeclContext()->isFileContext() &&
+      VD->getType().isConstQualified() && !VD->getType().isVolatileQualified() && !VD->isInline() &&
+      VD->getStorageClass() != SC_Extern) {
+    bool Unbraced = false;
+    for (const DeclContext *DC = VD->getLexicalDeclContext(); DC; DC = DC->getLexicalParent())
+      if (const auto *LS = dyn_cast<LinkageSpecDecl>(DC))
+        Unbraced = Unbraced || !LS->hasBraces();
+    TreePublic = Unbraced;                    // a namespace-scope const is internal to GCC's C++ unless `extern`
+  }
+  unsigned MaxAlign = 0;
+  for (const auto &[AL, Chunk] : All)
+    if (AL->isAlignas() && !AL->isCXX11Attribute())
+      if (const auto *AA = dyn_cast_or_null<AlignedAttr>(dspicKeptFor(*AL, VD)); AA && !AA->isAlignmentDependent())
+        MaxAlign = std::max(MaxAlign, AA->getAlignment(Ctx));
+  SourceLocation NameLoc = VD->getLocation();
+  // each attribute gcc's chain holds: its name, whether the counting rules add it, and whether it is a space gcc's
+  // handler sees and does not add (the eleventh build: read for the warning, neither added nor made the last one)
+  struct DspicEntry {
+    const ParsedAttr *AL;
+    std::string Name;
+    bool Counted, SeenOnly;
+  };
+  SmallVector<DspicEntry, 8> First, Post, Spec, DeclId;
+  SmallVector<SmallVector<DspicEntry, 4>, 4> Prefix;
+  SourceLocation PrefixRun;
+  for (const auto &[AL, Chunk] : All) {
+    if (AL == OwnSpace)
+      continue;                                // the own type's: copied last, below, or never
+    if (Chunk && !llvm::is_contained(Returned, AL))
+      continue;                                // the type's, dropped, or replaced (the walk above)
+    if (SpecStd.count(AL))
+      continue;                                // a C++ `[[ ]]` after a decl-specifier: the type's (the fourteenth)
+    std::string Name = dspicGccName(*AL);
+    bool Known = !Name.empty() && (dspicGccKnows(Name, CXX) || dspicPic30Name(Name));
+    if (Name.empty() && CXX && AL->isCXX11Attribute() && !AL->isAlignas() && AL->getAttrName()) {
+      // the thirteenth build: a C++ `[[ ]]` attribute gcc's front end keeps in the chain though no table holds it --
+      // an unknown one, another namespace's ("directive ignored"; the probe's EC4)
+      StringRef N = AL->getAttrName()->getName();
+      if (N.size() > 4 && N.starts_with("__") && N.ends_with("__"))
+        N = N.drop_front(2).drop_back(2);
+      Name = N.str();
+    }
+    if (Name.empty())
+      continue;                                // gcc sees no attribute (C's `_Alignas`)
+    bool Adds;
+    const ParsedAttr *ThisAL = AL;
+    if (!Known)
+      Adds = false;
+    else if (dspicGccNeverOnVar(Name))
+      Adds = false;
+    else if (Name == "nonstring")
+      Adds = dspicNarrowCharArrayOrPointer(VD->getType(), Ctx);
+    else if (Name == "used")
+      Adds = TreeStatic;
+    else if (Name == "externally_visible")
+      Adds = TreePublic;
+    else if (Name == "no_reorder")
+      Adds = true;
+    else if (Name == "deprecated" && !AL->getNumArgs())
+      Adds = false;
+    else
+      // the tenth build: or clang kept an EQUAL one -- an equal repeat it merged (pass C's G2: visibility twice) -- and
+      // never one merely of the same name (pass E's A4: an odd address beside an even one; B4x: a dropped space)
+      Adds = dspicKeptFor(*AL, VD) ||
+             llvm::any_of(All, [&](const std::pair<const ParsedAttr *, bool> &P) {
+               return P.first != ThisAL && dspicGccName(*P.first) == Name && dspicKeptFor(*P.first, VD) &&
+                      dspicParsedKey(*P.first, Name, Ctx) == dspicParsedKey(*ThisAL, Name, Ctx);
+             });
+    DspicEntry E{AL, Name, Adds, !Adds && Name == "space"};
+    bool After = SM.isBeforeInTranslationUnit(NameLoc, AL->getLoc());
+    if (Chunk) {                               // passed on (returned_attrs)
+      First.push_back(E);
+      continue;
+    }
+    if (AL->isStandardAttributeSyntax() && After) {
+      DeclId.push_back(E);
+      continue;
+    }
+    if (After) {
+      Post.push_back(E);
+      continue;
+    }
+    if (CXX || AL->isStandardAttributeSyntax()) {
+      Spec.push_back(E);
+      continue;
+    }
+    SourceLocation Run = dspicGNUAttrRun(AL->getLoc());
+    if (Prefix.empty() || Run.isInvalid() || Run != PrefixRun)
+      Prefix.emplace_back();
+    PrefixRun = Run;
+    Prefix.back().push_back(E);
+  }
+  SmallVector<DspicEntry, 8> Order(First.begin(), First.end());
+  // the fourteenth build: a C++ member declaration chains its specifier attributes BEFORE its postfix ones
+  // (cp/parser.c:23937, attr_chainon(prefix_attributes, attributes), grokfield passing them on); start_decl the postfix
+  // first (cp/decl.c:5053) -- refutation pass H's B2, T5, B2n (0x00FF executed), B3, B3n
+  // the fifteenth build: NOT a member template -- cp_parser_init_declarator gives grokfield the postfix list first
+  // (cp/parser.c:19848-19851; refutation pass I's N1: 0x00FF executed on the fourteenth alone)
+  bool DspicMember = CXX && D.getContext() == DeclaratorContext::Member && !VD->getDescribedVarTemplate();
+  if (DspicMember)
+    Order.append(Spec.begin(), Spec.end());
+  Order.append(Post.begin(), Post.end());
+  if (!DspicMember)
+    Order.append(Spec.begin(), Spec.end());
+  for (auto It = Prefix.rbegin(); It != Prefix.rend(); ++It)
+    Order.append(It->begin(), It->end());
+  Order.append(DeclId.begin(), DeclId.end());
+  SmallVector<std::string, 4> L;
+  bool WarnsOnSpace = VD->hasGlobalStorage() || External;
+  // ⛔ the thirteenth build: the own type's space copied -- the RAW chain, every entry in processing order and the type's
+  // space last; each space warns where it differs from the chain's first (the handler's lookup finds the first)
+  if (OwnSpace && (!CXX || !Order.empty())) {
+    Order.push_back(DspicEntry{OwnSpace, "space", true, false});
+    // the fifteenth build: a C++ member declaration (not a member template) CUTS its chain after the specifier list once
+    // grokfield returns (cp/parser.c:24058-24065) -- with a specifier AND a postfix list the raw list is [passed-on...,
+    // specifier...], the postfix, the declarator-id `[[ ]]` and the type's space lost (refutation pass I's R1, R4:
+    // 0x00FF executed on every build). The warnings are given first, over the whole chain.
+    size_t DspicKept = (DspicMember && !Spec.empty() && !Post.empty()) ? First.size() + Spec.size() : Order.size();
+    std::string DspicFirstSpace;
+    for (size_t DspicAt = 0; DspicAt < Order.size(); ++DspicAt) {
+      const DspicEntry &E = Order[DspicAt];
+      std::string K = dspicParsedKey(*E.AL, E.Name, Ctx);
+      if (DspicAt < DspicKept)
+        L.push_back(K);
+      if (E.Name == "space" && WarnsOnSpace) {
+        if (DspicFirstSpace.empty())
+          DspicFirstSpace = K;
+        else if (K != DspicFirstSpace)
+          S.Diag(E.AL->getLoc(), diag::warn_dspic_space_previous_ignored);
+      }
+    }
+    return L;
+  }
+  // ⛔ the eighth build: "ignoring previous space attribute" (pic30.c:21019-21029) as gcc gives it -- at a space that
+  // differs from the space counted before it, in this order, a type-position one never (gcc does not put it on the
+  // declaration: refutation pass D's P2c, P2d), nor one `#pragma clang attribute` applies (no declarator writes it)
+  std::string DspicLastSpace;
+  for (const DspicEntry &E : Order) {
+    if (!E.Counted && !E.SeenOnly)
+      continue;
+    const ParsedAttr *AL = E.AL;
+    const std::string &Name = E.Name;
+    // the eleventh build: a space the handler sees and then drops (the preserved / update conflict, which ours' Sema
+    // drops too) is read for the warning -- gcc warns before it drops -- and neither added nor made the last one
+    if (Name == "space" && (VD->hasGlobalStorage() || External)) {
+      std::string K = dspicParsedKey(*AL, Name, Ctx);
+      if (!DspicLastSpace.empty() && DspicLastSpace != K)
+        S.Diag(AL->getLoc(), diag::warn_dspic_space_previous_ignored);
+      if (!E.SeenOnly)
+        DspicLastSpace = K;
+    }
+    if (E.SeenOnly)
+      continue;
+    if (Name == "aligned")
+      if (const auto *AA = dyn_cast_or_null<AlignedAttr>(dspicKeptFor(*AL, VD)); AA && !AA->isAlignmentDependent()) {
+        // the tenth build: an argument-free `aligned` is gcc's BIGGEST_ALIGNMENT, BITS_PER_WORD = 16 on pic30
+        // (pic30.h:761) -- clang's default is the target's widest, 128 (refutation pass E's A1, B6)
+        unsigned Al = (AL->getNumArgs() || AL->hasParsedType()) ? AA->getAlignment(Ctx) : 16;
+        if (Al < MaxAlign)
+          continue;
+        MaxAlign = std::max(MaxAlign, Al);
+      }
+    std::string K = dspicParsedKey(*AL, Name, Ctx);
+    if (dspicKeyHasArgs(K) || !llvm::is_contained(L, K))
+      L.insert(L.begin(), K);
+  }
+  return L;
+}
+
+// merge_attributes (attribs.c:1423-1464)
+static SmallVector<std::string, 4> dspicMergeLists(ArrayRef<std::string> A1, ArrayRef<std::string> A2) {
+  auto Holds = [](ArrayRef<std::string> L1, ArrayRef<std::string> L2) {
+    return llvm::all_of(L2, [&](const std::string &X) { return llvm::is_contained(L1, X); });
+  };
+  if (A1.empty())
+    return SmallVector<std::string, 4>(A2.begin(), A2.end());
+  if (A2.empty() || Holds(A1, A2))
+    return SmallVector<std::string, 4>(A1.begin(), A1.end());
+  if (Holds(A2, A1))
+    return SmallVector<std::string, 4>(A2.begin(), A2.end());
+  bool NewerLonger = A1.size() < A2.size();
+  ArrayRef<std::string> Kept = NewerLonger ? A2 : A1, Other = NewerLonger ? A1 : A2;
+  SmallVector<std::string, 4> R(Kept.begin(), Kept.end());
+  for (const std::string &X : Other)
+    if (!llvm::is_contained(R, X))
+      R.insert(R.begin(), X);
+  return R;
+}
+
 void Sema::mergeDeclAttributes(NamedDecl *New, Decl *Old,
                                AvailabilityMergeKind AMK) {
+  // ⛔ trellis session 144 (ITEM 1): the merged list, FIRST -- before anything below inherits Old's attributes onto
+  // New or drops New's after a definition -- kept on New for CodeGen (DSPICMergedAttrs). New's own list was kept on it
+  // as its declarator was processed (ActOnVariableDeclarator); the declaration before it holds its own or its merged
+  // one. A C++ block-scope `extern` contributes nothing and passes the list on unchanged: GCC 8's C++ front end merges
+  // it with the namespace-scope object in neither order (LATE-C CF-B2, CF-B4).
+  if (auto *DspicNew = dyn_cast<VarDecl>(New);
+      DspicNew && isa<VarDecl>(Old) &&
+      Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic) {
+    auto ListOf = [&](const VarDecl *VD) {
+      SmallVector<std::string, 4> L;
+      if (const auto *MA = VD->getAttr<DSPICMergedAttrsAttr>())
+        for (StringRef E : MA->entries())
+          L.push_back(E.str());
+      else
+        L = dspicOwnList(VD, Context);
+      return L;
+    };
+    const VarDecl *DspicPrev = cast<VarDecl>(Old)->getMostRecentDecl();
+    SmallVector<std::string, 4> DspicList;
+    if (!(getLangOpts().CPlusPlus && DspicPrev->isLocalExternDecl() && !DspicPrev->getPreviousDecl()))
+      DspicList = ListOf(DspicPrev);
+    if (!(getLangOpts().CPlusPlus && DspicNew->isLocalExternDecl()))
+      DspicList = dspicMergeLists(DspicList, ListOf(DspicNew));
+    dspicKeepList(Context, DspicNew, DspicList);
+  }
   if (UsedAttr *OldAttr = Old->getMostRecentDecl()->getAttr<UsedAttr>()) {
     UsedAttr *NewAttr = OldAttr->clone(Context);
     NewAttr->setInherited(true);
@@ -8312,6 +8973,11 @@ NamedDecl *Sema::ActOnVariableDeclarator(
 
   // Handle attributes prior to checking for duplicates in MergeVarDecl
   ProcessDeclAttributes(S, NewVD, D);
+  // ⛔ trellis session 144 (ITEM 1): a dsPIC variable keeps its own attribute list, gcc's -- read off what the
+  // declarator WROTE (dspicWrittenOwnList, above mergeDeclAttributes) -- from its declarator on: CodeGen reads it, and
+  // mergeDeclAttributes merges it with the declaration before.
+  if (Context.getTargetInfo().getTriple().getArch() == llvm::Triple::dspic)
+    dspicKeepList(Context, NewVD, dspicWrittenOwnList(*this, D, NewVD));
 
   if (getLangOpts().HLSL)
     HLSL().ActOnVariableDeclarator(NewVD);
@@ -15468,20 +16134,15 @@ void Sema::FinalizeDeclaration(Decl *ThisDecl) {
 
   // trellis session 109: dsPIC definition-site rules, once every attribute of the declaration is
   // present. deprecated_definition warns at the DEFINITION (cc1 at emission: "'X' definition has
-  // been deprecated: m"); fillupper on anything but a program-memory object warns and is dropped
-  // (cc1: "Ignoring fillupper attribute applied to 'X'").
+  // been deprecated: m").
   if (VD->isThisDeclarationADefinition() == VarDecl::Definition)
     if (const auto *DD = VD->getAttr<DSPICDeprecatedDefinitionAttr>())
       Diag(VD->getLocation(), diag::warn_dspic_deprecated_definition) << VD << DD->getMessage();
-  if (VD->hasAttr<DSPICFillupperAttr>()) {
-    const auto *SA = VD->getAttr<DSPICSpaceAttr>();
-    bool Prog = (SA && SA->getSpace()->isStr("prog")) ||
-                VD->getType().getAddressSpace() == LangAS::FirstTargetAddressSpace;
-    if (!Prog) {
-      Diag(VD->getLocation(), diag::warn_dspic_fillupper_ignored) << VD;
-      VD->dropAttr<DSPICFillupperAttr>();
-    }
-  }
+  // ⛔ trellis session 144 (ITEM 1): fillupper is NOT decided here -- CodeGen decides it on the variable's FINAL view
+  // (Targets/DSPIC.cpp), as the vendor does at emission (pic30_emit_fillupper, pic30.c:22633: the section's flags, read
+  // from the merged list). Decided here at the definition, a later declaration moving the space left `.fillupper` on a
+  // data object our assembler refuses (trc steps/frontend/refs144/C/REFC-FU.banked.txt), and the rule dropped it where a
+  // later space(prog) made the object program memory on the vendor (refs144/B's F9).
 
   // Emit any deferred warnings for the variable's initializer, even if the
   // variable is invalid

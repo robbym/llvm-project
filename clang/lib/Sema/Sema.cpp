@@ -373,7 +373,13 @@ void Sema::addImplicitTypedef(StringRef Name, QualType T) {
     PushOnScopeChains(Context.buildImplicitTypedef(T, Name), TUScope);
 }
 
+namespace clang {
+// trellis session 144 (ITEM 1): defined in SemaDecl.cpp -- the parser's GNU attribute runs, one translation unit's
+void dspicClearGNUAttrRuns();
+} // namespace clang
+
 void Sema::Initialize() {
+  dspicClearGNUAttrRuns();
   // Create BuiltinVaListDecl *before* ExternalSemaSource::InitializeSema(this)
   // because during initialization ASTReader can emit globals that require
   // name mangling. And the name mangling uses BuiltinVaListDecl.

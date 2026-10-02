@@ -2581,6 +2581,17 @@ def DSPICShared : InheritableAttr {
   let SemaHandler = 0;
   let Documentation = [InternalOnly];
 }
+// trellis session 144 (ITEM 1): THE VENDOR'S MERGED ATTRIBUTE LIST over a variable's declarations, in gcc's order
+// (merge_attributes, attribs.c:1423-1464): `space(X)`, `noload`, `persistent`, `shared`, every other attribute by its
+// printed form. Sema::mergeDeclAttributes keeps it on each redeclaration; CodeGen (Targets/DSPIC.cpp) reads the space
+// the vendor finds -- the first -- and the auto_psv family off the most recent declaration's. An Attr, not an
+// InheritableAttr, so mergeDeclAttributes never copies it forward: each declaration's is computed.
+def DSPICMergedAttrs : Attr {
+  let Spellings = [];
+  let Args = [VariadicStringArgument<"Entries">];
+  let SemaHandler = 0;
+  let Documentation = [InternalOnly];
+}
 // trellis session 110: `eds` LEAVES the refused set and becomes its own attribute. The guide
 // (DS-50003589D 7.7.1) states __attribute__((eds)) is equivalent to __attribute__((space(eds))),
 // and the operator's rule is that any program xc-dsc compiles must work here.

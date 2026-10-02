@@ -33,6 +33,7 @@
 // trellis session 127: the address-over-rides-near warning is emitted from CodeGen, as
 // upstream AArch64.cpp emits its own; this is the header that route needs.
 #include "clang/Basic/DiagnosticFrontend.h"
+#include "clang/Basic/DiagnosticSema.h" // trellis session 144: warn_dspic_fillupper_ignored, given here now
 #include "llvm/ADT/StringExtras.h"
 
 using namespace clang;
@@ -153,6 +154,27 @@ class DSPICTargetCodeGenInfo : public TargetCodeGenInfo {
 public:
   DSPICTargetCodeGenInfo(CodeGenTypes &CGT)
       : TargetCodeGenInfo(std::make_unique<DSPICABIInfo>(CGT)) {}
+  // ⛔ trellis session 144 (ITEM 1): A VARIABLE'S dsPIC FACTS ARE FINAL ONLY AT THE END OF THE TRANSLATION UNIT. C,
+  // and C++ at file scope, emit a strong definition as it is parsed, and the vendor merges a declaration written AFTER
+  // it (trc steps/frontend/LATE-L.banked.txt). So each variable is recorded with the most recent declaration it saw,
+  // emitTargetGlobals re-derives one a later declaration reached, and every warning of the variable path is given
+  // there, once, from the final view -- a definition-time view could warn for a space a later declaration replaces
+  // (`space(auto_psv), shared` and then `extern __attribute__((space(data)))`: the vendor is silent, and a warning
+  // given at the definition would refuse the unit under -Werror). ⚠ The price, measured: a unit an UNRECOVERABLE error
+  // stops before its end gives none of the three -- where the vendor warns `name` and then refuses, ours gives the
+  // error alone (trc steps/frontend/APSV.expected.first addendum 26: six of the row's cells, RA-S-plainobj-first-sy+b/d/x
+  // and RB-R4-noload/persist/reverse64-F, a section-type conflict clang raises during CodeGen); a warning -Werror makes
+  // an error is recoverable, and the three are given (refutation pass B, W7). A variable is re-derived only when its
+  // view CHANGED, from the declaration it was recorded with: an attribute-free later declaration that completes an
+  // array's type must not move a declaration-only object from far to near (pass B, X3).
+  struct DspicSeen {
+    const VarDecl *VD;
+    std::string View;
+  };
+  mutable llvm::MapVector<const VarDecl *, DspicSeen> DspicVars;
+  mutable llvm::MapVector<const VarDecl *, SmallVector<std::function<void(DiagnosticsEngine &)>, 1>>
+      DspicWarnings;
+  void emitTargetGlobals(CodeGen::CodeGenModule &CGM) const override;
   void setTargetAttributes(const Decl *D, llvm::GlobalValue *GV,
                            CodeGen::CodeGenModule &M) const override;
   // ⛔ trellis session 139: the two ABI facts the backend's `__c30_signature` is made of --
@@ -177,6 +199,63 @@ public:
 
 } // namespace
 
+// ⛔ trellis session 144 (ITEM 1): THE VENDOR'S VIEW OF A VARIABLE -- the space it finds and the auto_psv family --
+// read off the merged list Sema keeps on the most recent declaration (DSPICMergedAttrs: SemaDecl.cpp,
+// mergeDeclAttributes, says how it is built). With one declaration there is no list and its own attributes are read:
+// its LAST space, which SemaDeclAttr.cpp's handleDSPICSpaceAttr makes the vendor's. `Space` is a space() attribute
+// written somewhere among the declarations whose space is that one, so the code below reads it as it read the
+// definition's first.
+namespace {
+struct DspicVendorView {
+  const DSPICSpaceAttr *Space = nullptr;
+  bool Noload = false, Persistent = false, Shared = false;
+  std::optional<unsigned> Fill;     // the seventh build: the merged list's first fillupper (the vendor's lookup)
+};
+} // namespace
+static DspicVendorView dspicVendorView(const VarDecl *VD) {
+  DspicVendorView V;
+  const auto *MA = VD->getMostRecentDecl()->getAttr<DSPICMergedAttrsAttr>();
+  if (!MA) {
+    for (const auto *Sp : VD->specific_attrs<DSPICSpaceAttr>())
+      V.Space = Sp;
+    V.Noload = VD->hasAttr<DSPICNoloadAttr>();
+    V.Persistent = VD->hasAttr<DSPICPersistentAttr>();
+    V.Shared = VD->hasAttr<DSPICSharedAttr>();
+    if (const auto *FA = VD->getAttr<DSPICFillupperAttr>())
+      V.Fill = FA->getValue();
+    return V;
+  }
+  StringRef Name;
+  for (StringRef E : MA->entries()) {
+    if (Name.empty() && E.starts_with("space(") && E.ends_with(")"))
+      Name = E.drop_front(6).drop_back(1);
+    // a fillupper entry is `fillupper(N)`, N its value in decimal (SemaDecl.cpp, dspicParsedKey)
+    // the tenth build: an entry whose NAME is fillupper -- not one whose string argument holds the text
+    // (refutation pass E's F1-F8: `deprecated("fillupper(34)")` was read as one); a fallback list prints it whole
+    if (StringRef FE = E; !V.Fill && (FE.consume_front("fillupper(") ||
+                                      (FE.consume_front("__attribute__((") && FE.consume_front("fillupper(")))) {
+      unsigned Val;
+      if (!FE.take_until([](char C) { return C == ')'; }).getAsInteger(10, Val))
+        V.Fill = Val;
+    }
+    V.Noload = V.Noload || E == "noload";
+    V.Persistent = V.Persistent || E == "persistent";
+    V.Shared = V.Shared || E == "shared";
+  }
+  if (!Name.empty())
+    for (const VarDecl *R : VD->redecls())
+      for (const auto *Sp : R->specific_attrs<DSPICSpaceAttr>())
+        if (!V.Space && Sp->getSpace()->getName() == Name)
+          V.Space = Sp;
+  return V;
+}
+
+// the view as a key: what the record compares at the end of the unit
+static std::string dspicViewKey(const DspicVendorView &V) {
+  return (V.Space ? V.Space->getSpace()->getName().str() : std::string("-")) + (V.Noload ? "|N" : "|") +
+         (V.Persistent ? "P" : "") + (V.Shared ? "S" : "") + (V.Fill ? "|F" + std::to_string(*V.Fill) : "");
+}
+
 // `__attribute__((interrupt))` reaches the backend as the string attribute
 // "interrupt" (plus noinline); what the backend does with it is L1d's (BACKEND-PLAN.md),
 // and until then it is carried and ignored.
@@ -191,6 +270,21 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
   // the record.
   if (const auto *VD = dyn_cast<VarDecl>(D)) {
     if (auto *GVar = dyn_cast<llvm::GlobalVariable>(GV)) {
+      // ⛔ trellis session 144 (ITEM 1): the vendor's view, and the record emitTargetGlobals re-reads (the class says
+      // why). A declaration's call after the definition's does not replace the definition's record.
+      const DspicVendorView DspicView = dspicVendorView(VD);
+      const VarDecl *DspicCanon = VD->getCanonicalDecl();
+      {
+        auto DspicIt = DspicVars.find(DspicCanon);
+        if (VD->isThisDeclarationADefinition() || DspicIt == DspicVars.end() ||
+            !DspicIt->second.VD->isThisDeclarationADefinition()) {
+          DspicVars[DspicCanon] = {VD, dspicViewKey(DspicView)};
+          DspicWarnings[DspicCanon].clear();
+        }
+      }
+      auto DspicWarnLater = [this, DspicCanon](std::function<void(DiagnosticsEngine &)> W) {
+        DspicWarnings[DspicCanon].push_back(std::move(W));
+      };
       // trellis session 98: an `sfr` object sits at a silicon-fixed address in SFR space,
       // which IS near space -- pic30.c:4923, "it is also marked NEAR", and pic30.c builds
       // its own SFR refs with PIC30_NEAR_FLAG. The data model has no say over it, so this
@@ -246,6 +340,19 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         GVar->addAttribute("dspic-noload");
       if (const auto *AA = VD->getAttr<DSPICAddressAttr>())
         GVar->addAttribute("dspic-address", std::to_string(AA->getAddr()));
+      // ⛔ trellis session 144 (ITEM 1): THE SPACE AND THE FAMILY ARE THE VENDOR'S VIEW'S (dspicVendorView), written over
+      // what the chain above read off the definition alone -- its FIRST space and its own and earlier declarations'
+      // flags; the statements there stay as written (models/model-edit.py's text).
+      GVar->setAttributes(GVar->getAttributes()
+                              .removeAttribute(GVar->getContext(), "dspic-space")
+                              .removeAttribute(GVar->getContext(), "dspic-persistent")
+                              .removeAttribute(GVar->getContext(), "dspic-noload"));
+      if (const auto *SA = DspicView.Space)
+        GVar->addAttribute("dspic-space", SA->getSpace()->getName());
+      if (DspicView.Persistent)
+        GVar->addAttribute("dspic-persistent");
+      if (DspicView.Noload)
+        GVar->addAttribute("dspic-noload");
       // trellis session 109: the placement attributes, each one pic30 section attribute in the
       // TLOF (DSPICTargetMachine.cpp pic30Attrs), each measured from cc1 (var.cc1.s).
       if (VD->hasAttr<DSPICKeepAttr>())
@@ -256,7 +363,7 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         GVar->addAttribute("dspic-preserved");
       if (VD->hasAttr<DSPICUpdateAttr>())
         GVar->addAttribute("dspic-update");
-      if (VD->hasAttr<DSPICSharedAttr>()) {
+      if (DspicView.Shared) {       // trellis session 144: from the vendor's view
         GVar->addAttribute("dspic-shared");
         // A const in program memory keeps the SHARED `.const`: the vendor's
         // `.const,psv,page,shared` (ATTR1A V28). Its space is named here -- space(auto_psv), the
@@ -272,8 +379,7 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         GVar->addAttribute("dspic-unordered");
       if (const auto *PA = VD->getAttr<DSPICPriorityAttr>())
         GVar->addAttribute("dspic-priority", std::to_string(PA->getLevel()));
-      if (const auto *FA = VD->getAttr<DSPICFillupperAttr>())
-        GVar->addAttribute("dspic-fillupper", std::to_string(FA->getValue()));
+      // trellis session 144 (ITEM 1): `dspic-fillupper` is decided on the vendor's view, below (after DspicWarnHere).
       if (const auto *SA = VD->getAttr<DSPICSfrAttr>())
         if (SA->getAddr() != 0)
           GVar->addAttribute("dspic-sfr-address", std::to_string(SA->getAddr()));
@@ -291,7 +397,7 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // third my withdrawal of a right one on a form that pins nothing.
       if (const auto *RA = VD->getAttr<DSPICReverseAttr>())
         GVar->addAttribute("dspic-reverse", std::to_string(RA->getAlign()));
-      const auto *SpA = VD->getAttr<DSPICSpaceAttr>();
+      const auto *SpA = DspicView.Space;       // trellis session 144: the vendor's space, not the first written
       // trellis session 110: an EDS object, by either spelling. It is FAR (cc1 emits `bss,eds`
       // with no `near`, measured at all three memory models), and it carries `page` exactly when
       // the object cannot straddle a 32K boundary -- by the rule FITTED from cc1 in
@@ -337,9 +443,12 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // cc1 warns only when `near` was WRITTEN; the data model's default is silent. Emitted from
       // CodeGen as upstream AArch64.cpp does, and guarded on the definition so a declaration of
       // the same object does not report it twice.
+      // trellis session 144: given at the end of the translation unit (the class's record, F1 in late-edit.py).
       if (AddrOutsideNear && VD->hasAttr<DSPICNearAttr>() &&
           VD->isThisDeclarationADefinition())
-        M.getDiags().Report(VD->getLocation(), diag::warn_dspic_address_overrides_near) << VD;
+        DspicWarnLater([VD](DiagnosticsEngine &DE) {
+          DE.Report(VD->getLocation(), diag::warn_dspic_address_overrides_near) << VD;
+        });
       ForcedFar = ForcedFar || AddrOutsideNear;
       if (ForcedFar) {
         GVar->setAttributes(GVar->getAttributes().removeAttribute(GVar->getContext(), "near"));
@@ -456,34 +565,38 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         }
       }
       bool DspicReachesOutput = !GVar->isDiscardableIfUnused() && !DspicGccInternal;
-      // ⛔ AND ONLY WHEN THE OBJECT'S SPACE IS NOT IN DOUBT. With two space() attributes on one declaration the vendor
-      // takes the LAST ("ignoring previous space attribute"); over redeclarations it MERGES the lists (GCC's
-      // merge_attributes, attribs.c:1423-1464, which pic30 does not override): the longer list is kept and the other's
-      // missing attributes are put in front of it, so the space of the declaration with FEWER attributes is the one
-      // found, and at equal lengths the later declaration's (corrected after refutation, refC F3: "the earliest
-      // declaration's" was wrong). Ours reads the definition's first (VD->getAttr). Where they differ the vendor may
-      // not treat the object as auto_psv
-      // at all: after `extern __attribute__((space(data))) const int a[2];` a space(auto_psv) definition named
-      // "sy,data" is accepted in silence (addendum 7, D-redecl-data-then-apsv-F), and ours warned that the name was
-      // ignored -- a refusal under -Werror. So when ours reads auto_psv, every space() written on every declaration
-      // must say auto_psv too, or ours gives none of these warnings: a MISSING warning, never an extra one -- over the
-      // declarations it SEES. ⚠ Which those are turns on when CodeGen runs: C, and C++ at file scope, emit a strong
-      // definition as it is parsed, so a space() on a LATER declaration is not seen here, and the vendor merges it --
-      // after a `space(auto_psv), shared` definition, `extern __attribute__((space(data)))` makes the vendor place `a`
-      // in data, -Werror-clean, where ours warns: a refusal under -Werror, pre-existing (clang-s142's Sema warned too;
-      // refD 1), carried with the later-declaration class. Inside a namespace or a braced linkage spec CodeGen runs at
-      // the closing brace and sees it -- Sema keeps a later attribute of a kind the definition already carries
-      // (SemaDecl.cpp, checkNewAttributesAfterDef) -- and these warnings go silent. So this scan, unlike the linkage
-      // scan above, reads every declaration: here seeing more can only silence. ⚠ The PLACEMENT under two spaces stays
-      // ours' own reading,
-      // the first -- a difference that predates this row, carried; and it misreads silently where the first space
-      // is psv and the vendor's auto_psv (RB-C-psv-then-autopsv-noload: ours' `.const.a` NEVER_LOAD, refD).
-      bool DspicSpaceAgrees = true;
-      if (SpA && SpA->getSpace()->isStr("auto_psv"))
-        for (const VarDecl *R : VD->redecls())
-          for (const auto *SpR : R->specific_attrs<DSPICSpaceAttr>())
-            DspicSpaceAgrees = DspicSpaceAgrees && SpR->getSpace()->isStr("auto_psv");
-      bool DspicWarnHere = !DspicInInstantiation && DspicReachesOutput && DspicSpaceAgrees;
+      // ⛔ trellis session 144 (ITEM 1): THE SPACE IS THE VENDOR'S NOW, SO IT IS NEVER IN DOUBT. Session 143 gated these
+      // warnings on every space() of every declaration saying auto_psv (DspicSpaceAgrees), because ours read the
+      // definition's FIRST space and the vendor the last of one declaration and gcc's merged order over several: after
+      // `extern __attribute__((space(data))) const int a[2];` a space(auto_psv) definition named "sy,data" is accepted
+      // in silence by the vendor (addendum 7, D-redecl-data-then-apsv-F) -- the shorter declaration's space, data, is
+      // first. SpA is the vendor's own space since session 144 (dspicVendorView), so the agreement would only silence
+      // warnings the vendor gives -- `extern __attribute__((space(psv), noload))` before a space(auto_psv) definition:
+      // the vendor's space is auto_psv and it warns noload (trc steps/frontend/LATE-P.banked.txt, P11) -- and it is
+      // removed. A later declaration is seen too: the class records the view and re-derives it at the end of the unit.
+      bool DspicWarnHere = !DspicInInstantiation && DspicReachesOutput;
+      // ⛔ trellis session 144 (ITEM 1): FILLUPPER ON THE FINAL VIEW, as the vendor decides it at emission
+      // (pic30_emit_fillupper, pic30.c:22633-22670): a definition whose section is code -- its space prog, or a type in
+      // program memory -- gets `.fillupper`; any other is ignored with the vendor's -Wattributes warning, where it
+      // reaches output, given at the end of the unit with the rest. Sema decided it at the definition, so a later
+      // declaration moving the space left `.fillupper` on a data object our assembler refuses (trc steps/frontend/
+      // refs144/C/REFC-FU.banked.txt) and dropped it where a later space(prog) made the object program memory
+      // (refs144/B's F9). A declaration never carries it: the AsmPrinter switches to the object's section first, and
+      // on a declaration that asserted (refs144/C/REFC-crash.banked.txt; the vendor accepts).
+      // The seventh build: the value and the presence are the merged list's (the view's Fill; refutation pass D's F1,
+      // F1b, F2).
+      if (DspicView.Fill && !GVar->isDeclaration()) {
+        if ((DspicView.Space && DspicView.Space->getSpace()->isStr("prog")) ||
+            VD->getType().getAddressSpace() == LangAS::FirstTargetAddressSpace)
+        {
+          if (*DspicView.Fill)                 // the tenth build: fillupper(0) writes no line (pic30_emit_fillupper)
+            GVar->addAttribute("dspic-fillupper", std::to_string(*DspicView.Fill));
+        }
+        else if (VD->isThisDeclarationADefinition() && DspicWarnHere)
+          DspicWarnLater([VD](DiagnosticsEngine &DE) {
+            DE.Report(VD->getLocation(), diag::warn_dspic_fillupper_ignored) << VD;
+          });
+      }
       // ⛔ trellis session 143 (ITEM 1): THE auto_psv IGNORE FAMILY. For an object whose OWN written space is auto_psv --
       // pic30.c:2674's `auto_psv` is the space attribute, not the const default and not the auto_psv this file names
       // above for a `shared` const -- the vendor IGNORES `shared`, `noload` and `persistent`, each with "%D Ignoring <x>
@@ -509,12 +622,13 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         for (unsigned K = 0; K != 3; ++K)
           if (GVar->hasAttribute(DspicIgnored[K])) {
             GVar->setAttributes(GVar->getAttributes().removeAttribute(GVar->getContext(), DspicIgnored[K]));
-            if (VD->isThisDeclarationADefinition() && DspicReachesOutput && DspicSpaceAgrees) {
+            if (VD->isThisDeclarationADefinition() && DspicReachesOutput) {
               std::string DspicShown;
               llvm::raw_string_ostream DspicOS(DspicShown);
               VD->getNameForDiagnostic(DspicOS, M.getContext().getPrintingPolicy(), /*Qualified=*/true);
-              M.getDiags().Report(VD->getLocation(), diag::warn_dspic_auto_psv_ignores)
-                  << DspicOS.str() << K << VD->getName();
+              DspicWarnLater([VD, DspicName = DspicOS.str(), K](DiagnosticsEngine &DE) {
+                DE.Report(VD->getLocation(), diag::warn_dspic_auto_psv_ignores) << DspicName << K << VD->getName();
+              });
             }
           }
         // A discarded name's tokens go with it: every token the vendor accepts lands in `.const,psv,page` for an
@@ -542,14 +656,13 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
       // DIFFERENTLY where both accept -- in 23 cells of refF's sample, 40 cell-levels (14 of those cells, 24 cell-levels,
       // where clang-s143b had matched the vendor exactly; refG) -- the safer answer, and one no rule of this project
       // lets ours choose alone: a different answer where both accept is the operator's -- and for THIS road, after
-      // session 143, the operator ruled "do what the vendor does": ours keeps NEVER_LOAD here alone, as the vendor
+      // session 143, the operator ruled "do what vendor does": ours keeps NEVER_LOAD here alone, as the vendor
       // does (FOR THE OPERATOR 16; APSV.expected.first addendum 18 R1, read narrowly -- whether it reaches DOTNAME or
       // a plain `noload` const is the operator's; refF's executed witnesses).
-      // ⚠ What the strip was written for remains: `shared, noload` and then a LATER
+      // What the strip was written for is closed since session 144: `shared, noload` and then a LATER
       // `extern __attribute__((space(auto_psv)))`, which the vendor merges (ignoring noload, 0x5A) and clang's Sema
-      // drops, the definition carrying no space() of its own ("attribute declaration must precede definition", at file
-      // scope and inside a namespace alike; refG) -- ours' shared `.const` NEVER_LOAD, 0x00FF: the later-declaration
-      // class, carried to the next prep.
+      // dropped ("attribute declaration must precede definition") -- ours' shared `.const` NEVER_LOAD, 0x00FF. Sema now
+      // keeps the later space() and the merged list, the view reads auto_psv, and the family above takes noload off.
       // ⛔ trellis session 128: THREE ATTRIBUTES MAKE cc1 IGNORE A WRITTEN SECTION NAME, and
       // ours honoured it in silence -- so the object landed somewhere the vendor compiler would
       // not have put it, with no word from the compiler, the assembler or the linker. The set is
@@ -607,9 +720,12 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
         // silent; since session 143, only where the gate says the object reaches output (DspicWarnHere, computed
         // before this block) -- never for a static local unless clang makes it `weak` (refI's W10, refJ's P9 and
         // T2; refD: this line still said "above -O0").
+        // trellis session 144: given at the end of the translation unit (the class's record).
         if (VD->isThisDeclarationADefinition() && DspicWarnHere &&
             (TrigReverse || TrigUnordered || TrigAutoPsv))
-          M.getDiags().Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
+          DspicWarnLater([VD](DiagnosticsEngine &DE) {
+            DE.Report(VD->getLocation(), diag::warn_dspic_section_name_ignored) << VD;
+          });
         // trellis session 129 (ITEM 0), TWO CORRECTIONS, both found by a refutation pass sent at
         // the LANDED DIFF rather than at a claim -- the first pass ever aimed at this code -- and
         // both REPRODUCED here against the row's own banked pre-row binary before being recorded.
@@ -767,6 +883,37 @@ void DSPICTargetCodeGenInfo::setTargetAttributes(
   // entry block, ahead of the callee-saved pushes, which is where cc1 puts it.
   if (!IA->getPreprologue().empty())
     F->addFnAttr("dspic-preprologue", IA->getPreprologue());
+}
+
+// ⛔ trellis session 144 (ITEM 1): THE END OF THE TRANSLATION UNIT. A recorded variable whose view -- the space and
+// the family, read off the most recent declaration's list -- is not the one its record saw was reached by a later
+// declaration: its dsPIC attributes -- every "dspic-*" one, and "near" / "far", the only keys setTargetAttributes
+// writes on a variable -- are cleared and derived again, from the declaration it was recorded with (its type stays the
+// one CodeGen used; refutation pass B's X3). A static local has no later declaration. Then every recorded warning is
+// given, once, in the order the variables were first seen.
+void DSPICTargetCodeGenInfo::emitTargetGlobals(CodeGen::CodeGenModule &CGM) const {
+  SmallVector<const VarDecl *, 4> Redo;
+  for (const auto &E : DspicVars)
+    if (!E.second.VD->isStaticLocal() && dspicViewKey(dspicVendorView(E.second.VD)) != E.second.View)
+      Redo.push_back(E.first);
+  for (const VarDecl *Canon : Redo) {
+    const VarDecl *Use = DspicVars[Canon].VD;
+    auto *GVar =
+        dyn_cast_or_null<llvm::GlobalVariable>(CGM.GetGlobalValue(CGM.getMangledName(GlobalDecl(Use))));
+    if (!GVar)
+      continue;
+    llvm::AttributeSet AS = GVar->getAttributes();
+    for (const llvm::Attribute &A : GVar->getAttributes())
+      if (A.isStringAttribute() && (A.getKindAsString().starts_with("dspic-") ||
+                                    A.getKindAsString() == "near" || A.getKindAsString() == "far"))
+        AS = AS.removeAttribute(GVar->getContext(), A.getKindAsString());
+    GVar->setAttributes(AS);
+    setTargetAttributes(Use, GVar, CGM);
+  }
+  for (auto &E : DspicWarnings)
+    for (auto &W : E.second)
+      W(CGM.getDiags());
+  DspicWarnings.clear();
 }
 
 std::unique_ptr<TargetCodeGenInfo>
